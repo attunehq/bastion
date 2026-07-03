@@ -13,7 +13,7 @@ use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use color_eyre::eyre::{Context, Result, eyre};
+use color_eyre::eyre::{Context, Result, bail, eyre};
 
 use crate::config::Config;
 use crate::context::ReviewContext;
@@ -29,13 +29,51 @@ use crate::skills;
 use crate::store;
 use crate::verdict::{Decision, Money};
 
+/// What a `bastion review` invocation asked for, beyond where to run it.
+///
+/// Parsed at the CLI boundary and handed to [`review`] whole, so the handler's
+/// signature does not grow a parameter per flag.
+#[derive(Debug, Default)]
+pub struct ReviewOptions {
+    /// Base branch the changeset is computed against.
+    pub base: String,
+    /// Output format.
+    pub format: Format,
+    /// The pull request the review runs against, when any (`--repo`/`--pr`).
+    pub github: Option<GithubSource>,
+    /// Restrict the run to these triggered reviewers (`--reviewer`, repeatable).
+    /// Empty means the full triggered set. A non-empty selection that excludes
+    /// a triggered reviewer makes the run *partial*: it persists and renders as
+    /// partial and is never sealed, so a filtered green cannot be presented (or
+    /// attested) as a full green.
+    pub only: Vec<String>,
+    /// Disable carrying prior passes forward (`--fresh`): every triggered
+    /// reviewer executes even when its trigger-scoped diff is unchanged since
+    /// the branch's previous run ([`crate::carry`]).
+    pub fresh: bool,
+}
+
 /// `bastion review`: route and run the triggered reviewers, gating the result.
 ///
-/// Computes the changed files against `base`, selects matching reviewers, emits a
-/// `run.started` plan, and hands off to the runner to execute them concurrently.
-/// With zero matches the run is a trivial pass (mirroring the always-present
-/// `bastion` check in CI). Returns the aggregate [`Decision`] so the caller can
-/// map `block` to a non-zero exit status.
+/// Computes the changed files against `options.base`, selects matching
+/// reviewers, emits a `run.started` plan, and hands off to the runner to execute
+/// them concurrently. With zero matches the run is a trivial pass (mirroring the
+/// always-present `bastion` check in CI). Returns the aggregate [`Decision`] so
+/// the caller can map `block` to a non-zero exit status.
+///
+/// A run also plans *carry* ([`crate::carry`]): a reviewer whose prior run on this
+/// branch passed, and whose trigger-scoped diff digest is unchanged, folds that
+/// pass forward instead of executing, so a fix-and-re-review loop re-runs only the
+/// reviewers whose scoped content actually changed. This holds on both surfaces. A
+/// CI run carries from its own branch's previous CI run the same way a local run
+/// does: the run seal (verified under this binary's embedded secret) plus the
+/// content-binding digest already prove the carried verdict is a real review of
+/// exactly this content, which is all carry's soundness needs. Carry and
+/// attestation replay are complementary rather than alternatives: replay reuses the
+/// *author's* signed local run (crossing from their machine into CI), carry reuses
+/// CI's *own* prior run. `--fresh` disables carry; an explicit `--reviewer`
+/// selection also executes its reviewers fresh (asking for a reviewer by name means
+/// asking for it to run).
 ///
 /// The runner owns event emission for the per-reviewer and completion events and
 /// persists the full run; this handler renders the `run.started` event and the
@@ -50,23 +88,30 @@ use crate::verdict::{Decision, Money};
 /// reviewer in both files is deduplicated and a same-name collision keeps both with
 /// the repo side scoped (see [`Config::discover_merged`]).
 ///
-/// `github` carries the `owner/name` slug and PR number when the review runs against a
-/// pull request, so the reviewers get its description and discussion as context. It is
-/// best effort: a failure to reach GitHub is logged and the review proceeds on the
-/// local context (commit messages and prior findings) alone.
+/// `options.github` carries the `owner/name` slug and PR number when the review runs
+/// against a pull request, so the reviewers get its description and discussion as
+/// context. It is best effort: a failure to reach GitHub is logged and the review
+/// proceeds on the local context (commit messages and prior findings) alone.
 ///
 /// # Errors
 ///
-/// Returns an error if the repository, config, git queries, or persistence fail.
+/// Returns an error if the repository, config, git queries, or persistence fail,
+/// or if `options.only` names a reviewer that is not in the triggered set.
 /// A blocked review is *not* an error: it returns `Ok(Decision::Block)`.
 pub async fn review(
     layout: &Layout,
     cwd: &Path,
-    base: &str,
-    format: Format,
-    github: Option<GithubSource>,
+    options: ReviewOptions,
     user_dir: Option<&Path>,
 ) -> Result<Decision> {
+    let ReviewOptions {
+        base,
+        format,
+        github,
+        only,
+        fresh,
+    } = options;
+    let base = base.as_str();
     let repo_root = git::repo_root(cwd)?;
     warn_on_stale_skills(&repo_root);
     let branch = git::current_branch(&repo_root)?;
@@ -75,7 +120,11 @@ pub async fn review(
     let changed = git::changed_files(&repo_root, base)?;
 
     let router = Router::compile(&config.reviewers)?;
-    let matched = router.matched(&changed);
+    let triggered = router.matched(&changed);
+    let matched = select_reviewers(&triggered, &config.reviewers, &only)?;
+    // Partial means coverage was actually reduced: selecting every triggered
+    // reviewer by name is still a full run.
+    let partial = matched.len() < triggered.len();
     let run = local_run_id(&repo_root);
     let reviewer_refs: Vec<ReviewerRef> = matched
         .iter()
@@ -90,6 +139,7 @@ pub async fn review(
     let mut out = stdout.lock();
 
     let started = RunEvent::RunStarted {
+        partial,
         run: run.clone(),
         branch: branch.clone(),
         base: base.to_string(),
@@ -102,6 +152,7 @@ pub async fn review(
         // No reviewer triggered: a trivial, honest pass. Persist it so the run is
         // inspectable afterward, exactly like an executed run.
         let completed = RunEvent::RunCompleted {
+            partial: false,
             run: run.clone(),
             verdict: Decision::Pass,
             gates: crate::event::Gates {
@@ -256,6 +307,87 @@ pub async fn review(
         None => (std::collections::BTreeMap::new(), None, None, matched),
     };
 
+    // Trigger-scoped digests for everything about to run, stamped onto each
+    // resolved event so the *next* run can decide whether to carry it. Best
+    // effort: a digest that fails to compute only leaves that reviewer
+    // executing fresh and uncarryable, never fails the review.
+    let mut scope_digests: std::collections::BTreeMap<String, String> = Default::default();
+    let mut digest_probe: Option<runner::DigestProbe> = None;
+    match git::merge_base(&repo_root, base) {
+        Ok(merge_base) => {
+            for reviewer in &matched {
+                match crate::carry::scope_digest(&repo_root, base, &merge_base, reviewer, &changed)
+                {
+                    Ok(digest) => {
+                        scope_digests.insert(reviewer.name.clone(), digest);
+                    }
+                    Err(err) => tracing::warn!(
+                        reviewer = %reviewer.name,
+                        error = %err,
+                        "could not compute a scope digest; the reviewer executes fresh and cannot be carried from"
+                    ),
+                }
+            }
+            // The runner re-derives every stamped digest after the reviewers
+            // finish, so a tree that changed mid-run cannot leave a stale
+            // digest behind for a later run to carry from.
+            digest_probe = Some(runner::DigestProbe {
+                base: base.to_string(),
+                merge_base,
+            });
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "could not resolve a merge base; no scope digests this run");
+        }
+    }
+
+    // Carry prior passes forward ([`crate::carry`]): both locally and in CI, a
+    // reviewer whose prior run on this branch passed and whose trigger-scoped
+    // digest is unchanged folds that pass forward instead of executing. A
+    // repository reviewer carries only from a prior run whose seal verifies (under
+    // this binary's embedded secret) and records no test seam, so a restored CI run
+    // store cannot smuggle in a fabricated pass: the seal proves the prior run was a
+    // real review by this release, and the digest binds the content that verdict
+    // judged. A reviewer already replayed from an attestation above is not a carry
+    // candidate (it is no longer in `matched`). Carry runs only for the full
+    // triggered set (an explicit `--reviewer` selection asks for those reviewers to
+    // run) and only unless `--fresh` opted out.
+    let carried = if !fresh && only.is_empty() {
+        let candidates: Vec<(&crate::reviewer::Reviewer, String)> = matched
+            .iter()
+            .filter_map(|r| {
+                scope_digests
+                    .get(&r.name)
+                    .map(|digest| (*r, digest.clone()))
+            })
+            .collect();
+        crate::carry::plan(
+            layout,
+            &branch,
+            &candidates,
+            &repo_attestation.reviewers,
+            crate::seal::embedded_secret(),
+        )
+    } else {
+        Default::default()
+    };
+    let matched: Vec<&crate::reviewer::Reviewer> = matched
+        .into_iter()
+        .filter(|r| !carried.contains_key(&r.name))
+        .collect();
+    if !carried.is_empty() {
+        let names: Vec<&str> = carried.keys().map(String::as_str).collect();
+        // Fallible on purpose: a closed stderr must not panic the gate out of
+        // an otherwise valid review.
+        let _ = writeln!(
+            io::stderr(),
+            "bastion review: {} reviewer(s) carried forward from this branch's previous run \
+             (trigger-scoped diff unchanged): {}; pass --fresh to re-run everything",
+            carried.len(),
+            names.join(", "),
+        );
+    }
+
     let ctx = ExecContext {
         run,
         repo_root,
@@ -268,6 +400,10 @@ pub async fn review(
         dirty,
         replayed,
         attestation,
+        partial,
+        carried,
+        scope_digests,
+        digest_probe,
         attestation_fallback,
     };
 
@@ -290,6 +426,74 @@ pub async fn review(
     }
 
     Ok(aggregate)
+}
+
+/// Narrow the triggered set to an explicit `--reviewer` selection.
+///
+/// With no selection the full triggered set passes through untouched.
+/// Otherwise every requested name must be a *triggered* reviewer: a name that
+/// is not in the registry at all, or one whose trigger did not match this
+/// changeset, is a usage error, not a silent no-op, because a re-run loop that
+/// typos a name must not quietly run nothing and report green. The result
+/// keeps registry order and deduplicates repeated names.
+///
+/// # Errors
+///
+/// Returns an error naming every unknown and every untriggered requested name,
+/// plus the names that *did* trigger, so the fix is one glance away.
+fn select_reviewers<'a>(
+    triggered: &[&'a crate::reviewer::Reviewer],
+    all: &[crate::reviewer::Reviewer],
+    only: &[String],
+) -> Result<Vec<&'a crate::reviewer::Reviewer>> {
+    if only.is_empty() {
+        return Ok(triggered.to_vec());
+    }
+
+    let requested: std::collections::BTreeSet<&str> = only.iter().map(String::as_str).collect();
+    let mut unknown = Vec::new();
+    let mut untriggered = Vec::new();
+    for name in &requested {
+        if triggered.iter().any(|r| r.name == *name) {
+            continue;
+        }
+        if all.iter().any(|r| r.name == *name) {
+            untriggered.push(*name);
+        } else {
+            unknown.push(*name);
+        }
+    }
+    if !unknown.is_empty() || !untriggered.is_empty() {
+        let mut problems = Vec::new();
+        if !unknown.is_empty() {
+            problems.push(format!(
+                "not in the reviewer registry: {}",
+                unknown.join(", ")
+            ));
+        }
+        if !untriggered.is_empty() {
+            problems.push(format!(
+                "in the registry but not triggered by this changeset: {}",
+                untriggered.join(", ")
+            ));
+        }
+        let triggered_names: Vec<&str> = triggered.iter().map(|r| r.name.as_str()).collect();
+        bail!(
+            "--reviewer named reviewers that cannot run ({}); triggered reviewers: {}",
+            problems.join("; "),
+            if triggered_names.is_empty() {
+                "none".to_string()
+            } else {
+                triggered_names.join(", ")
+            },
+        );
+    }
+
+    Ok(triggered
+        .iter()
+        .copied()
+        .filter(|r| requested.contains(r.name.as_str()))
+        .collect())
 }
 
 /// Attempt to verify and plan an attestation replay for a CI run.
@@ -1155,7 +1359,12 @@ mod tests {
         std::fs::write(dir.join("main.rs"), "fn main() {}\n").unwrap();
 
         let layout = Layout::with_root(data.path().to_path_buf());
-        let decision = review(&layout, dir, "main", Format::Jsonl, None, None)
+        let options = ReviewOptions {
+            base: "main".into(),
+            format: Format::Jsonl,
+            ..Default::default()
+        };
+        let decision = review(&layout, dir, options, None)
             .await
             .expect("zero-match review passes");
         assert_eq!(decision, Decision::Pass);
@@ -1165,6 +1374,76 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].verdict, Some(Decision::Pass));
         assert_eq!(runs[0].reviewers, 0);
+    }
+
+    fn named_reviewer(name: &str) -> crate::reviewer::Reviewer {
+        crate::reviewer::Reviewer {
+            name: name.into(),
+            trigger: vec!["**".into()],
+            mode: Mode::Gate,
+            backend: crate::reviewer::Backend::ClaudeCode,
+            model: None,
+            effort: None,
+            timeout: None,
+            runner: None,
+            env: Default::default(),
+            capabilities: Default::default(),
+            inputs: Default::default(),
+            attestation: None,
+            prompt: "p".into(),
+        }
+    }
+
+    #[test]
+    fn select_reviewers_passes_the_full_set_through_without_a_selection() {
+        let all = vec![named_reviewer("a"), named_reviewer("b")];
+        let triggered: Vec<&crate::reviewer::Reviewer> = all.iter().collect();
+        let selected = select_reviewers(&triggered, &all, &[]).unwrap();
+        assert_eq!(selected.len(), 2);
+    }
+
+    #[test]
+    fn select_reviewers_narrows_deduplicates_and_keeps_registry_order() {
+        let all = vec![
+            named_reviewer("a"),
+            named_reviewer("b"),
+            named_reviewer("c"),
+        ];
+        let triggered: Vec<&crate::reviewer::Reviewer> = all.iter().collect();
+        let selected = select_reviewers(
+            &triggered,
+            &all,
+            &["c".to_string(), "a".to_string(), "c".to_string()],
+        )
+        .unwrap();
+        let names: Vec<&str> = selected.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["a", "c"], "registry order, duplicates collapsed");
+    }
+
+    #[test]
+    fn select_reviewers_rejects_unknown_and_untriggered_names() {
+        let all = vec![named_reviewer("a"), named_reviewer("b")];
+        // Only `a` triggered; `b` exists but did not match the changeset.
+        let triggered: Vec<&crate::reviewer::Reviewer> = all[..1].iter().collect();
+        let err = select_reviewers(
+            &triggered,
+            &all,
+            &["b".to_string(), "typo".to_string(), "a".to_string()],
+        )
+        .unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("not in the reviewer registry: typo"),
+            "got: {message}"
+        );
+        assert!(
+            message.contains("not triggered by this changeset: b"),
+            "got: {message}"
+        );
+        assert!(
+            message.contains("triggered reviewers: a"),
+            "the fix should be one glance away, got: {message}"
+        );
     }
 
     /// A minimal repository whose HEAD carries a note under `NOTES_REF`, for

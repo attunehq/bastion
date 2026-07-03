@@ -10,9 +10,10 @@ order: 6
 > billing.
 
 The local loop gets you to green before you open a PR. CI is the authoritative
-confirmation: it executes or replays the reviewers from the repository's
+confirmation: it executes, replays, or carries the reviewers from the repository's
 `.bastion.yaml` (replay draws from a verified attestation, when the registry sets
-`attestations: true`) and reports one merge gate. Because routing and aggregation are
+`attestations: true`; carry reuses an unchanged reviewer's pass from the branch's
+previous CI run) and reports one merge gate. Because routing and aggregation are
 shared, CI rarely surprises an
 author who looped locally. It can differ in two ways: CI adds the PR's description and
 discussion that a default local run lacks, and CI runs the repository's reviewers
@@ -29,9 +30,11 @@ chapter covers the GitHub adapter, the one forge Bastion targets.
 
 On each pull-request event (`opened`, `synchronize`, `reopened`) the workflow runs
 `bastion review`, which computes the changed files, routes to the matching
-reviewers, then executes them in parallel with timeouts or replays those covered by a
+reviewers, then executes them in parallel with timeouts, replays those covered by a
 verified attestation (a replayed reviewer is reconstructed from the bundle, with no
-backend dispatch or timeout), and persists the run. A second step, `bastion github
+backend dispatch or timeout), or carries an unchanged reviewer's pass forward from the
+branch's previous CI run (no dispatch either, when the run store is persisted across
+runs; see the workflow comments below), and persists the run. A second step, `bastion github
 report`, reads that run and posts it. A verdict reaches two GitHub surfaces:
 
 - **Findings are posted to the PR.** `bastion github report` renders every finding
@@ -112,11 +115,13 @@ on:
     types: [opened, synchronize, reopened]
 
 # The report step writes the PR comment and the check runs, so the job needs more
-# than read access.
+# than read access. `actions: read` lets the run-store restore step below list and
+# download this branch's prior run artifact.
 permissions:
   contents: read
   pull-requests: write
   checks: write
+  actions: read
 
 jobs:
   review:
@@ -152,6 +157,34 @@ jobs:
       #    are forwarded in by name.
       # 3. Stand up anything your reviewers consume (a preview env, a database).
 
+      # Bring this branch's most recent prior run into the data directory before
+      # reviewing. A fresh runner starts with an empty store, so without this two
+      # things reset on every push: a reviewer's recall of the findings it raised
+      # last push, and incremental carry (an unchanged reviewer reusing its prior
+      # pass instead of re-executing). Best effort: a first push, or an expired
+      # artifact, restores nothing and the review runs every reviewer fresh.
+      - name: Restore prior run history
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Pass the branch name through the environment, never spliced into the
+          # script text, so an attacker-chosen branch name cannot inject shell.
+          HEAD_REF: ${{ github.head_ref }}
+          RUN_ID: ${{ github.run_id }}
+          WORKSPACE: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$WORKSPACE/.bastion/runs"
+          # --workflow takes the `name:` at the top of this file. The newest run of
+          # this branch other than the current one is the prior run to restore.
+          prior="$(gh run list --workflow bastion --branch "$HEAD_REF" \
+            --json databaseId \
+            --jq "map(select(.databaseId != $RUN_ID)) | .[0].databaseId // empty")" \
+            || prior=
+          if [ -n "$prior" ]; then
+            gh run download "$prior" -n bastion-run -D "$WORKSPACE/.bastion/runs" \
+              || echo "no prior bastion-run artifact to restore (first run or expired)"
+          fi
+
       - name: Review
         env:
           BASTION_DATA_DIR: ${{ github.workspace }}/.bastion
@@ -162,8 +195,11 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         # Non-zero exit on a blocked gate fails the job; that is the merge gate.
         # --repo/--pr feed the reviewers the PR's stated intent and discussion alongside
-        # the diff. Cross-run prior-findings memory needs the run store persisted between
-        # runs (upload and restore .bastion/runs); a fresh runner starts without it.
+        # the diff. The restore step above and the upload step below persist the run
+        # store between runs, which buys two things a fresh runner would lose: cross-run
+        # prior-findings memory, and incremental carry, where an unchanged reviewer
+        # reuses its prior pass instead of re-executing. Keep the backend on PATH with no
+        # BASTION_*_BIN override, so the run seals clean and stays carry-eligible.
         run: |
           bastion review --base "origin/${{ github.base_ref }}" \
             --repo "${{ github.repository }}" \
@@ -195,6 +231,18 @@ jobs:
             --repo "${{ github.repository }}" \
             --pr "${{ github.event.pull_request.number }}" \
             --sha "${{ github.event.pull_request.head.sha }}"
+
+      # Persist this run so the next push can restore it (see the restore step
+      # above). The data dir is dot-prefixed, so hidden files must be included or the
+      # upload is empty and the next restore finds nothing to carry from.
+      - name: Upload the run
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bastion-run
+          path: ${{ github.workspace }}/.bastion/runs/**
+          include-hidden-files: true
+          if-no-files-found: warn
 ```
 
 ### `bastion github report`
@@ -278,8 +326,12 @@ job is green GitHub merges. A push re-triggers the workflow and it resolves agai
 ## Attesting a run so CI can replay it
 
 Every reviewer is an agent invocation, so a PR that ran clean locally pays for
-each reviewer again when CI confirms it. If you would rather CI trust a signed
-local run than re-execute every reviewer, opt in with one registry field:
+each reviewer the first time CI confirms it. (Once the run store is persisted across
+runs, a later push carries any reviewer whose scoped content did not change from the
+branch's previous CI run, so the recurring cost falls on subsequent pushes; the very
+first CI run of a changeset still has nothing to carry from.) Attestation cuts the
+cost of that first run too: if you would rather CI trust a signed local run than
+re-execute every reviewer, opt in with one registry field:
 
 ```yaml
 attestations: true
@@ -312,8 +364,11 @@ fetching the notes ref (`git fetch origin +refs/notes/bastion:refs/notes/bastion
 When attestation replaces execution, the sticky comment opens with a callout
 naming which reviewers replayed, the key that attested, and when; each
 replayed reviewer's check-run summary says so too. When it does not (a missing
-note, an unregistered key, a stale base, or any other mismatch), CI simply
-executes every reviewer as usual and the comment includes the fallback reason.
+note, an unregistered key, a stale base, or any other mismatch), CI falls back to
+resolving each reviewer the ordinary way and the comment includes the fallback
+reason: a reviewer whose content is unchanged from the branch's previous CI run is
+still carried, and the rest execute fresh. Attestation short-circuits the note
+lookup, not carry.
 
 A reviewer can opt out of ever being replayed with `attestation: never` on that
 reviewer, for a gate your team wants CI to execute unconditionally regardless

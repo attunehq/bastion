@@ -20,6 +20,8 @@
 //! - [`render`]: turning events into human or JSONL output.
 //! - [`backend`]: the agent execution boundary (Claude Code and siblings).
 //! - [`runner`]: the parallel, timeout-bounded runner and aggregation.
+//! - [`carry`]: incremental re-review, carrying a prior pass forward when a
+//!   reviewer's trigger-scoped diff is unchanged since the branch's last run.
 //! - [`seal`]: the run seal, an HMAC over everything a verdict depends on, that
 //!   makes a persisted run tamper-evident (`docs/developer-guide/attestation.md`).
 //! - [`attest`]: `bastion attest`, which turns a sealed run into a signed git-note
@@ -32,6 +34,7 @@
 
 pub mod attest;
 pub mod backend;
+pub mod carry;
 pub mod cli;
 pub mod commands;
 pub mod config;

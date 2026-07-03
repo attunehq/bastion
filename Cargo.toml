@@ -44,7 +44,7 @@ tokio = { version = "1.52.3", features = ["test-util"] }
 [build-dependencies]
 # Generates the per-build sealing secret in build.rs when BASTION_SEAL_SECRET is
 # unset (a dev build). Not needed at runtime, so it is build-only.
-getrandom = "0.3"
+getrandom = "0.4"
 
 [lints.clippy]
 correctness = { level = "deny", priority = -1 }

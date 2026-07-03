@@ -61,6 +61,17 @@ pub enum Command {
         /// number is positive, so `--pr 0` is rejected at parse time.
         #[arg(long, value_name = "N")]
         pr: Option<NonZeroU64>,
+        /// Run only this triggered reviewer (repeatable). Names must belong to
+        /// reviewers the changeset triggered; an unknown or untriggered name is an
+        /// error. Excluding a triggered reviewer makes the run partial: it is
+        /// marked as such in the output and the stored run, and cannot be attested.
+        #[arg(long = "reviewer", visible_alias = "only", value_name = "NAME")]
+        reviewers: Vec<String>,
+        /// Execute every triggered reviewer even when its trigger-scoped diff is
+        /// unchanged since this branch's previous run (disable carrying prior
+        /// passes forward).
+        #[arg(long)]
+        fresh: bool,
     },
     /// Parse the reviewer registry and report any problems, without running a
     /// reviewer or spending a model call.
@@ -209,6 +220,8 @@ pub async fn run() -> Result<ExitCode> {
             format,
             repo,
             pr,
+            reviewers,
+            fresh,
         } => {
             let cwd = std::env::current_dir().wrap_err("determining the current directory")?;
             // Parse the `--repo`/`--pr` pair into a GitHub source at the boundary so an
@@ -234,9 +247,14 @@ pub async fn run() -> Result<ExitCode> {
             } else {
                 user_config_dir.as_deref()
             };
-            let decision =
-                crate::commands::review(&layout, &cwd, &base, format, github, review_user_dir)
-                    .await?;
+            let options = crate::commands::ReviewOptions {
+                base,
+                format,
+                github,
+                only: reviewers,
+                fresh,
+            };
+            let decision = crate::commands::review(&layout, &cwd, options, review_user_dir).await?;
             // A blocked review is an expected, non-error outcome that must still
             // signal failure to the caller: map `block` to a non-zero exit.
             Ok(match decision {
@@ -338,6 +356,51 @@ mod tests {
             Command::Review { repo, pr, .. } => {
                 assert_eq!(repo.as_deref(), Some("acme/app"));
                 assert_eq!(pr, NonZeroU64::new(42));
+            }
+            other => panic!("expected review, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn review_collects_repeatable_reviewer_selections_and_fresh() {
+        let cli = Cli::parse_from([
+            "bastion",
+            "review",
+            "--reviewer",
+            "tenant-isolation",
+            "--reviewer",
+            "perf",
+            "--fresh",
+        ]);
+        match cli.command {
+            Command::Review {
+                reviewers, fresh, ..
+            } => {
+                assert_eq!(reviewers, ["tenant-isolation", "perf"]);
+                assert!(fresh);
+            }
+            other => panic!("expected review, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn review_accepts_only_as_an_alias_for_reviewer() {
+        let cli = Cli::parse_from(["bastion", "review", "--only", "perf"]);
+        match cli.command {
+            Command::Review { reviewers, .. } => assert_eq!(reviewers, ["perf"]),
+            other => panic!("expected review, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn review_defaults_to_the_full_set_with_carry_enabled() {
+        let cli = Cli::parse_from(["bastion", "review"]);
+        match cli.command {
+            Command::Review {
+                reviewers, fresh, ..
+            } => {
+                assert!(reviewers.is_empty());
+                assert!(!fresh);
             }
             other => panic!("expected review, got {other:?}"),
         }

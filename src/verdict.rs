@@ -173,6 +173,12 @@ impl Verdict {
     /// since the top-level decision is authoritative, trusting it would fail open
     /// (pass a merge while flagging blockers). A `pass` may carry optional
     /// findings as non-blocking suggestions.
+    ///
+    /// This is a *universal* invariant, not one only gates satisfy. An advisor
+    /// never blocks, so the runner clamps it to a `pass` and downgrades any
+    /// blocking finding to optional at resolution ([`crate::runner`]), which means
+    /// a well-formed advisor row satisfies this check like any other pass. Every
+    /// resolution path can therefore apply it without special-casing mode.
     #[must_use]
     pub fn is_consistent(&self) -> bool {
         let has_blocking = self
@@ -286,6 +292,27 @@ findings:
             }],
         };
         assert!(pass_with_optional.is_consistent());
+    }
+
+    #[test]
+    fn a_normalized_advisor_verdict_is_universally_consistent() {
+        // The runner clamps an advisor to a pass and downgrades its blocking
+        // findings to optional (see `runner::clamp_advisor`). The result must
+        // satisfy `is_consistent` with no mode-aware exemption: a pass carrying
+        // only optional advice is exactly the consistent shape, so the replay and
+        // carry paths can apply this check to advisors and gates alike.
+        let normalized_advisor = Verdict {
+            decision: Decision::Pass,
+            summary: "advisory concern, downgraded to advice".into(),
+            findings: vec![Finding {
+                kind: FindingKind::Optional,
+                path: "src/x.rs".into(),
+                line_start: 1,
+                line_end: 1,
+                detail: "was blocking, now optional".into(),
+            }],
+        };
+        assert!(normalized_advisor.is_consistent());
     }
 
     #[test]
