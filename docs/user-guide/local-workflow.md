@@ -93,8 +93,11 @@ marked **partial** everywhere it is recorded: the `run.started`/`run.completed`
 events carry `"partial": true`, the human output and `bastion runs` say so, and
 the run cannot be attested. (Naming every triggered reviewer is a full run: the
 selection reduced nothing, so nothing is marked.) A partial green speaks only
-for the reviewers that ran. Finish with a plain `bastion review`; thanks to carry,
-that final full run re-executes only what actually changed.
+for the reviewers that ran. Finish with a plain `bastion review`: only a full run
+seals a real green. Carry spares any reviewer whose scoped content has not moved
+since an eligible prior run, but not from the partial run itself: a partial run is
+never sealed, so the repository's own reviewers re-execute rather than carry from
+it.
 
 The CI workflow passes `--repo`/`--pr` so reviewers see the PR's stated intent and discussion. Locally you rarely need them: with no PR, intent comes from your branch's commit messages (`base..HEAD`), and each reviewer's prior findings come from the run store. When you do pass them, Bastion builds its GitHub REST client from `GITHUB_TOKEN` and `GITHUB_API_URL` (the latter defaults to the public API and points at a GitHub Enterprise host when set). Discussion gathering reads the first 100 conversation comments and the first 100 review comments and does not paginate, so later comments on a very long thread are not included. Gathering PR context is read-only and best effort, so an API or token failure never fails the review; it just drops back to the local context.
 

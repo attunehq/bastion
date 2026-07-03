@@ -80,9 +80,10 @@ runs, so only committed content reaches CI as an attestation.
 - **Coverage.** The set of repository reviewers the local run routed and
   resolved, whether each executed a backend or carried its verdict forward
   from a sealed, verified earlier run (the seal covers carried events exactly
-  like fresh ones). CI routes its own diff; a reviewer CI routes that the bundle does
-  not cover runs fresh. On a coverage mismatch, CI replays the attested
-  reviewers and executes the rest.
+  like fresh ones). CI routes its own diff; a reviewer CI routes that the bundle
+  does not cover continues to carry planning, then carries an eligible prior pass
+  or executes fresh. On a coverage mismatch, CI replays the attested reviewers and
+  sends the rest through that same carry-or-execute path.
 - **The engine.** Implicit in the run seal rather than checked as a field: each
   release embeds its own sealing secret, so a bundle verifies only under the
   same release that produced it, and a new release (meaning new reviewer
