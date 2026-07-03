@@ -31,10 +31,7 @@ fn github_report_posts_a_comment_and_checks_for_a_blocked_run() {
         &[
             "github", "report", "--repo", "acme/app", "--pr", "7", "--sha", "deadcafe",
         ],
-        &[
-            ("GITHUB_API_URL", github.url.as_str()),
-            ("GITHUB_TOKEN", "ghs-fake-token"),
-        ],
+        &ci_env(&github.url),
     );
     assert!(
         output.status.success(),
@@ -117,10 +114,7 @@ fn github_report_posts_a_comment_and_checks_for_a_blocked_run() {
         &[
             "github", "report", "--repo", "acme/app", "--pr", "7", "--sha", "deadcafe",
         ],
-        &[
-            ("GITHUB_API_URL", github2.url.as_str()),
-            ("GITHUB_TOKEN", "ghs-fake-token"),
-        ],
+        &ci_env(&github2.url),
     );
     assert!(output2.status.success());
     let requests2 = github2.finish();

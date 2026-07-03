@@ -296,16 +296,8 @@ fn ci_carries_an_unchanged_repo_pass_from_the_prior_ci_run() {
     // First CI run: the reviewer executes for real, and (backend on PATH, no
     // override) its run seals seam-free, so the pass is carry-eligible.
     let github = FakeGitHub::start();
-    let first = repo.review_ci_backend_on_path(
-        fake,
-        "main",
-        source.0,
-        source.1,
-        &[
-            ("GITHUB_API_URL", github.url.as_str()),
-            ("GITHUB_TOKEN", "ghs-fake-token"),
-        ],
-    );
+    let first =
+        repo.review_ci_backend_on_path(fake, "main", source.0, source.1, &ci_env(&github.url));
     github.finish();
     assert!(first.exited_zero(), "stderr:\n{}", first.stderr);
     assert!(
@@ -316,7 +308,7 @@ fn ci_carries_an_unchanged_repo_pass_from_the_prior_ci_run() {
     // The seal really did record seams: false; otherwise the carry below could never
     // fire, and this test would be asserting nothing.
     let layout = repo.layout();
-    let run_id = store::list_runs(&layout).unwrap()[0].run.clone();
+    let run_id = repo.latest_run_id();
     let seal_json = std::fs::read_to_string(layout.seal(&run_id)).expect("the first run sealed");
     let seal: serde_json::Value = serde_json::from_str(&seal_json).unwrap();
     assert_eq!(
@@ -328,16 +320,8 @@ fn ci_carries_an_unchanged_repo_pass_from_the_prior_ci_run() {
     // Second CI run, nothing changed: the repository reviewer carries its pass with no
     // backend dispatch, still counting in the gate tally.
     let github = FakeGitHub::start();
-    let second = repo.review_ci_backend_on_path(
-        fake,
-        "main",
-        source.0,
-        source.1,
-        &[
-            ("GITHUB_API_URL", github.url.as_str()),
-            ("GITHUB_TOKEN", "ghs-fake-token"),
-        ],
-    );
+    let second =
+        repo.review_ci_backend_on_path(fake, "main", source.0, source.1, &ci_env(&github.url));
     github.finish();
     assert!(second.exited_zero(), "stderr:\n{}", second.stderr);
     assert!(
@@ -362,16 +346,8 @@ fn ci_carries_an_unchanged_repo_pass_from_the_prior_ci_run() {
     )
     .unwrap();
     let github = FakeGitHub::start();
-    let third = repo.review_ci_backend_on_path(
-        fake,
-        "main",
-        source.0,
-        source.1,
-        &[
-            ("GITHUB_API_URL", github.url.as_str()),
-            ("GITHUB_TOKEN", "ghs-fake-token"),
-        ],
-    );
+    let third =
+        repo.review_ci_backend_on_path(fake, "main", source.0, source.1, &ci_env(&github.url));
     github.finish();
     assert!(third.exited_zero(), "stderr:\n{}", third.stderr);
     assert!(

@@ -9,9 +9,17 @@
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
-use bastion::event::{Gates, RunEvent};
+use bastion::event::{Gates, RunEvent, RunId};
 use bastion::paths::Layout;
 use bastion::verdict::{Decision, Finding, Money, Usage};
+
+/// The `GITHUB_API_URL`/`GITHUB_TOKEN` env pair every CI-path scenario points at
+/// its in-process fake GitHub. Returned as an owned array borrowing `url`, so a
+/// call site spreads `&ci_env(&github.url)` straight into a `review_ci` env
+/// argument.
+pub(crate) fn ci_env(url: &str) -> [(&str, &str); 2] {
+    [("GITHUB_API_URL", url), ("GITHUB_TOKEN", "ghs-fake-token")]
+}
 
 /// `git` settings that make a throwaway repo deterministic regardless of the
 /// developer's global configuration (identity, signing, default branch).
@@ -540,6 +548,14 @@ impl TestRepo {
     /// persisted using the crate's real store API.
     pub(crate) fn layout(&self) -> Layout {
         Layout::with_root(self.data.path().to_path_buf())
+    }
+
+    /// The id of the most recent persisted run. `store::list_runs` is
+    /// most-recent-first, so this is its head; panics if no run exists yet.
+    pub(crate) fn latest_run_id(&self) -> RunId {
+        bastion::store::list_runs(&self.layout()).unwrap()[0]
+            .run
+            .clone()
     }
 }
 

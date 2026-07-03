@@ -329,7 +329,7 @@ fn read_back_errors_are_clear() {
     // After a real run, unknown ids are not-found errors.
     let run = repo.review(fake);
     assert!(run.exited_zero());
-    let run_id = store::list_runs(&repo.layout()).unwrap()[0].run.clone();
+    let run_id = repo.latest_run_id();
 
     let bad_run = repo.run(fake, &["show", "no-such-run"], &[]);
     assert_ne!(bad_run.status.code(), Some(0));

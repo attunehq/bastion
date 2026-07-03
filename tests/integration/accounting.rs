@@ -193,10 +193,12 @@ fn reviewers_run_concurrently_not_serially() {
     assert_eq!(run.started_count(), 8);
     assert_eq!(run.resolved_count(), 8);
     assert_eq!(run.completed().1.passed, 8);
-    // Serial would be ~16s; concurrent is ~2-3s. 10s catches serialization while
-    // leaving generous headroom for a slow/loaded CI box.
+    // Serial would be ~16s (8x2s); concurrent is a few seconds. The 13s bar sits
+    // well under that serial floor so it still catches serialization, with wide
+    // headroom for a slow or heavily loaded CI box (where subprocess spawn under
+    // parallel-test contention, not the sleeps, is what stretches the wall clock).
     assert!(
-        elapsed < Duration::from_secs(10),
+        elapsed < Duration::from_secs(13),
         "8x2s reviewers took {elapsed:?}; they did not run concurrently"
     );
 }

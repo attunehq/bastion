@@ -27,8 +27,8 @@ fn review_seals_its_run() {
     assert!(run.exited_zero(), "stderr:\n{}", run.stderr);
 
     let layout = repo.layout();
-    let run_id = &store::list_runs(&layout).unwrap()[0].run;
-    let seal_path = layout.seal(run_id);
+    let run_id = repo.latest_run_id();
+    let seal_path = layout.seal(&run_id);
     assert!(
         seal_path.exists(),
         "expected a seal at {}",
@@ -93,8 +93,8 @@ fn review_over_a_clean_committed_tree_seals_dirty_false() {
     assert!(run.exited_zero(), "stderr:\n{}", run.stderr);
 
     let layout = repo.layout();
-    let run_id = &store::list_runs(&layout).unwrap()[0].run;
-    let seal_path = layout.seal(run_id);
+    let run_id = repo.latest_run_id();
+    let seal_path = layout.seal(&run_id);
     let seal_json = std::fs::read_to_string(&seal_path).unwrap();
     let seal: serde_json::Value = serde_json::from_str(&seal_json)
         .unwrap_or_else(|e| panic!("seal.json did not parse: {e}\n{seal_json}"));
@@ -146,8 +146,8 @@ fn attest_refuses_an_unsealed_run() {
     assert!(run.exited_zero(), "stderr:\n{}", run.stderr);
 
     let layout = repo.layout();
-    let run_id = &store::list_runs(&layout).unwrap()[0].run;
-    std::fs::remove_file(layout.seal(run_id)).expect("seal.json existed");
+    let run_id = repo.latest_run_id();
+    std::fs::remove_file(layout.seal(&run_id)).expect("seal.json existed");
 
     let keys_dir = tempfile::tempdir().unwrap();
     let key_path = generate_ssh_key(keys_dir.path());
@@ -186,16 +186,7 @@ fn ci_review_without_a_note_runs_fresh_silently() {
     repo.commit_all("head");
 
     let github = FakeGitHub::start();
-    let run = repo.review_ci(
-        fake,
-        "basemark",
-        "acme/app",
-        "1",
-        &[
-            ("GITHUB_API_URL", github.url.as_str()),
-            ("GITHUB_TOKEN", "ghs-fake-token"),
-        ],
-    );
+    let run = repo.review_ci(fake, "basemark", "acme/app", "1", &ci_env(&github.url));
     github.finish();
 
     // The reviewer executed for real (no note to replay from).
@@ -217,8 +208,8 @@ fn ci_review_without_a_note_runs_fresh_silently() {
 
     // ...and nothing persisted in run.jsonl either.
     let layout = repo.layout();
-    let run_id = &store::list_runs(&layout).unwrap()[0].run;
-    let persisted = store::read_run(&layout, run_id).unwrap();
+    let run_id = repo.latest_run_id();
+    let persisted = store::read_run(&layout, &run_id).unwrap();
     assert!(
         !persisted
             .iter()
@@ -239,16 +230,7 @@ fn ci_review_with_attestations_disabled_never_mentions_attestation() {
     ]));
 
     let github = FakeGitHub::start();
-    let run = repo.review_ci(
-        fake,
-        "main",
-        "acme/app",
-        "1",
-        &[
-            ("GITHUB_API_URL", github.url.as_str()),
-            ("GITHUB_TOKEN", "ghs-fake-token"),
-        ],
-    );
+    let run = repo.review_ci(fake, "main", "acme/app", "1", &ci_env(&github.url));
     github.finish();
 
     assert!(run.exited_zero(), "stderr:\n{}", run.stderr);
@@ -278,16 +260,7 @@ fn ci_review_with_a_dirty_checkout_falls_back_without_note_lookup() {
     .behavior("pass")]));
 
     let github = FakeGitHub::start();
-    let run = repo.review_ci(
-        fake,
-        "main",
-        "acme/app",
-        "1",
-        &[
-            ("GITHUB_API_URL", github.url.as_str()),
-            ("GITHUB_TOKEN", "ghs-fake-token"),
-        ],
-    );
+    let run = repo.review_ci(fake, "main", "acme/app", "1", &ci_env(&github.url));
     github.finish();
 
     assert!(run.exited_zero(), "stderr:\n{}", run.stderr);
@@ -320,16 +293,7 @@ fn ci_review_with_a_garbage_note_falls_back() {
     repo.write_garbage_note("not a bastion attestation bundle");
 
     let github = FakeGitHub::start();
-    let run = repo.review_ci(
-        fake,
-        "basemark",
-        "acme/app",
-        "1",
-        &[
-            ("GITHUB_API_URL", github.url.as_str()),
-            ("GITHUB_TOKEN", "ghs-fake-token"),
-        ],
-    );
+    let run = repo.review_ci(fake, "basemark", "acme/app", "1", &ci_env(&github.url));
     github.finish();
 
     assert!(run.exited_zero(), "stderr:\n{}", run.stderr);
@@ -388,16 +352,7 @@ fn github_report_carries_the_fallback_notice() {
 
     // Drive the CI-path review so the run persists with a fallback event.
     let review_github = FakeGitHub::start();
-    let review = repo.review_ci(
-        fake,
-        "main",
-        "acme/app",
-        "7",
-        &[
-            ("GITHUB_API_URL", review_github.url.as_str()),
-            ("GITHUB_TOKEN", "ghs-fake-token"),
-        ],
-    );
+    let review = repo.review_ci(fake, "main", "acme/app", "7", &ci_env(&review_github.url));
     review_github.finish();
     assert!(review.exited_zero(), "stderr:\n{}", review.stderr);
     assert!(review.attestation_fallback_reason().is_some());
@@ -412,10 +367,7 @@ fn github_report_carries_the_fallback_notice() {
         &[
             "github", "report", "--repo", "acme/app", "--pr", "7", "--sha", "deadcafe",
         ],
-        &[
-            ("GITHUB_API_URL", report_github.url.as_str()),
-            ("GITHUB_TOKEN", "ghs-fake-token"),
-        ],
+        &ci_env(&report_github.url),
     );
     assert!(
         output.status.success(),

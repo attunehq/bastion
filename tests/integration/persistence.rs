@@ -97,7 +97,7 @@ fn the_read_back_commands_work_over_a_real_run() {
     let review = repo.review(fake);
     assert!(review.exited_zero(), "stderr:\n{}", review.stderr);
 
-    let run_id = store::list_runs(&repo.layout()).unwrap()[0].run.clone();
+    let run_id = repo.latest_run_id();
 
     // `runs --format jsonl` lists exactly that run.
     let runs_out = repo.run(fake, &["runs", "--format", "jsonl"], &[]);
@@ -164,7 +164,7 @@ fn multiple_runs_track_latest_and_prune_oldest() {
     // First run, against the dirty working tree.
     let first = repo.review(fake);
     assert!(first.exited_zero(), "stderr:\n{}", first.stderr);
-    let first_id = store::list_runs(&repo.layout()).unwrap()[0].run.clone();
+    let first_id = repo.latest_run_id();
 
     // Advance HEAD (so the run id changes) and introduce a genuinely new change
     // so the second run actually routes its reviewer rather than being a
