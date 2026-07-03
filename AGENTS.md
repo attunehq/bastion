@@ -32,6 +32,9 @@ verdict returns an error, never a fabricated pass, and gates fail closed on it.
     deliberate mirror images; keep them in sync. The user-level registry is a
     local-only exception, so a purely local review can run personal reviewers the
     GitHub adapter does not.
+  - `docs/developer-guide/attestation.md`: the design for signed local runs that
+    CI verifies and replays instead of re-executing reviewers. A design target,
+    entirely unimplemented.
 - `.bastion.yaml`: the example reviewer registry at the repository root (the
   `.bastion.yml` spelling is also honored); update it when the schema changes.
 - `.agents/skills/readme.md`: repo-local Rust coding skills and their provenance.

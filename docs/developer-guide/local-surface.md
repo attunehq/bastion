@@ -133,5 +133,5 @@ Anyone who understands one surface understands the other; this is deliberate, so
 Local-specific deferrals, separate from the core design's list.
 
 - Watch mode. A `bastion review --watch` that re-runs affected reviewers as files change, instead of once per invocation.
-- A shared verdict cache so an unchanged reviewer result can be reused across local runs, and even handed to CI, rather than recomputed.
+- A shared verdict cache so an unchanged reviewer result can be reused across local runs rather than recomputed. Handing a local result to CI has a design of its own: [attestation](./attestation.md).
 - Transport beyond a process. Driving Bastion over a socket with the same event stream, if an agent harness ever wants to consume it that way rather than from stdout.

@@ -47,6 +47,9 @@ when a chapter points you into one.
   governance, authentication, and billing.
 - **[Local surface](./local-surface.md)**: the local CLI surface this crate
   implements, including the on-disk run store.
+- **[Attestation](./attestation.md)**: the design for letting CI verify and
+  replay a signed local run instead of re-executing the reviewers. A design
+  target; none of it is implemented yet.
 
 ## Build, test, and run
 
