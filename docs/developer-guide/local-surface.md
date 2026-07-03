@@ -14,6 +14,22 @@ The guiding rule carries over: Bastion does not own your environment, it plugs i
 
 The intended use is the loop from the core design: an agent runs `bastion review`, reads the stream, fixes what blocks, runs it again, and repeats until it is green, before ever opening a PR.
 
+### Incremental re-review
+
+The loop's dominant cost is re-executing reviewers that already passed: after fixing one reviewer's findings, a naive re-run re-executes the whole triggered set even though most of it judged content the fix never touched. So a purely local `bastion review` is incremental by default. Every reviewer that resolves to a real verdict is stamped with a *scope digest* (best effort: a reviewer that crashed, timed out, or returned garbage resolves with no digest, and a digest that fails to compute only makes its reviewer uncarryable): a hash of the reviewer's own effective definition, the merge-base commit, the diffs of exactly the changed files its trigger matched (working tree against both the merge base and the base branch's current tip, so a base that advances on covered files invalidates the carry; untracked matched files encoded by kind, executable bit, and content, a symlink by its target), and the `merge_base..HEAD` commit messages that touched those files (the trigger-scoped slice of the stated intent the prompt carries). Reviewers judge the live working tree, so the runner re-derives every digest after the reviewers finish and stamps only the ones that still match: a fresh verdict whose tree changed mid-run loses its stamp (the next run executes that reviewer again), and a *carried* verdict in that situation fails closed outright, since the pass it reused no longer describes the tree the run reports on. On the next run of the same branch, a reviewer whose prior verdict was a **pass** and whose digest is unchanged is *carried*: its prior verdict folds into the run (`"carried": true` on `reviewer.resolved`, no usage, zero duration) without a backend executing, and it still counts in the gate tally. A reviewer whose scoped content changed, which always includes the ones that blocked (the fix touched the files they flagged), executes fresh. Blocks are never carried: re-confirming a block is exactly the loop's next question.
+
+The trigger is the soundness boundary, deliberately: routing already treats a reviewer's `trigger` globs as the declaration of what its concern depends on, and carry keys the verdict to the same declaration. A reviewer whose judgment spans files outside its trigger should widen its trigger.
+
+Carry runs on both surfaces, local and CI. Three things keep it sound and under your control:
+
+- **A repository reviewer carries only from a sealed, verified run.** The carried verdict flows into the new run's seal, and (locally) from there into anything the author later attests, so every link in the chain must have been binary-verified: an unsealed prior run, a seal that fails verification (under the release secret embedded in the binary), or a seal recording an active test seam disqualifies carry for every repository reviewer. In CI the run store is a restored artifact, but the seal is verified before any repository reviewer carries, so a restored store cannot pass off a fabricated pass; forging a seal means extracting that embedded secret, the deliberate malice the [threat model](./design.md#threat-model--trust-boundary) already excludes. A user-level reviewer (never sealed, never gating anyone else's PR) carries on the digest alone. A reviewer with `attestation: never` is never carried; that policy asks for fresh execution every time.
+- **The digest binds the reviewed content.** A carried pass provably still describes the tree now under review, so carrying from a prior run reuses a verdict over the same scoped content. Carry and attestation replay stay complementary: replay reuses the *author's* signed local run (crossing from their machine into CI, which is why it needs the SSH signature), carry reuses a run that already executed on the same surface.
+- **`--fresh` opts out.** Every triggered reviewer executes even when its scoped diff is unchanged.
+
+### Running a subset by hand
+
+`bastion review --reviewer <name>` (repeatable; alias `--only`) narrows the run to a hand-picked subset of the *triggered* reviewers, for iterating on one stubborn gate. A name that is not in the registry, or whose trigger did not match the changeset, is an error naming what can run, never a silent no-op. The selected reviewers never carry a prior pass (asking for a reviewer by name means asking for it to run), though on a `--repo`/`--pr` run a verified attestation can still replay one. When the selection excludes a triggered reviewer the run is **partial**: `run.started` and `run.completed` carry `"partial": true`, the human rendering and `bastion runs` say so, the run is never sealed, and `bastion attest` refuses it. A filtered green speaks only for the reviewers that ran; it never stands in for a full green. The finishing move after a `--reviewer` iteration is a plain `bastion review`, which re-establishes a sealed green. Carry keys to the branch's single most recent run, and a partial run is never sealed, so the repository's reviewers execute fresh on that finishing run rather than carrying from the partial one; carry pays off on the *next* push, once a full sealed run is the most recent.
+
 ### User-level reviewers
 
 Reviewers can also come from a personal `.bastion.yaml` (or `.bastion.yml`) in your platform config directory, so you can run a reviewer locally whether or not a repository adopts Bastion in CI:
@@ -100,8 +116,10 @@ changes or untracked files), and the sorted `reviewer.resolved` events, MAC'd
 with a secret embedded in the binary at build time. `bastion attest` reads
 `seal.json` to build an attestation. A run has no `seal.json`, and so cannot
 be attested, in a few cases: a zero-match run (persisted without going
-through the runner), a run whose bindings could not be derived, a run that
-resolved no repository-reviewer event, or an older run predating sealing.
+through the runner), a partial run (`--reviewer` narrowed the triggered set,
+so its aggregate must not become attestable as a full verdict), a run whose
+bindings could not be derived, a run that resolved no repository-reviewer
+event, or an older run predating sealing.
 Sealing failure is non-fatal and never fails the review itself; a review over
 a dirty working tree still seals, but the seal records `dirty: true`, which
 `bastion attest` also refuses. See [Attestation](./attestation.md) for the
@@ -126,6 +144,7 @@ Separate from these run-inspection commands, `bastion validate [FILE]` parses th
 
 `bastion attest [<run>] [--key <path>]` signs a sealed local run as an attestation note on HEAD, so CI can verify and replay it instead of re-executing the reviewers (see [Attestation](./attestation.md) for the full design). It defaults to the latest recorded run; `--key` picks the SSH signing key, falling back to `git config user.signingkey` when omitted. It refuses to sign when:
 
+- the run was partial (`bastion review --reviewer` ran a subset of the triggered reviewers), whose verdict speaks only for those reviewers;
 - the run was never sealed (a zero-match run, one whose bindings could not be derived, one with no repository-reviewer resolved events, or an older run predating sealing);
 - the seal recorded that a test seam (a `BASTION_*_BIN` backend override, or the container-engine override) was active, since a run against a stubbed reviewer is not a real review;
 - the seal recorded `dirty: true`, meaning the working tree carried uncommitted tracked changes or untracked files at review time: commit the final content, re-run the review, and attest that run instead;

@@ -78,6 +78,9 @@ pub(crate) struct Reviewer {
     prompt: Option<&'static str>,
     /// `attestation: never`, opting this reviewer out of attestation replay.
     attestation_never: bool,
+    /// The trigger glob (defaults to `src/**/*.rs`, which the test repo always
+    /// dirties).
+    trigger: &'static str,
 }
 
 impl Reviewer {
@@ -96,7 +99,16 @@ impl Reviewer {
             effort: None,
             prompt: None,
             attestation_never: false,
+            trigger: "src/**/*.rs",
         }
+    }
+
+    /// Route this reviewer on `trigger` instead of the default `src/**/*.rs`,
+    /// for scenarios that need reviewers scoped to disjoint parts of the tree
+    /// (the incremental-review carry scenarios, say).
+    pub(crate) fn trigger(mut self, trigger: &'static str) -> Self {
+        self.trigger = trigger;
+        self
     }
 
     /// Pin the reviewer's `model`.
@@ -166,7 +178,7 @@ impl Reviewer {
     fn to_yaml(&self) -> String {
         let mut s = String::new();
         s.push_str(&format!("  - name: {}\n", self.name));
-        s.push_str("    trigger: [src/**/*.rs]\n");
+        s.push_str(&format!("    trigger: [{}]\n", self.trigger));
         s.push_str(&format!("    mode: {}\n", self.mode));
         s.push_str(&format!("    backend: {}\n", self.backend));
         if let Some(model) = self.model {
@@ -443,6 +455,77 @@ impl TestRepo {
         }
     }
 
+    /// Run `bastion review` on the CI path (`--repo`/`--pr`) with the codex backend
+    /// resolved as `codex` on `PATH` and *no* `BASTION_*_BIN` override, so the run
+    /// seals `seams: false` and is carry-eligible.
+    ///
+    /// The ordinary [`run`](Self::run) helper points every backend at the fake agent
+    /// through the `BASTION_*_BIN` overrides, which every scenario wants but which
+    /// also trips the seal's test-seam flag, so a seam-tainted run can never be
+    /// carried (see the incremental-review scenarios). This mirrors the real dogfood
+    /// workflow instead: the Codex CLI is on `PATH` and no override is set, which is
+    /// the only way to exercise a clean, carry-eligible seal end to end. It copies the
+    /// fake agent to a `codex` on a `PATH` directory and prepends that directory, so
+    /// the codex backend resolves the fake by name with no override.
+    pub(crate) fn review_ci_backend_on_path(
+        &self,
+        fake: &Path,
+        base: &str,
+        repo: &str,
+        pr: &str,
+        extra_env: &[(&str, &str)],
+    ) -> ReviewRun {
+        let bindir = tempfile::tempdir().expect("bin tempdir");
+        let codex = bindir
+            .path()
+            .join(if cfg!(windows) { "codex.exe" } else { "codex" });
+        std::fs::copy(fake, &codex).expect("copy the fake agent to a PATH `codex`");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755))
+                .expect("mark the PATH `codex` executable");
+        }
+
+        // Prepend our `codex` directory so it wins over any real codex on the host.
+        let mut path = std::ffi::OsString::from(bindir.path());
+        path.push(if cfg!(windows) { ";" } else { ":" });
+        if let Some(existing) = std::env::var_os("PATH") {
+            path.push(existing);
+        }
+
+        let mut command = Command::new(bastion_bin());
+        command
+            .args([
+                "review", "--base", base, "--repo", repo, "--pr", pr, "--format", "jsonl",
+            ])
+            .current_dir(self.repo.path())
+            .env("BASTION_DATA_DIR", self.data.path())
+            .env("BASTION_CONFIG_DIR", self.config.path())
+            // Resolve the codex backend from PATH rather than a BASTION_*_BIN
+            // override, so `seams_active()` is false and the seal stays carry-eligible.
+            // Clear any override the ambient environment might carry, so the seam-free
+            // seal this helper promises does not depend on the developer's shell.
+            .env_remove("BASTION_CLAUDE_BIN")
+            .env_remove("BASTION_CODEX_BIN")
+            .env_remove("BASTION_PI_BIN")
+            .env("PATH", &path)
+            .env("RUST_LOG", "error")
+            .stdin(Stdio::null());
+        for (key, value) in extra_env {
+            command.env(key, value);
+        }
+        let output = command.output().expect("bastion binary runs");
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        let events = parse_events(&stdout, &stderr);
+        ReviewRun {
+            code: output.status.code(),
+            events,
+            stderr,
+        }
+    }
+
     /// Write a garbage (non-bundle) note on HEAD under `refs/notes/bastion`, using
     /// this repo's own isolated git identity. Used to exercise the CI attestation
     /// path's refusal of an unreadable note.
@@ -567,6 +650,36 @@ impl ReviewRun {
             .iter()
             .filter(|e| matches!(e, RunEvent::ReviewerStarted { .. }))
             .count()
+    }
+
+    /// Whether the closing `run.completed` (or the opening `run.started`) marked
+    /// the run partial (`bastion review --reviewer`).
+    pub(crate) fn partial(&self) -> bool {
+        self.events.iter().any(|e| {
+            matches!(
+                e,
+                RunEvent::RunStarted { partial: true, .. }
+                    | RunEvent::RunCompleted { partial: true, .. }
+            )
+        })
+    }
+
+    /// Whether `name`'s resolved event was carried forward from the branch's
+    /// previous run rather than executed fresh.
+    pub(crate) fn carried(&self, name: &str) -> bool {
+        for event in &self.events {
+            if let RunEvent::ReviewerResolved {
+                reviewer, carried, ..
+            } = event
+                && reviewer == name
+            {
+                return *carried;
+            }
+        }
+        panic!(
+            "no reviewer.resolved for '{name}'; stderr:\n{}",
+            self.stderr
+        );
     }
 
     /// The reason from the stream's `run.attestation-fallback` event, if one was

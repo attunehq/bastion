@@ -94,6 +94,11 @@ struct ReviewerRow {
     /// Whether this verdict was replayed from a signed local attestation rather
     /// than executed fresh (`docs/developer-guide/attestation.md`).
     replayed: bool,
+    /// Whether this verdict was carried forward from the branch's previous run
+    /// because its trigger-scoped diff was unchanged ([`crate::carry`]). CI
+    /// itself never carries, but the schema mirrors the local surface, so a
+    /// reported run that somehow contains one still reads honestly.
+    carried: bool,
 }
 
 impl ReviewerRow {
@@ -158,6 +163,10 @@ struct RunDigest {
     /// `run.attestation-fallback` event was recorded. `None` when attestation
     /// either replayed or was never attempted.
     attestation_fallback: Option<String>,
+    /// Whether the run was narrowed to a subset of the triggered reviewers
+    /// (`bastion review --reviewer`). A partial verdict must never read as a
+    /// full one, on any surface.
+    partial: bool,
 }
 
 /// The replay audit trail folded from a `run.attested` event, for the sticky
@@ -186,11 +195,15 @@ fn digest(events: &[RunEvent]) -> RunDigest {
                 base,
                 changed,
                 reviewers,
+                partial,
                 ..
             } => {
                 digest.branch = Some(branch.clone());
                 digest.base = Some(base.clone());
                 digest.changed = *changed;
+                // Recorded on both the opening and closing events; OR them so a
+                // truncated stream (no run.completed) still reads as partial.
+                digest.partial |= *partial;
                 started = reviewers.iter().map(|r| (r.name.clone(), r.mode)).collect();
             }
             RunEvent::ReviewerStarted {
@@ -204,6 +217,7 @@ fn digest(events: &[RunEvent]) -> RunDigest {
                 usage,
                 duration_ms,
                 replayed,
+                carried,
                 ..
             } => {
                 let mode = started
@@ -224,6 +238,7 @@ fn digest(events: &[RunEvent]) -> RunDigest {
                     duration_ms: *duration_ms,
                     usage: *usage,
                     replayed: *replayed,
+                    carried: *carried,
                 });
             }
             RunEvent::RunCompleted {
@@ -234,6 +249,7 @@ fn digest(events: &[RunEvent]) -> RunDigest {
                 tokens_out,
                 cache_read,
                 cost_usd,
+                partial,
                 ..
             } => {
                 digest.aggregate = Some(*verdict);
@@ -243,6 +259,7 @@ fn digest(events: &[RunEvent]) -> RunDigest {
                 digest.tokens_out = *tokens_out;
                 digest.cache_read = *cache_read;
                 digest.cost = Some(*cost_usd);
+                digest.partial = *partial;
             }
             RunEvent::AttestationReplayed {
                 reviewers,
@@ -391,7 +408,13 @@ fn status_line(digest: &RunDigest) -> String {
         Some(Decision::Block) => format!("**Blocked.** {passed} of {total} gate(s) passed."),
         None => "**Incomplete.** The run did not finish.".to_string(),
     };
-    format!("{headline} {reviewers} reviewer(s) ran{timing}{tokens}{cost}.")
+    // A filtered run's verdict speaks only for the reviewers that ran.
+    let partial = if digest.partial {
+        " **Partial run:** only an explicitly selected subset of the triggered reviewers ran."
+    } else {
+        ""
+    };
+    format!("{headline}{partial} {reviewers} reviewer(s) ran{timing}{tokens}{cost}.")
 }
 
 /// The prominent `[!NOTE]` callout opening the comment when one or more
@@ -638,6 +661,12 @@ fn reviewer_check_summary(row: &ReviewerRow, annotations: &[Annotation]) -> Stri
     );
     if row.replayed {
         out.push_str("- Replayed from an attested local run rather than executed fresh.\n");
+    }
+    if row.carried {
+        out.push_str(
+            "- Carried forward from the branch's previous run (trigger-scoped diff unchanged) \
+             rather than executed fresh.\n",
+        );
     }
     if let Some(usage) = row.usage {
         let cached = if usage.cache_read > 0 {
@@ -1020,6 +1049,7 @@ mod tests {
         let run = RunId("r-1".into());
         vec![
             RunEvent::RunStarted {
+                partial: false,
                 run: run.clone(),
                 branch: "feat/cart".into(),
                 base: "main".into(),
@@ -1046,6 +1076,8 @@ mod tests {
                 backend: Backend::Codex,
             },
             RunEvent::ReviewerResolved {
+                carried: false,
+                scope_digest: None,
                 run: run.clone(),
                 reviewer: "tenant-isolation".into(),
                 verdict: Decision::Block,
@@ -1077,6 +1109,8 @@ mod tests {
                 replayed: false,
             },
             RunEvent::ReviewerResolved {
+                carried: false,
+                scope_digest: None,
                 run: run.clone(),
                 reviewer: "file-responsibility".into(),
                 verdict: Decision::Pass,
@@ -1088,6 +1122,8 @@ mod tests {
                 replayed: false,
             },
             RunEvent::ReviewerResolved {
+                carried: false,
+                scope_digest: None,
                 run: run.clone(),
                 reviewer: "style".into(),
                 verdict: Decision::Pass,
@@ -1105,6 +1141,7 @@ mod tests {
                 replayed: false,
             },
             RunEvent::RunCompleted {
+                partial: false,
                 run,
                 verdict: Decision::Block,
                 gates: Gates {
@@ -1156,6 +1193,7 @@ mod tests {
         // rather than printing "0 in / 0 out tokens".
         let events = vec![
             RunEvent::RunStarted {
+                partial: false,
                 run: RunId("r".into()),
                 branch: "b".into(),
                 base: "main".into(),
@@ -1163,6 +1201,7 @@ mod tests {
                 reviewers: vec![],
             },
             RunEvent::RunCompleted {
+                partial: false,
                 run: RunId("r".into()),
                 verdict: Decision::Pass,
                 gates: Gates {
@@ -1185,6 +1224,7 @@ mod tests {
     fn comment_handles_zero_reviewers() {
         let events = vec![
             RunEvent::RunStarted {
+                partial: false,
                 run: RunId("r".into()),
                 branch: "b".into(),
                 base: "main".into(),
@@ -1192,6 +1232,7 @@ mod tests {
                 reviewers: vec![],
             },
             RunEvent::RunCompleted {
+                partial: false,
                 run: RunId("r".into()),
                 verdict: Decision::Pass,
                 gates: Gates {
@@ -1223,6 +1264,7 @@ mod tests {
 
         let empty_events = vec![
             RunEvent::RunStarted {
+                partial: false,
                 run: RunId("r".into()),
                 branch: "b".into(),
                 base: "main".into(),
@@ -1230,6 +1272,7 @@ mod tests {
                 reviewers: vec![],
             },
             RunEvent::RunCompleted {
+                partial: false,
                 run: RunId("r".into()),
                 verdict: Decision::Pass,
                 gates: Gates {
@@ -1275,6 +1318,7 @@ mod tests {
         // is inserted before that branch, so it must still ride a no-reviewer run.
         let events = vec![
             RunEvent::RunStarted {
+                partial: false,
                 run: RunId("r".into()),
                 branch: "b".into(),
                 base: "main".into(),
@@ -1282,6 +1326,7 @@ mod tests {
                 reviewers: vec![],
             },
             RunEvent::RunCompleted {
+                partial: false,
                 run: RunId("r".into()),
                 verdict: Decision::Pass,
                 gates: Gates {
@@ -1389,6 +1434,57 @@ mod tests {
     }
 
     #[test]
+    fn carried_reviewer_check_summary_states_it_was_carried() {
+        let mut events = sample_events();
+        for event in &mut events {
+            if let RunEvent::ReviewerResolved {
+                reviewer, carried, ..
+            } = event
+                && reviewer == "file-responsibility"
+            {
+                *carried = true;
+            }
+        }
+        let digest = digest(&events);
+        let checks = check_runs(&ctx(), &digest);
+        let carried_check = checks
+            .iter()
+            .find(|c| c.name == "bastion / file-responsibility")
+            .unwrap();
+        assert!(
+            carried_check
+                .summary
+                .contains("Carried forward from the branch's previous run"),
+            "got: {}",
+            carried_check.summary
+        );
+        let fresh_check = checks
+            .iter()
+            .find(|c| c.name == "bastion / tenant-isolation")
+            .unwrap();
+        assert!(!fresh_check.summary.contains("Carried"));
+    }
+
+    #[test]
+    fn a_partial_run_is_named_in_the_comment_headline() {
+        let mut events = sample_events();
+        for event in &mut events {
+            if let RunEvent::RunCompleted { partial, .. } = event {
+                *partial = true;
+            }
+        }
+        let body = comment_body(&digest(&events), false, None);
+        assert!(
+            body.contains("**Partial run:**"),
+            "a filtered verdict must not read as a full one, got: {body}"
+        );
+
+        // The ordinary full run carries no such note.
+        let full = comment_body(&digest(&sample_events()), false, None);
+        assert!(!full.contains("Partial run"));
+    }
+
+    #[test]
     fn truncate_key_shortens_the_material_and_keeps_type_and_comment() {
         let long = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGVudGlyZWx5RmFrZWtleW1hdGVyaWFsaGVyZQ== ada@example.com";
         let short = truncate_key(long);
@@ -1446,6 +1542,7 @@ mod tests {
         // A stream with no run.completed has no recorded verdict, so the aggregate
         // cannot read as a pass: an incomplete run concludes failure.
         let events = vec![RunEvent::RunStarted {
+            partial: false,
             run: RunId("r".into()),
             branch: "b".into(),
             base: "main".into(),
@@ -1467,6 +1564,7 @@ mod tests {
     ) -> Vec<RunEvent> {
         let run = RunId("r-rec".into());
         let mut events = vec![RunEvent::RunStarted {
+            partial: false,
             run: run.clone(),
             branch: "feat".into(),
             base: "main".into(),
@@ -1481,6 +1579,7 @@ mod tests {
         }];
         events.extend(rows);
         events.push(RunEvent::RunCompleted {
+            partial: false,
             run,
             verdict: completed.0,
             gates: completed.1,
@@ -1495,6 +1594,8 @@ mod tests {
 
     fn gate_resolved(name: &str, verdict: Decision, findings: Vec<Finding>) -> RunEvent {
         RunEvent::ReviewerResolved {
+            carried: false,
+            scope_digest: None,
             run: RunId("r-rec".into()),
             reviewer: name.into(),
             verdict,
@@ -1628,6 +1729,7 @@ mod tests {
         // with no reviewers) and recorded a clean pass. The aggregate stays green.
         let events = vec![
             RunEvent::RunStarted {
+                partial: false,
                 run: RunId("r-rec".into()),
                 branch: "feat".into(),
                 base: "main".into(),
@@ -1635,6 +1737,7 @@ mod tests {
                 reviewers: vec![],
             },
             RunEvent::RunCompleted {
+                partial: false,
                 run: RunId("r-rec".into()),
                 verdict: Decision::Pass,
                 gates: Gates {
@@ -1667,6 +1770,7 @@ mod tests {
         // advisor check concludes success and the recorded pass aggregate stays green.
         let events = vec![
             RunEvent::RunStarted {
+                partial: false,
                 run: RunId("r-rec".into()),
                 branch: "feat".into(),
                 base: "main".into(),
@@ -1677,6 +1781,8 @@ mod tests {
                 }],
             },
             RunEvent::ReviewerResolved {
+                carried: false,
+                scope_digest: None,
                 run: RunId("r-rec".into()),
                 reviewer: "a1".into(),
                 verdict: Decision::Pass,
@@ -1688,6 +1794,7 @@ mod tests {
                 replayed: false,
             },
             RunEvent::RunCompleted {
+                partial: false,
                 run: RunId("r-rec".into()),
                 verdict: Decision::Pass,
                 gates: Gates {
@@ -1806,6 +1913,7 @@ mod tests {
         assert_eq!(annotations.len(), MAX_ANNOTATIONS);
 
         let row = ReviewerRow {
+            carried: false,
             name: "style".into(),
             mode: Mode::Advisor,
             backend: Some(Backend::Codex),
@@ -1825,6 +1933,7 @@ mod tests {
     #[test]
     fn reviewer_summary_tokens_line_includes_cache_only_when_nonzero() {
         let row_with = |cache_read: u64| ReviewerRow {
+            carried: false,
             name: "r".into(),
             mode: Mode::Gate,
             backend: Some(Backend::ClaudeCode),

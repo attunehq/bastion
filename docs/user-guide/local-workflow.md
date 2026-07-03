@@ -10,8 +10,9 @@ order: 5
 > and inspecting what was saved.
 
 The local CLI applies the same reviewers and decisions CI enforces: CI executes them
-fresh or replays an attested local run. So a green local loop usually means a PR that
-CI confirms. Two things can make a local run differ: CI feeds reviewers the PR's
+fresh, replays an attested local run, or carries an unchanged reviewer forward from
+the branch's previous CI run. So a green local loop usually means a PR that CI
+confirms. Two things can make a local run differ: CI feeds reviewers the PR's
 description and discussion that a default local run lacks, and a local run also merges
 in any personal reviewers from your user-level registry, which CI never sees (see
 [Authoring reviewers](./authoring-reviewers.md#user-level-reviewers)). This chapter
@@ -28,18 +29,75 @@ bastion review --base main
 
 `bastion review` computes the changeset (working tree vs. `--base`, including
 uncommitted and untracked files), selects the reviewers whose triggers match, and
-renders progress and verdicts. A purely local review always executes every matched
-reviewer, in parallel with per-reviewer timeouts. A CI review (`--repo`/`--pr`)
+renders progress and verdicts. Matched reviewers run in parallel with per-reviewer
+timeouts, and a re-run is incremental (next section): a reviewer that already
+passed may carry its verdict forward instead of executing again, locally and in CI.
+A CI review (`--repo`/`--pr`)
 against a repository with `attestations: true` first checks for a verified
 attestation covering the run: a reviewer the attestation covers replays its recorded
-verdict, with no backend dispatch and no timeout; everything else executes as usual
-(see [Attestation](../developer-guide/attestation.md)).
+verdict, with no backend dispatch and no timeout; every other reviewer then resolves
+the ordinary way, carrying its prior pass if its scoped content is unchanged and
+otherwise executing fresh (see
+[Attestation](../developer-guide/attestation.md)).
 
 - `--base <branch>`: the branch to diff against. Defaults to `main`.
 - `--format <human|jsonl>`: output format. Defaults to `human`.
 - `--repo <owner/name>`: the GitHub repository to gather pull request context from. Defaults to `$GITHUB_REPOSITORY`.
 - `--pr <number>`: the pull request whose description and discussion the reviewers read as context. Requires a repository, from `--repo` or `$GITHUB_REPOSITORY`; passing `--pr` with no repository is an error.
 - `--config-dir <path>`: the user-level config directory to merge personal reviewers from (env `BASTION_CONFIG_DIR`). Defaults to your platform config directory (`~/.config/bastion` on Linux, `~/Library/Application Support/bastion` on macOS, `%APPDATA%\bastion` on Windows). The user-level layer is applied only to a purely local review; a review carrying `--repo`/`--pr` uses the repository's reviewers alone.
+- `--reviewer <name>` (repeatable; alias `--only`): run only these triggered reviewers. An unknown or untriggered name is an error. Excluding a triggered reviewer makes the run *partial* (see below).
+- `--fresh`: disable the incremental carry below, so no reviewer reuses a prior pass (local or CI). It does not affect attestation replay: a `--repo`/`--pr` run still replays reviewers a verified attestation covers.
+
+### Re-runs are incremental
+
+The loop's dominant cost would otherwise be re-executing reviewers that already
+passed. So on a re-run of the same branch, a reviewer whose previous verdict was a
+pass, and whose *scope digest* is unchanged since that run, is *carried*: its
+prior verdict counts in the gate tally, the stream marks it `"carried": true`, and
+no agent runs and no tokens are spent on it. The digest covers everything the
+verdict was keyed to: the reviewer's own definition, the diff of the changed
+files its `trigger` matched (against both the merge base and the base branch's
+current tip), the commit messages that touched those files, and the content of
+untracked matched files. So an edit to a triggered file, a reworded commit that
+touched one, an edited reviewer, or a base branch that moved on covered files all
+re-run the reviewer; the ones that blocked always re-run, since your fix touched
+the files they flagged. Blocks are never carried. The boundary is the reviewer's
+`trigger`: it already declares which files the concern depends on, and carry keys
+the verdict to exactly that. A reviewer with `attestation: never` in the registry
+is never carried, and `--fresh` re-runs everything.
+
+One extra condition applies to the repository's own reviewers (not personal
+user-level ones): they carry only from a prior run the binary sealed and can still
+verify, with no test seam recorded. A prior run that was never sealed, or whose
+seal no longer checks out, executes those reviewers fresh; nothing warns about it,
+since carry is an optimization and fresh execution is always correct.
+
+CI carries too. A workflow that persists and restores the run store across pushes
+(the example workflow in
+[Continuous integration](./continuous-integration.md#the-workflow) includes the
+restore and upload steps that do this) lets a push carry an unchanged reviewer
+forward from the branch's previous CI run, the same way your local loop does and on
+the same verified-seal condition. This is separate
+from [attestation replay](#attesting-a-run-for-ci): replay reuses your signed local
+run so CI need not re-execute it at all, while carry reuses CI's own prior run when a
+later push leaves a reviewer's scoped content untouched.
+
+### Running a subset by hand
+
+`--reviewer <name>` narrows the run to reviewers you name, for iterating on one
+stubborn gate without waiting on the rest. The named reviewers never carry a prior
+pass, local or CI (asking for a reviewer by name means asking for it to run); on a
+`--repo`/`--pr` run, a verified attestation can still replay a selected
+reviewer. When the selection excludes at least one triggered reviewer, the run is
+marked **partial** everywhere it is recorded: the `run.started`/`run.completed`
+events carry `"partial": true`, the human output and `bastion runs` say so, and
+the run cannot be attested. (Naming every triggered reviewer is a full run: the
+selection reduced nothing, so nothing is marked.) A partial green speaks only
+for the reviewers that ran. Finish with a plain `bastion review`: only a full run
+seals a real green. Carry spares any reviewer whose scoped content has not moved
+since an eligible prior run, but not from the partial run itself: a partial run is
+never sealed, so the repository's own reviewers re-execute rather than carry from
+it.
 
 The CI workflow passes `--repo`/`--pr` so reviewers see the PR's stated intent and discussion. Locally you rarely need them: with no PR, intent comes from your branch's commit messages (`base..HEAD`), and each reviewer's prior findings come from the run store. When you do pass them, Bastion builds its GitHub REST client from `GITHUB_TOKEN` and `GITHUB_API_URL` (the latter defaults to the public API and points at a GitHub Enterprise host when set). Discussion gathering reads the first 100 conversation comments and the first 100 review comments and does not paginate, so later comments on a very long thread are not included. Gathering PR context is read-only and best effort, so an API or token failure never fails the review; it just drops back to the local context.
 
@@ -85,10 +143,10 @@ The event types:
 
 | Event | Meaning |
 | --- | --- |
-| `run.started` | The run began; lists the reviewers that matched. Each either executes or replays from a verified attestation. |
-| `reviewer.started` | One reviewer began: dispatched to its backend, or, for a reviewer covered by a verified attestation, reconstructed from the bundle with no backend dispatched. |
-| `reviewer.resolved` | One reviewer finished; carries its `verdict`, `summary`, `findings`, `usage`, and a `has_transcript` flag. Carries `replayed: true` when the verdict came from a verified attestation instead of a fresh execution. |
-| `run.completed` | The aggregate decision and the gate tally, plus the run's wall-clock `duration_ms` and the usage totals (`tokens_in`, `tokens_out`, `cache_read`, `cost_usd`) summed across reviewers. |
+| `run.started` | The run began; lists the reviewers in the plan: each executes, replays from a verified attestation, or carries from the branch's previous run (locally or in CI). Under `--reviewer` the list holds only the selected reviewers, and the event carries `partial: true` when that selection excludes at least one triggered reviewer. |
+| `reviewer.started` | One reviewer began: dispatched to its backend, reconstructed from a verified attestation bundle, or carried from the branch's previous run; the latter two dispatch no backend. |
+| `reviewer.resolved` | One reviewer finished; carries its `verdict`, `summary`, `findings`, `usage`, and a `has_transcript` flag. Carries `replayed: true` when the verdict came from a verified attestation, and `carried: true` when it was carried forward from the branch's previous run (local or CI) instead of a fresh execution. A reviewer that produced a real verdict this run (a fresh execution or a carried pass) is also stamped with `scope_digest`, a hash of everything the verdict was keyed to (the reviewer's definition plus its trigger-scoped diffs, commit messages, and untracked content); a later run carries a prior pass only when its own digest is identical. The field is present only when Bastion could compute the digest and it still described the reviewed tree at run end, so it is absent when the reviewer produced no verdict (a crash, a timeout, or malformed output), when the digest could not be computed (an unresolved merge base, for one), or when the scoped content changed while the run was in flight; in each case a later run cannot carry this verdict, and a replayed reviewer likewise carries none of its own. |
+| `run.completed` | The aggregate decision and the gate tally, plus the run's wall-clock `duration_ms` and the usage totals (`tokens_in`, `tokens_out`, `cache_read`, `cost_usd`) summed across reviewers. Carries `partial: true` (as does `run.started`) when `--reviewer` narrowed the run. |
 | `run.attested` | A signed local run was replayed; carries the replayed `reviewers`, the attesting `public_key`, and `attested_at`. |
 | `run.attestation-fallback` | Attestation was attempted but not honored; carries the `reason` (a missing note, an unregistered key, a stale binding, and so on). |
 
@@ -249,8 +307,11 @@ reviewer typically reaches a host service over the container network rather than
 ## Attesting a run for CI
 
 Every reviewer is an agent invocation, so a project running Bastion both locally
-and in CI pays for each review roughly twice: once in your loop, once again when
-CI confirms it. If your repository has set `attestations: true` in its registry
+and in CI can pay for each review roughly twice: once in your loop, once again when
+CI confirms it. Incremental carry recovers some of that across CI pushes (an
+unchanged reviewer carries from the branch's previous CI run), but the first CI run
+of a changeset has nothing to carry from. If your repository has set
+`attestations: true` in its registry
 (see [Continuous integration](./continuous-integration.md#attesting-a-run-so-ci-can-replay-it)),
 you can sign your last green local run so CI reuses it instead of re-running
 every reviewer:
@@ -275,7 +336,9 @@ review, and attest that run instead. `bastion attest` also refuses a run recorde
 while any backend or container override was set (`BASTION_CLAUDE_BIN`,
 `BASTION_CODEX_BIN`, `BASTION_PI_BIN`, `BASTION_CONTAINER_ENGINE`): such a run
 exercised a stubbed reviewer, not a real review, so it cannot be attested either.
-Re-run `bastion review` without those variables set, then attest that run.
+Re-run `bastion review` without those variables set, then attest that run. A
+partial run (`bastion review --reviewer`) is refused too: its verdict speaks only
+for the reviewers you selected, so run a full `bastion review` and attest that.
 
 `bastion attest` also re-checks that your repository has not moved on since a
 clean review (the same tree, the same diff, the same effective reviewer config) and
