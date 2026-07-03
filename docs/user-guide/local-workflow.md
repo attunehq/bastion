@@ -283,9 +283,12 @@ refuses to sign if it has, so the note can never claim the reviewers saw
 something they did not. It signs with your SSH key (`git config
 user.signingkey`, or `--key <path>` to name one explicitly), prompting for a
 hardware token or keychain if your key requires it, and prints the exact push
-command. The signed bundle carries the run's actual verdicts and findings, not
-just a pass/fail flag, so a blocked local run that gets attested and pushed
-still blocks in CI.
+command. The signed bundle carries the repository reviewers' actual verdicts
+and findings, not just a pass/fail flag, so a repository reviewer that blocked
+locally still blocks in CI when its verdict replays. Your personal user-level
+reviewers are excluded from the bundle (they never gate anyone else's PR), so
+a run blocked only by a personal reviewer still attests, and CI sees only the
+repository reviewers' results.
 
 Push the printed command (or fold it into your normal `git push`) before
 opening the PR, so CI has the note when it runs. CI verifies the signature
