@@ -119,7 +119,9 @@ Following one review top to bottom touches most of the crate:
     identical digest is *carried*: its verdict folds into the run without a
     backend executing. A repository reviewer carries only from a prior run whose
     seal verifies (and records no test seam); `--fresh` disables carry, and an
-    explicit `--reviewer` selection executes its reviewers fresh. A CI run carries
+    explicit `--reviewer` selection disables carry for the selected reviewers,
+    though a `--repo`/`--pr` run can still replay one from a verified attestation
+    (replay is planned in step 5a, before this one). A CI run carries
     from its own prior CI run the same way, since that seal verifies under the
     release secret and the digest binds the content; carry and attestation replay
     stay complementary (replay reuses the author's signed local run, carry reuses
