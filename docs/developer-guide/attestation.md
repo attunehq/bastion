@@ -57,9 +57,9 @@ contributors are not disabling lints." Three rules define what is trusted and wh
 
 The bundle binds to the committed HEAD tree, the merge-base tree, the
 `base..HEAD` patch-id, the effective config hash, the resolved reviewer events,
-and the seam and dirty flags. CI verifies every binding and falls back to a
-full run on any mismatch. `bastion attest` refuses dirty runs, so only
-committed content reaches CI as an attestation.
+and the seam and dirty flags. CI verifies every binding, and any mismatch skips
+replay so the reviewers resolve the ordinary way. `bastion attest` refuses dirty
+runs, so only committed content reaches CI as an attestation.
 
 - **The changeset, not the commit.** The merge-base tree and the head tree (with
   a patch-id over the diff). CI recomputes its own merge base against the PR's
@@ -70,8 +70,8 @@ committed content reaches CI as an attestation.
   the commit id). The note itself is still looked up by commit id, on HEAD or
   the PR's head SHA (see [Storage](#storage-a-git-note)), so a squash or rebase
   that changes the commit id leaves the note behind on the old, now-orphaned
-  commit; CI does not find it there and falls back to a full run. Re-running
-  `bastion attest` after a rewrite re-attaches the note to the new HEAD.
+  commit; CI does not find it there, so those reviewers resolve without replay.
+  Re-running `bastion attest` after a rewrite re-attaches the note to the new HEAD.
 - **The effective reviewer config.** A hash of the repository registry after
   each file's `defaults` are applied. The user-level registry is excluded:
   personal reviewers never gate anyone else's PR, so they cannot attest anything
@@ -170,9 +170,9 @@ id it hangs off, but the lookup itself is still by commit: CI looks for the
 note on HEAD, then the PR's head SHA (see
 [Verification and replay in CI](#verification-and-replay-in-ci)). A squash or
 rebase that changes the commit id leaves the note behind on the old, now
-orphaned commit; CI does not find it there and falls back to a full run.
-Re-running `bastion attest` after the rewrite re-attaches the note to the new
-HEAD.
+orphaned commit; CI does not find it there, so the reviewers resolve without
+replay. Re-running `bastion attest` after the rewrite re-attaches the note to the
+new HEAD.
 
 ## Signing
 
@@ -189,7 +189,8 @@ already uses), assembles them into an ephemeral `allowed_signers` input, and
 runs `ssh-keygen -Y verify` against it. Enrolling a signing key with GitHub is
 something the coding agent cannot do without the user's own GitHub
 credentials, so a signature by any other key, including one freshly minted on
-the author's machine, fails verification and falls back to a full run.
+the author's machine, fails verification, and CI resolves the reviewers without
+replay.
 
 Registry config is a single switch: `attestations: true` enables the feature
 (default off; CI ignores notes entirely without it), and a reviewer can opt out
@@ -262,9 +263,9 @@ the author's own signed one.
 purely local review never attempts it. It first checks whether the CI
 checkout is dirty (uncommitted tracked changes or untracked files). A dirty
 checkout never reaches note lookup: `commands::review` records a
-`run.attestation-fallback` event with the reason and executes every reviewer
-fresh, since a dirty working tree's reviewers see content no attestation's
-committed bindings name. Given a clean checkout, it looks up the note on HEAD
+`run.attestation-fallback` event with the reason, and its reviewers then resolve
+the ordinary way through carry or fresh execution, since a dirty working tree's
+reviewers see content no attestation's committed bindings name. Given a clean checkout, it looks up the note on HEAD
 first, falling back to the PR's head SHA when HEAD carries none (CI's
 checkout can be a merge commit, so the note the author actually attested may
 hang off the PR's own head commit instead). Given a note, it verifies the
@@ -274,7 +275,8 @@ embedded secret, and checks every binding (head tree, merge-base tree,
 patch-id, config hash) against its own re-derived values. Then, per routed
 reviewer: one covered by the bundle and not opted out (`attestation: never`)
 replays; everything else, including a reviewer the bundle does not cover,
-executes fresh. Coverage mismatch degrades rather than invalidating the whole
+continues to carry planning and then carries an eligible prior pass or executes
+fresh. Coverage mismatch degrades rather than invalidating the whole
 plan.
 
 The merged result flows into the normal report path, so `bastion github report`
@@ -292,14 +294,15 @@ does for the drift advisory. Anyone reading the PR can see that the gate was
 satisfied by an attested local run, who attested it, and which note on the head
 commit backs it.
 
-Every failure is fail-closed to a full run, never to a silent pass: a dirty CI
-checkout (checked before note lookup even runs), a missing or unverifiable
-note, a key the author has not registered with GitHub, a seal that does not
-verify (tampered, produced by a different release, or carrying an active test
-seam), a binding mismatch, or a stale base all mean the reviewers simply
-execute. The run records why as a `run.attestation-fallback`
-event, and the sticky comment surfaces the same reason as a line under the
-headline. Replay itself is recorded as a single `run.attested` event covering
+Every failure is fail-closed to ordinary reviewer resolution, never to a silent
+pass: a dirty CI checkout (checked before note lookup even runs), a missing or
+unverifiable note, a key the author has not registered with GitHub, a seal that
+does not verify (tampered, produced by a different release, or carrying an active
+test seam), a binding mismatch, or a stale base all skip replay. The affected
+reviewers then resolve the ordinary way: an eligible unchanged prior pass may
+still carry, and the rest execute. The run records why as a
+`run.attestation-fallback` event, and the sticky comment surfaces the same reason
+as a line under the headline. Replay itself is recorded as a single `run.attested` event covering
 every replayed reviewer, and each replayed reviewer's own `reviewer.resolved`
 event carries `replayed: true`.
 

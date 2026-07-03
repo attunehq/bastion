@@ -115,11 +115,13 @@ on:
     types: [opened, synchronize, reopened]
 
 # The report step writes the PR comment and the check runs, so the job needs more
-# than read access.
+# than read access. `actions: read` lets the run-store restore step below list and
+# download this branch's prior run artifact.
 permissions:
   contents: read
   pull-requests: write
   checks: write
+  actions: read
 
 jobs:
   review:
@@ -155,6 +157,34 @@ jobs:
       #    are forwarded in by name.
       # 3. Stand up anything your reviewers consume (a preview env, a database).
 
+      # Bring this branch's most recent prior run into the data directory before
+      # reviewing. A fresh runner starts with an empty store, so without this two
+      # things reset on every push: a reviewer's recall of the findings it raised
+      # last push, and incremental carry (an unchanged reviewer reusing its prior
+      # pass instead of re-executing). Best effort: a first push, or an expired
+      # artifact, restores nothing and the review runs every reviewer fresh.
+      - name: Restore prior run history
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Pass the branch name through the environment, never spliced into the
+          # script text, so an attacker-chosen branch name cannot inject shell.
+          HEAD_REF: ${{ github.head_ref }}
+          RUN_ID: ${{ github.run_id }}
+          WORKSPACE: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$WORKSPACE/.bastion/runs"
+          # --workflow takes the `name:` at the top of this file. The newest run of
+          # this branch other than the current one is the prior run to restore.
+          prior="$(gh run list --workflow bastion --branch "$HEAD_REF" \
+            --json databaseId \
+            --jq "map(select(.databaseId != $RUN_ID)) | .[0].databaseId // empty")" \
+            || prior=
+          if [ -n "$prior" ]; then
+            gh run download "$prior" -n bastion-run -D "$WORKSPACE/.bastion/runs" \
+              || echo "no prior bastion-run artifact to restore (first run or expired)"
+          fi
+
       - name: Review
         env:
           BASTION_DATA_DIR: ${{ github.workspace }}/.bastion
@@ -165,8 +195,8 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         # Non-zero exit on a blocked gate fails the job; that is the merge gate.
         # --repo/--pr feed the reviewers the PR's stated intent and discussion alongside
-        # the diff. Persisting the run store between runs (upload and restore
-        # .bastion/runs) buys two things a fresh runner would lose: cross-run
+        # the diff. The restore step above and the upload step below persist the run
+        # store between runs, which buys two things a fresh runner would lose: cross-run
         # prior-findings memory, and incremental carry, where an unchanged reviewer
         # reuses its prior pass instead of re-executing. Keep the backend on PATH with no
         # BASTION_*_BIN override, so the run seals clean and stays carry-eligible.
@@ -201,6 +231,18 @@ jobs:
             --repo "${{ github.repository }}" \
             --pr "${{ github.event.pull_request.number }}" \
             --sha "${{ github.event.pull_request.head.sha }}"
+
+      # Persist this run so the next push can restore it (see the restore step
+      # above). The data dir is dot-prefixed, so hidden files must be included or the
+      # upload is empty and the next restore finds nothing to carry from.
+      - name: Upload the run
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bastion-run
+          path: ${{ github.workspace }}/.bastion/runs/**
+          include-hidden-files: true
+          if-no-files-found: warn
 ```
 
 ### `bastion github report`

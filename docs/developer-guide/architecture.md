@@ -93,13 +93,15 @@ Following one review top to bottom touches most of the crate:
     source (`--repo`/`--pr`), `commands::review` first checks whether the CI
     checkout is dirty (uncommitted tracked changes or untracked files). A dirty
     checkout skips note lookup entirely: it records a `run.attestation-fallback`
-    event and every reviewer executes fresh. Only a clean checkout proceeds to
+    event, and its reviewers resolve through the ordinary carry-or-execute path
+    (step 5b). Only a clean checkout proceeds to
     look up the note on HEAD (falling back to the PR's head SHA), verify its
     signature against the PR author's GitHub-registered SSH signing keys, verify
     the run seal, and check every binding against CI's own re-derived values,
     before the runner fans anything out. A routed reviewer the bundle covers and
-    that has not opted out replays; everything else executes fresh in the next
-    step. Every failure degrades to a full run for the affected reviewers; a
+    that has not opted out replays; everything else continues to carry planning
+    (step 5b), which carries an eligible prior pass or executes it fresh. Every
+    failure degrades the affected reviewers to that same path; a
     purely local review skips this step entirely. See [Attestation](./attestation.md).
 5b. **Plan carry** (`carry.rs`, both surfaces). Every reviewer about to run
     gets, best effort, a trigger-scoped diff digest (a digest that fails to

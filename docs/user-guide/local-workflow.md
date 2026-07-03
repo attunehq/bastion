@@ -73,9 +73,11 @@ seal no longer checks out, executes those reviewers fresh; nothing warns about i
 since carry is an optimization and fresh execution is always correct.
 
 CI carries too. A workflow that persists and restores the run store across pushes
-(the example in [Continuous integration](./continuous-integration.md) does) lets a
-push carry an unchanged reviewer forward from the branch's previous CI run, the same
-way your local loop does and on the same verified-seal condition. This is separate
+(the example workflow in
+[Continuous integration](./continuous-integration.md#the-workflow) includes the
+restore and upload steps that do this) lets a push carry an unchanged reviewer
+forward from the branch's previous CI run, the same way your local loop does and on
+the same verified-seal condition. This is separate
 from [attestation replay](#attesting-a-run-for-ci): replay reuses your signed local
 run so CI need not re-execute it at all, while carry reuses CI's own prior run when a
 later push leaves a reviewer's scoped content untouched.
@@ -140,7 +142,7 @@ The event types:
 | --- | --- |
 | `run.started` | The run began; lists the reviewers in the plan: each executes, replays from a verified attestation, or carries from the branch's previous run (locally or in CI). Under `--reviewer` the list holds only the selected reviewers, and the event carries `partial: true` when that selection excludes at least one triggered reviewer. |
 | `reviewer.started` | One reviewer began: dispatched to its backend, reconstructed from a verified attestation bundle, or carried from the branch's previous run; the latter two dispatch no backend. |
-| `reviewer.resolved` | One reviewer finished; carries its `verdict`, `summary`, `findings`, `usage`, and a `has_transcript` flag. Carries `replayed: true` when the verdict came from a verified attestation, and `carried: true` when it was carried forward from the branch's previous run (local or CI) instead of a fresh execution. A reviewer that produced a real verdict this run (a fresh execution or a carried pass) is also stamped with `scope_digest`, a hash of everything the verdict was keyed to (the reviewer's definition plus its trigger-scoped diffs, commit messages, and untracked content); a later run carries a prior pass only when its own digest is identical. The field is absent when a reviewer failed to produce a verdict (a crash, a timeout, or malformed output) and when its scoped content changed while the run was in flight, since neither leaves a verdict a later run may carry; a replayed reviewer carries no digest of its own. |
+| `reviewer.resolved` | One reviewer finished; carries its `verdict`, `summary`, `findings`, `usage`, and a `has_transcript` flag. Carries `replayed: true` when the verdict came from a verified attestation, and `carried: true` when it was carried forward from the branch's previous run (local or CI) instead of a fresh execution. A reviewer that produced a real verdict this run (a fresh execution or a carried pass) is also stamped with `scope_digest`, a hash of everything the verdict was keyed to (the reviewer's definition plus its trigger-scoped diffs, commit messages, and untracked content); a later run carries a prior pass only when its own digest is identical. The field is present only when Bastion could compute the digest and it still described the reviewed tree at run end, so it is absent when the reviewer produced no verdict (a crash, a timeout, or malformed output), when the digest could not be computed (an unresolved merge base, for one), or when the scoped content changed while the run was in flight; in each case a later run cannot carry this verdict, and a replayed reviewer likewise carries none of its own. |
 | `run.completed` | The aggregate decision and the gate tally, plus the run's wall-clock `duration_ms` and the usage totals (`tokens_in`, `tokens_out`, `cache_read`, `cost_usd`) summed across reviewers. Carries `partial: true` (as does `run.started`) when `--reviewer` narrowed the run. |
 | `run.attested` | A signed local run was replayed; carries the replayed `reviewers`, the attesting `public_key`, and `attested_at`. |
 | `run.attestation-fallback` | Attestation was attempted but not honored; carries the `reason` (a missing note, an unregistered key, a stale binding, and so on). |
