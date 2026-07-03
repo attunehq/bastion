@@ -294,172 +294,13 @@ pub async fn execute_with(
 ) -> Result<Decision> {
     let run_started = Instant::now();
 
-    // Emit `reviewer.started` for each reviewer up front (the pending-checks
-    // equivalent), then launch the ones that must actually execute concurrently.
-    // A replayed reviewer still gets a `reviewer.started` (mirroring what
-    // actually produced the verdict, per its own definition) so the reported
-    // plan matches what ran, but it is never handed to the `JoinSet`: only the
-    // non-replayed matched reviewers are. The started events are also retained
-    // for persistence so `run.jsonl` is the *full* event stream the docs
-    // promise, not just the resolve/completed tail.
-    let mut started_events =
-        Vec::with_capacity(matched.len() + ctx.replayed.len() + ctx.carried.len());
-    for reviewer in matched {
-        let event = RunEvent::ReviewerStarted {
-            run: ctx.run.clone(),
-            reviewer: reviewer.name.clone(),
-            mode: reviewer.mode,
-            backend: reviewer.backend,
-        };
-        emit(&event);
-        started_events.push(event);
-    }
-    for replay in ctx.replayed.values() {
-        let event = RunEvent::ReviewerStarted {
-            run: ctx.run.clone(),
-            reviewer: replay.reviewer.name.clone(),
-            mode: replay.reviewer.mode,
-            backend: replay.reviewer.backend,
-        };
-        emit(&event);
-        started_events.push(event);
-    }
-    // A carried reviewer is announced the same way a replayed one is: it is
-    // part of the run's plan even though no backend executes for it.
-    for carry in ctx.carried.values() {
-        let event = RunEvent::ReviewerStarted {
-            run: ctx.run.clone(),
-            reviewer: carry.reviewer.name.clone(),
-            mode: carry.reviewer.mode,
-            backend: carry.reviewer.backend,
-        };
-        emit(&event);
-        started_events.push(event);
-    }
-
-    let mut set: JoinSet<(usize, ReviewTaskResult)> = JoinSet::new();
-    for (index, reviewer) in matched.iter().enumerate() {
-        let request = OwnedRequest {
-            reviewer: (*reviewer).clone(),
-            run: ctx.run.clone(),
-            repo_root: ctx.repo_root.clone(),
-            base: ctx.base.clone(),
-            context: ctx.context.clone(),
-        };
-        let timeout = reviewer.timeout.unwrap_or(DEFAULT_TIMEOUT);
-        let future = exec(request);
-        set.spawn(async move {
-            let started = Instant::now();
-            let outcome = match tokio::time::timeout(timeout, future).await {
-                Ok(result) => match result {
-                    Ok(outcome) => TaskOutcome::Ok(outcome),
-                    Err(err) => TaskOutcome::Failed(format!("{err:#}")),
-                },
-                Err(_elapsed) => TaskOutcome::TimedOut,
-            };
-            (
-                index,
-                ReviewTaskResult {
-                    outcome,
-                    duration: started.elapsed(),
-                },
-            )
-        });
-    }
-
-    // Collect results as they complete, then restore registry order so the
-    // persisted stream is deterministic regardless of completion timing.
-    let mut results: Vec<Option<ReviewTaskResult>> = (0..matched.len()).map(|_| None).collect();
-    while let Some(joined) = set.join_next().await {
-        match joined {
-            Ok((index, result)) => results[index] = Some(result),
-            Err(join_err) => {
-                // A panicked task: we have no index, so we cannot place it. This
-                // should not happen (tasks catch their own errors), but if it
-                // does, it must not silently drop a gate. Fall through; the
-                // corresponding slot stays `None` and is treated as a crash below.
-                tracing::error!(error = %join_err, "a reviewer task panicked");
-            }
-        }
-    }
-
-    // Resolve each freshly-executed reviewer, applying fail-closed / fail-open
-    // policy, then fold in every replayed reviewer from its attested event. A
-    // replayed row is never subject to fail-closed/fail-open: it already carries
-    // a real, previously-resolved verdict, so it is reconstructed verbatim
-    // (verdict, findings, usage, duration) rather than re-derived.
-    let mut resolved = Vec::with_capacity(matched.len() + ctx.replayed.len() + ctx.carried.len());
-    for (index, reviewer) in matched.iter().enumerate() {
-        let digest = ctx.scope_digests.get(&reviewer.name).cloned();
-        resolved.push(resolve(reviewer, results[index].take(), digest));
-    }
-    for replay in ctx.replayed.values() {
-        resolved.push(resolve_replayed(replay));
-    }
-    for carry in ctx.carried.values() {
-        resolved.push(resolve_carried(carry));
-    }
-
-    // Reviewers judge the live working tree, so a digest sampled before
-    // execution can go stale while they run. Re-derive each stamped digest now
-    // and keep it only when it still matches. A mismatch on a *fresh* verdict
-    // drops the stamp, which fails safe: the reviewer judged the tree it saw,
-    // and the next run simply cannot carry from this one. A mismatch on a
-    // *carried* verdict is worse: the prior pass was reused precisely because
-    // the digest matched at plan time, so if the scoped content changed
-    // mid-run, that pass no longer describes the tree this run reports on.
-    // The verdict itself is untrustworthy, so it fails closed (gate) or is
-    // skipped (advisor), same as any reviewer that could not produce one.
-    if let Some(probe) = &ctx.digest_probe {
-        // Re-scan the changed-file set too: a file created mid-run that a
-        // trigger matches must reach the recomputed digest, or an addition
-        // would be invisible to this check. A failed re-scan recomputes
-        // nothing, so every stamped digest mismatches and the check degrades
-        // in the fail-safe direction.
-        let changed_now = crate::git::changed_files(&ctx.repo_root, &probe.base)
-            .map_err(|err| {
-                tracing::warn!(error = %err, "could not re-scan changed files post-run");
-                err
-            })
-            .ok();
-        for item in &mut resolved {
-            if let Some(pre) = item.scope_digest.take() {
-                let now = changed_now.as_ref().and_then(|changed| {
-                    crate::carry::scope_digest(
-                        &ctx.repo_root,
-                        &probe.base,
-                        &probe.merge_base,
-                        &item.reviewer,
-                        changed,
-                    )
-                    .ok()
-                });
-                if now.as_deref() == Some(pre.as_str()) {
-                    item.scope_digest = Some(pre);
-                } else if item.carried {
-                    tracing::warn!(
-                        reviewer = %item.reviewer.name,
-                        "the scoped content changed while this run executed; \
-                         its carried verdict no longer describes the tree and fails closed"
-                    );
-                    *item = fail(
-                        &item.reviewer,
-                        item.counts_as_gate,
-                        "the working tree content this reviewer's carried verdict was \
-                         scoped to changed while the run executed; re-run to review the \
-                         current content",
-                        Duration::ZERO,
-                    );
-                } else {
-                    tracing::warn!(
-                        reviewer = %item.reviewer.name,
-                        "the working tree changed while this reviewer ran; \
-                         dropping its scope digest so the next run cannot carry it"
-                    );
-                }
-            }
-        }
-    }
+    // Announce every reviewer in the plan, launch the fresh set concurrently and
+    // collect it in registry order, then resolve fresh + replayed + carried rows
+    // and re-check each stamped scope digest against the post-run tree.
+    let started_events = emit_started_events(ctx, matched, emit);
+    let results = run_fresh(matched, ctx, exec).await;
+    let mut resolved = resolve_all(matched, ctx, results);
+    recheck_scope_digests(&mut resolved, ctx);
 
     // Persist per-reviewer artifacts and build the resolve events. The persisted
     // stream opens with the caller's `run.attestation-fallback` (when present,
@@ -542,6 +383,200 @@ pub async fn execute_with(
     seal_run(layout, ctx, &stream);
 
     Ok(aggregate)
+}
+
+/// Emit and retain a `reviewer.started` for every reviewer in the run's plan.
+///
+/// The plan is the fresh `matched` set plus the replayed and carried reviewers:
+/// a replayed or carried reviewer still matched routing, so it is announced the
+/// same way (mirroring its own definition) even though no backend dispatches for
+/// it. Only the fresh set is later handed to the `JoinSet`. The events are also
+/// returned so persistence can prepend them, keeping `run.jsonl` the *full*
+/// stream the docs promise rather than just the resolve/completed tail.
+fn emit_started_events(
+    ctx: &ExecContext,
+    matched: &[&Reviewer],
+    emit: &mut dyn FnMut(&RunEvent),
+) -> Vec<RunEvent> {
+    let planned = matched
+        .iter()
+        .map(|r| (&r.name, r.mode, r.backend))
+        .chain(
+            ctx.replayed
+                .values()
+                .map(|r| (&r.reviewer.name, r.reviewer.mode, r.reviewer.backend)),
+        )
+        .chain(
+            ctx.carried
+                .values()
+                .map(|c| (&c.reviewer.name, c.reviewer.mode, c.reviewer.backend)),
+        );
+    let mut started_events =
+        Vec::with_capacity(matched.len() + ctx.replayed.len() + ctx.carried.len());
+    for (name, mode, backend) in planned {
+        let event = RunEvent::ReviewerStarted {
+            run: ctx.run.clone(),
+            reviewer: name.clone(),
+            mode,
+            backend,
+        };
+        emit(&event);
+        started_events.push(event);
+    }
+    started_events
+}
+
+/// Run the fresh `matched` reviewers concurrently, each bounded by its `timeout`,
+/// and collect the results back into registry order so the persisted stream is
+/// deterministic regardless of completion timing.
+///
+/// A slot stays `None` when its task neither completed nor errored cleanly (a
+/// panic); [`resolve`] treats that as a crash, fail-closed for a gate.
+async fn run_fresh(
+    matched: &[&Reviewer],
+    ctx: &ExecContext,
+    exec: &ReviewFn,
+) -> Vec<Option<ReviewTaskResult>> {
+    let mut set: JoinSet<(usize, ReviewTaskResult)> = JoinSet::new();
+    for (index, reviewer) in matched.iter().enumerate() {
+        let request = OwnedRequest {
+            reviewer: (*reviewer).clone(),
+            run: ctx.run.clone(),
+            repo_root: ctx.repo_root.clone(),
+            base: ctx.base.clone(),
+            context: ctx.context.clone(),
+        };
+        let timeout = reviewer.timeout.unwrap_or(DEFAULT_TIMEOUT);
+        let future = exec(request);
+        set.spawn(async move {
+            let started = Instant::now();
+            let outcome = match tokio::time::timeout(timeout, future).await {
+                Ok(result) => match result {
+                    Ok(outcome) => TaskOutcome::Ok(outcome),
+                    Err(err) => TaskOutcome::Failed(format!("{err:#}")),
+                },
+                Err(_elapsed) => TaskOutcome::TimedOut,
+            };
+            (
+                index,
+                ReviewTaskResult {
+                    outcome,
+                    duration: started.elapsed(),
+                },
+            )
+        });
+    }
+
+    let mut results: Vec<Option<ReviewTaskResult>> = (0..matched.len()).map(|_| None).collect();
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok((index, result)) => results[index] = Some(result),
+            Err(join_err) => {
+                // A panicked task: we have no index, so we cannot place it. This
+                // should not happen (tasks catch their own errors), but if it
+                // does, it must not silently drop a gate. Fall through; the
+                // corresponding slot stays `None` and is treated as a crash.
+                tracing::error!(error = %join_err, "a reviewer task panicked");
+            }
+        }
+    }
+    results
+}
+
+/// Resolve every reviewer in the plan into a [`Resolved`] row.
+///
+/// The fresh reviewers get fail-closed / fail-open policy applied to their raw
+/// task result; the replayed and carried reviewers are reconstructed verbatim
+/// from their recorded events (never re-derived), since each already carries a
+/// real, previously-resolved verdict. Order follows the started events: fresh,
+/// then replayed, then carried.
+fn resolve_all(
+    matched: &[&Reviewer],
+    ctx: &ExecContext,
+    mut results: Vec<Option<ReviewTaskResult>>,
+) -> Vec<Resolved> {
+    let mut resolved = Vec::with_capacity(matched.len() + ctx.replayed.len() + ctx.carried.len());
+    for (index, reviewer) in matched.iter().enumerate() {
+        let digest = ctx.scope_digests.get(&reviewer.name).cloned();
+        resolved.push(resolve(reviewer, results[index].take(), digest));
+    }
+    for replay in ctx.replayed.values() {
+        resolved.push(resolve_replayed(replay));
+    }
+    for carry in ctx.carried.values() {
+        resolved.push(resolve_carried(carry));
+    }
+    resolved
+}
+
+/// Re-derive each stamped scope digest against the tree as it stands after the
+/// reviewers finished, keeping a stamp only when it still matches.
+///
+/// Reviewers judge the live working tree, so a digest sampled before execution
+/// can go stale while they run. A mismatch on a *fresh* verdict drops the stamp,
+/// which fails safe: the reviewer judged the tree it saw, and the next run
+/// simply cannot carry from this one. A mismatch on a *carried* verdict is
+/// worse: the prior pass was reused precisely because the digest matched at plan
+/// time, so if the scoped content changed mid-run, that pass no longer describes
+/// the tree this run reports on. The verdict is untrustworthy, so it fails
+/// closed (gate) or is skipped (advisor), same as any reviewer that could not
+/// produce one.
+///
+/// A `None` [`ExecContext::digest_probe`] (a caller with no merge base, or a
+/// test that stamps digests directly) skips the re-check and leaves the stamps
+/// as given.
+fn recheck_scope_digests(resolved: &mut [Resolved], ctx: &ExecContext) {
+    let Some(probe) = &ctx.digest_probe else {
+        return;
+    };
+    // Re-scan the changed-file set too: a file created mid-run that a trigger
+    // matches must reach the recomputed digest, or an addition would be
+    // invisible to this check. A failed re-scan recomputes nothing, so every
+    // stamped digest mismatches and the check degrades in the fail-safe
+    // direction.
+    let changed_now = crate::git::changed_files(&ctx.repo_root, &probe.base)
+        .map_err(|err| {
+            tracing::warn!(error = %err, "could not re-scan changed files post-run");
+            err
+        })
+        .ok();
+    for item in resolved {
+        if let Some(pre) = item.scope_digest.take() {
+            let now = changed_now.as_ref().and_then(|changed| {
+                crate::carry::scope_digest(
+                    &ctx.repo_root,
+                    &probe.base,
+                    &probe.merge_base,
+                    &item.reviewer,
+                    changed,
+                )
+                .ok()
+            });
+            if now.as_deref() == Some(pre.as_str()) {
+                item.scope_digest = Some(pre);
+            } else if item.carried {
+                tracing::warn!(
+                    reviewer = %item.reviewer.name,
+                    "the scoped content changed while this run executed; \
+                     its carried verdict no longer describes the tree and fails closed"
+                );
+                *item = fail(
+                    &item.reviewer,
+                    item.counts_as_gate,
+                    "the working tree content this reviewer's carried verdict was \
+                     scoped to changed while the run executed; re-run to review the \
+                     current content",
+                    Duration::ZERO,
+                );
+            } else {
+                tracing::warn!(
+                    reviewer = %item.reviewer.name,
+                    "the working tree changed while this reviewer ran; \
+                     dropping its scope digest so the next run cannot carry it"
+                );
+            }
+        }
+    }
 }
 
 /// The raw result of one reviewer task before fail-closed/open policy is applied.
