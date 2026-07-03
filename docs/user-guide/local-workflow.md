@@ -10,8 +10,9 @@ order: 5
 > and inspecting what was saved.
 
 The local CLI applies the same reviewers and decisions CI enforces: CI executes them
-fresh or replays an attested local run. So a green local loop usually means a PR that
-CI confirms. Two things can make a local run differ: CI feeds reviewers the PR's
+fresh, replays an attested local run, or carries an unchanged reviewer forward from
+the branch's previous CI run. So a green local loop usually means a PR that CI
+confirms. Two things can make a local run differ: CI feeds reviewers the PR's
 description and discussion that a default local run lacks, and a local run also merges
 in any personal reviewers from your user-level registry, which CI never sees (see
 [Authoring reviewers](./authoring-reviewers.md#user-level-reviewers)). This chapter
@@ -80,9 +81,9 @@ later push leaves a reviewer's scoped content untouched.
 ### Running a subset by hand
 
 `--reviewer <name>` narrows the run to reviewers you name, for iterating on one
-stubborn gate without waiting on the rest. The named reviewers never carry
-a prior local pass (asking for a reviewer by name means asking for it to run);
-on a `--repo`/`--pr` run, a verified attestation can still replay a selected
+stubborn gate without waiting on the rest. The named reviewers never carry a prior
+pass, local or CI (asking for a reviewer by name means asking for it to run); on a
+`--repo`/`--pr` run, a verified attestation can still replay a selected
 reviewer. When the selection excludes at least one triggered reviewer, the run is
 marked **partial** everywhere it is recorded: the `run.started`/`run.completed`
 events carry `"partial": true`, the human output and `bastion runs` say so, and
@@ -137,7 +138,7 @@ The event types:
 | --- | --- |
 | `run.started` | The run began; lists the reviewers in the plan: each executes, replays from a verified attestation, or carries from the branch's previous run (locally or in CI). Under `--reviewer` the list holds only the selected reviewers, and the event carries `partial: true` when that selection excludes at least one triggered reviewer. |
 | `reviewer.started` | One reviewer began: dispatched to its backend, reconstructed from a verified attestation bundle, or carried from the branch's previous run; the latter two dispatch no backend. |
-| `reviewer.resolved` | One reviewer finished; carries its `verdict`, `summary`, `findings`, `usage`, and a `has_transcript` flag. Carries `replayed: true` when the verdict came from a verified attestation, and `carried: true` when it was carried forward from the branch's previous local run, instead of a fresh execution. A local run also stamps `scope_digest`, a hash of everything the verdict was keyed to (the reviewer's definition plus its trigger-scoped diffs, commit messages, and untracked content); a later run carries this verdict only when its own digest is identical. |
+| `reviewer.resolved` | One reviewer finished; carries its `verdict`, `summary`, `findings`, `usage`, and a `has_transcript` flag. Carries `replayed: true` when the verdict came from a verified attestation, and `carried: true` when it was carried forward from the branch's previous run (local or CI) instead of a fresh execution. The run also stamps `scope_digest` on each reviewer that executed or carried (a replayed one carries none), a hash of everything the verdict was keyed to (the reviewer's definition plus its trigger-scoped diffs, commit messages, and untracked content); a later run carries this verdict only when its own digest is identical. |
 | `run.completed` | The aggregate decision and the gate tally, plus the run's wall-clock `duration_ms` and the usage totals (`tokens_in`, `tokens_out`, `cache_read`, `cost_usd`) summed across reviewers. Carries `partial: true` (as does `run.started`) when `--reviewer` narrowed the run. |
 | `run.attested` | A signed local run was replayed; carries the replayed `reviewers`, the attesting `public_key`, and `attested_at`. |
 | `run.attestation-fallback` | Attestation was attempted but not honored; carries the `reason` (a missing note, an unregistered key, a stale binding, and so on). |
@@ -299,8 +300,11 @@ reviewer typically reaches a host service over the container network rather than
 ## Attesting a run for CI
 
 Every reviewer is an agent invocation, so a project running Bastion both locally
-and in CI pays for each review roughly twice: once in your loop, once again when
-CI confirms it. If your repository has set `attestations: true` in its registry
+and in CI can pay for each review roughly twice: once in your loop, once again when
+CI confirms it. Incremental carry recovers some of that across CI pushes (an
+unchanged reviewer carries from the branch's previous CI run), but the first CI run
+of a changeset has nothing to carry from. If your repository has set
+`attestations: true` in its registry
 (see [Continuous integration](./continuous-integration.md#attesting-a-run-so-ci-can-replay-it)),
 you can sign your last green local run so CI reuses it instead of re-running
 every reviewer:

@@ -10,9 +10,10 @@ order: 6
 > billing.
 
 The local loop gets you to green before you open a PR. CI is the authoritative
-confirmation: it executes or replays the reviewers from the repository's
+confirmation: it executes, replays, or carries the reviewers from the repository's
 `.bastion.yaml` (replay draws from a verified attestation, when the registry sets
-`attestations: true`) and reports one merge gate. Because routing and aggregation are
+`attestations: true`; carry reuses an unchanged reviewer's pass from the branch's
+previous CI run) and reports one merge gate. Because routing and aggregation are
 shared, CI rarely surprises an
 author who looped locally. It can differ in two ways: CI adds the PR's description and
 discussion that a default local run lacks, and CI runs the repository's reviewers
@@ -29,9 +30,11 @@ chapter covers the GitHub adapter, the one forge Bastion targets.
 
 On each pull-request event (`opened`, `synchronize`, `reopened`) the workflow runs
 `bastion review`, which computes the changed files, routes to the matching
-reviewers, then executes them in parallel with timeouts or replays those covered by a
+reviewers, then executes them in parallel with timeouts, replays those covered by a
 verified attestation (a replayed reviewer is reconstructed from the bundle, with no
-backend dispatch or timeout), and persists the run. A second step, `bastion github
+backend dispatch or timeout), or carries an unchanged reviewer's pass forward from the
+branch's previous CI run (no dispatch either, when the run store is persisted across
+runs; see the workflow comments below), and persists the run. A second step, `bastion github
 report`, reads that run and posts it. A verdict reaches two GitHub surfaces:
 
 - **Findings are posted to the PR.** `bastion github report` renders every finding
@@ -281,8 +284,12 @@ job is green GitHub merges. A push re-triggers the workflow and it resolves agai
 ## Attesting a run so CI can replay it
 
 Every reviewer is an agent invocation, so a PR that ran clean locally pays for
-each reviewer again when CI confirms it. If you would rather CI trust a signed
-local run than re-execute every reviewer, opt in with one registry field:
+each reviewer the first time CI confirms it. (Once the run store is persisted across
+runs, a later push carries any reviewer whose scoped content did not change from the
+branch's previous CI run, so the recurring cost falls on subsequent pushes; the very
+first CI run of a changeset still has nothing to carry from.) Attestation cuts the
+cost of that first run too: if you would rather CI trust a signed local run than
+re-execute every reviewer, opt in with one registry field:
 
 ```yaml
 attestations: true
@@ -315,8 +322,11 @@ fetching the notes ref (`git fetch origin +refs/notes/bastion:refs/notes/bastion
 When attestation replaces execution, the sticky comment opens with a callout
 naming which reviewers replayed, the key that attested, and when; each
 replayed reviewer's check-run summary says so too. When it does not (a missing
-note, an unregistered key, a stale base, or any other mismatch), CI simply
-executes every reviewer as usual and the comment includes the fallback reason.
+note, an unregistered key, a stale base, or any other mismatch), CI falls back to
+resolving each reviewer the ordinary way and the comment includes the fallback
+reason: a reviewer whose content is unchanged from the branch's previous CI run is
+still carried, and the rest execute fresh. Attestation short-circuits the note
+lookup, not carry.
 
 A reviewer can opt out of ever being replayed with `attestation: never` on that
 reviewer, for a gate your team wants CI to execute unconditionally regardless
