@@ -109,10 +109,12 @@ pub struct ExecContext {
     /// chose to proceed unsealed rather than fail the review over it).
     pub seal: Option<SealBindings>,
     /// Whether the working tree carried uncommitted or untracked changes when
-    /// this review ran ([`crate::git::is_dirty`]), computed once by the caller at
-    /// review time. Recorded on the seal so `bastion attest` can refuse a run
-    /// that reviewed content HEAD's committed tree does not name. Meaningless
-    /// when `seal` is `None`.
+    /// this review started ([`crate::git::is_dirty`]), a pre-run sample computed
+    /// once by the caller before reviewers execute. Sealing re-samples the
+    /// working tree again at persist time and ORs the two, so a tree that turns
+    /// dirty while reviewers are still running still seals dirty. Recorded on
+    /// the seal so `bastion attest` can refuse a run that reviewed content
+    /// HEAD's committed tree does not name. Meaningless when `seal` is `None`.
     pub dirty: bool,
     /// Reviewers replaying from a verified attestation instead of executing,
     /// keyed by name (`docs/developer-guide/attestation.md`, "Verification and
@@ -512,12 +514,24 @@ fn seal_run(layout: &Layout, ctx: &ExecContext, stream: &[RunEvent]) {
         }
     };
 
+    // The pre-run sample (`ctx.dirty`) alone is not enough: a reviewer can take
+    // long enough that the tree turns dirty mid-run (an uncommitted fix written
+    // while reviewers are still executing), which the pre-run sample cannot see.
+    // Re-sample at seal time and OR the two, so a tree dirty at either point
+    // seals dirty. The pre-run sample still matters on its own: a file could be
+    // dirtied and then removed again before seal time, which the seal-time
+    // sample alone would miss.
+    let dirty_at_seal_time = crate::git::is_dirty(&ctx.repo_root).unwrap_or_else(|err| {
+        tracing::warn!(error = %err, "could not re-sample working tree cleanliness at seal time; treating the run as dirty out of caution");
+        true
+    });
+
     let seal = crate::seal::seal(
         crate::seal::embedded_secret(),
         crate::version::VERSION,
         bindings,
         crate::seal::seams_active(),
-        ctx.dirty,
+        ctx.dirty || dirty_at_seal_time,
         reviewers,
         &events,
     );
@@ -1390,6 +1404,101 @@ mod tests {
         assert!(
             seal.seams,
             "the active backend seam must be recorded on the seal"
+        );
+    }
+
+    /// Run a couple of throwaway `git` commands against `cwd`, panicking on
+    /// failure. Mirrors `git::tests::git`, kept local so this module's seal
+    /// tests do not need to reach into `git`'s private test helpers.
+    fn git(cwd: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .status()
+            .expect("git must be on PATH for this test");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    /// A throwaway, committed, clean git repository for seal tests that need
+    /// `ExecContext.repo_root` to point at a real `is_dirty`-able tree instead of
+    /// the placeholder `"."` most scenarios use.
+    fn clean_repo() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        git(dir, &["init"]);
+        git(dir, &["config", "user.email", "grace.hopper@example.com"]);
+        git(dir, &["config", "user.name", "Grace Hopper"]);
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        git(dir, &["add", "a.txt"]);
+        git(dir, &["commit", "-m", "base"]);
+        tmp
+    }
+
+    #[tokio::test]
+    async fn a_clean_working_tree_seals_dirty_false() {
+        let _seam_lock = SEAM_ENV_LOCK.lock().await;
+        let _seam_guard = SeamEnvGuard::cleared();
+        let repo = clean_repo();
+        let g1 = reviewer("g1", Mode::Gate);
+        let reviewers = [&g1];
+        let mut execution = ctx(&reviewers);
+        execution.repo_root = repo.path().to_path_buf();
+        execution.seal = Some(seal_bindings(&["g1"]));
+        execution.dirty = false;
+
+        let (_decision, _events, layout) = run_scenario_with_ctx(
+            &reviewers,
+            execution,
+            responses(vec![("g1", Response::Outcome(pass("ok")))]),
+        )
+        .await;
+
+        let run = RunId("r-exec".into());
+        let seal = crate::store::read_seal(&layout, &run).unwrap().unwrap();
+        assert!(
+            !seal.dirty,
+            "a clean pre-run sample and a clean tree at seal time must seal dirty: false"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tree_dirtied_mid_run_still_seals_dirty_true() {
+        // `ExecContext.dirty` is only the *pre-run* sample. If the working tree
+        // turns dirty while reviewers are still executing (an uncommitted fix
+        // written mid-run), the seal must still record dirty: true, or the run
+        // would misrepresent itself as attestable against a tree its reviewers
+        // never actually saw in full. `seal_run` re-samples at seal time and ORs
+        // the two; this test writes the untracked file before `execute_with`
+        // runs, standing in for "dirtied sometime before persistence", since the
+        // mock backend resolves synchronously and there is no window to inject a
+        // write strictly between reviewer start and seal.
+        let _seam_lock = SEAM_ENV_LOCK.lock().await;
+        let _seam_guard = SeamEnvGuard::cleared();
+        let repo = clean_repo();
+        std::fs::write(repo.path().join("untracked.txt"), "surprise\n").unwrap();
+
+        let g1 = reviewer("g1", Mode::Gate);
+        let reviewers = [&g1];
+        let mut execution = ctx(&reviewers);
+        execution.repo_root = repo.path().to_path_buf();
+        execution.seal = Some(seal_bindings(&["g1"]));
+        // The pre-run sample itself reported clean (taken before the write
+        // above, in the real flow); the seal-time re-sample is what must catch
+        // the dirtied tree.
+        execution.dirty = false;
+
+        let (_decision, _events, layout) = run_scenario_with_ctx(
+            &reviewers,
+            execution,
+            responses(vec![("g1", Response::Outcome(pass("ok")))]),
+        )
+        .await;
+
+        let run = RunId("r-exec".into());
+        let seal = crate::store::read_seal(&layout, &run).unwrap().unwrap();
+        assert!(
+            seal.dirty,
+            "an untracked file present at seal time must seal dirty: true even when the pre-run sample was clean"
         );
     }
 

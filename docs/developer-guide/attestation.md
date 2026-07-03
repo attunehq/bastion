@@ -115,7 +115,9 @@ nothing.
 The digest also records two flags: whether any of the test seams (the
 `BASTION_CLAUDE_BIN`-style backend overrides and the container-engine
 override) were active during the run, and whether the working tree was dirty
-(uncommitted tracked changes or untracked files) at review time. `bastion
+(uncommitted tracked changes or untracked files), sampled both before
+reviewers ran and again at seal time, recorded dirty if either sample was.
+`bastion
 attest` refuses to attest a run that used a test seam or that sealed dirty,
 and CI's own planner refuses to replay a bundle whose seal carries either
 flag: a run against a stubbed reviewer is a real run of the binary but not a

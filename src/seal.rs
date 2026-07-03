@@ -95,13 +95,15 @@ pub struct Seal {
     /// refuses to attest a sealed run with this set: a run against a stubbed
     /// reviewer exercised the binary, but not a real review.
     pub seams: bool,
-    /// Whether the working tree carried uncommitted or untracked changes at
-    /// review time. `bastion review` reviews the working tree, but the rest of
-    /// this seal binds only HEAD's *committed* tree and the `base..HEAD`
-    /// patch-id, so a dirty run's reviewers may have judged content those
-    /// bindings never name. `bastion attest` refuses to attest a sealed run with
-    /// this set, with a plain reason: commit the final content, re-run `bastion
-    /// review`, and attest that run instead.
+    /// Whether the working tree carried uncommitted or untracked changes,
+    /// sampled both before reviewers ran and again at seal time (the run is
+    /// dirty if either sample was, since a reviewer can dirty the tree mid-run).
+    /// `bastion review` reviews the working tree, but the rest of this seal
+    /// binds only HEAD's *committed* tree and the `base..HEAD` patch-id, so a
+    /// dirty run's reviewers may have judged content those bindings never name.
+    /// `bastion attest` refuses to attest a sealed run with this set, with a
+    /// plain reason: commit the final content, re-run `bastion review`, and
+    /// attest that run instead.
     pub dirty: bool,
     /// The sorted names of the repository reviewers this seal covers.
     pub reviewers: Vec<String>,
