@@ -868,6 +868,14 @@ mod tests {
             "git {args:?} failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+        // The `-c` isolation above only covers commands issued through this
+        // helper. The code under test (`attest` writing its note) runs plain
+        // `git` in the same repo and needs an identity from config on a host
+        // that has none (CI), so persist one repo-locally at init.
+        if args.first() == Some(&"init") {
+            git(cwd, &["config", "user.email", "grace@bastion.dev"]);
+            git(cwd, &["config", "user.name", "Grace Hopper"]);
+        }
     }
 
     /// Whether `tool` is runnable at all, for detect-and-skip on machines

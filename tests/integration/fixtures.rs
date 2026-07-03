@@ -37,6 +37,14 @@ fn git(dir: &Path, args: &[&str]) {
         .status()
         .unwrap_or_else(|e| panic!("git {args:?} failed to launch: {e}"));
     assert!(status.success(), "git {args:?} exited unsuccessfully");
+    // The `-c` isolation only covers commands issued through this helper. The
+    // compiled binary under test runs plain `git` in the same repo (writing an
+    // attestation note, say) and needs an identity from config on a host that
+    // has none (CI), so persist one repo-locally at init.
+    if args.first() == Some(&"init") {
+        git(dir, &["config", "user.email", "grace@bastion.dev"]);
+        git(dir, &["config", "user.name", "Grace Hopper"]);
+    }
 }
 
 // ---------------------------------------------------------------------------

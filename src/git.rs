@@ -329,6 +329,14 @@ mod tests {
             .chain(args.iter().copied())
             .collect();
         run_git(cwd, &full).unwrap_or_else(|e| panic!("git {args:?} failed: {e}"));
+        // The `-c` isolation above only covers commands issued through this
+        // helper. Production code under test (`note_add`, say) runs plain `git`
+        // in the same repo and needs an identity from config on a host that has
+        // none (CI), so persist one repo-locally at init.
+        if args.first() == Some(&"init") {
+            git(cwd, &["config", "user.email", "grace@bastion.dev"]);
+            git(cwd, &["config", "user.name", "Grace Hopper"]);
+        }
     }
 
     #[test]

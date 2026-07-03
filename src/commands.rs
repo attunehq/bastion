@@ -988,6 +988,14 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success(), "git {args:?} failed");
+        // The `-c` isolation only covers commands issued through this helper.
+        // Production code under test runs plain `git` in the same repo and
+        // needs an identity from config on a host that has none (CI), so
+        // persist one repo-locally at init.
+        if args.first() == Some(&"init") {
+            git(dir, &["config", "user.email", "grace@bastion.dev"]);
+            git(dir, &["config", "user.name", "Grace Hopper"]);
+        }
     }
 
     #[test]
