@@ -557,8 +557,9 @@ where
     // would record a `could not re-derive CI bindings` fallback even when there
     // was never a note to replay against, surfacing a warning for what is really
     // the unremarkable "this author did not attest" case. A missing note yields
-    // `NotAttested` (silent, run fresh); only a note that was offered and refused
-    // becomes a surfaced `Fallback`.
+    // `NotAttested` (silent: the reviewers go through ordinary carry-or-execute,
+    // just without a replay); only a note that was offered and refused becomes a
+    // surfaced `Fallback`.
     let head_sha = gathered.and_then(|g| g.head_sha.as_deref());
     let note = match crate::attest::note_for_review(repo_root, "HEAD", head_sha) {
         Ok(Some(note)) => note,
@@ -1496,7 +1497,7 @@ mod tests {
     #[tokio::test]
     async fn plan_attestation_replay_is_not_attested_when_note_absent() {
         // The ordinary case: no note at all. This must resolve to `NotAttested`
-        // (silent, run fresh), not a surfaced fallback, and it must win over an
+        // (silent, not replayed), not a surfaced fallback, and it must win over an
         // unrelated bindings failure rather than getting shadowed by it: the
         // missing-note check runs before `derive_ci_bindings`, so even an
         // unresolvable base cannot turn "this author did not attest" into a

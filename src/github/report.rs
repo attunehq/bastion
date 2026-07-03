@@ -449,12 +449,13 @@ fn attestation_callout(attested: &AttestedSummary) -> String {
 }
 
 /// The `[!WARNING]` callout drawn when an attestation was offered on HEAD but
-/// not honored, so CI executed every reviewer fresh. Only a rejected attestation
-/// reaches here: a commit that simply carries no note produces `NotAttested`
-/// upstream (`src/attest/replay.rs`), records no `run.attestation-fallback`
-/// event, and so draws nothing. Uses GitHub's `> [!WARNING]` alert, matching the
-/// skills-drift block, so a refused attestation is prominent rather than an
-/// easily missed italic aside.
+/// not honored, so CI resolved every reviewer the ordinary way (carry-or-execute)
+/// instead of replaying. Only a rejected attestation reaches here: a commit that
+/// simply carries no note produces `NotAttested` upstream
+/// (`src/attest/replay.rs`), records no `run.attestation-fallback` event, and so
+/// draws nothing. Uses GitHub's `> [!WARNING]` alert, matching the skills-drift
+/// block, so a refused attestation is prominent rather than an easily missed
+/// italic aside.
 fn attestation_fallback_callout(reason: &str) -> String {
     format!("> [!WARNING]\n> Attestation was not honored: {reason}\n")
 }

@@ -365,13 +365,17 @@ When attestation replaces execution, the sticky comment opens with a callout
 naming which reviewers replayed, the key that attested, and when; each
 replayed reviewer's check-run summary says so too. When an attestation is offered
 but *refused* (an unreadable or unverifiable note, an unregistered key, a stale
-base, a dirty checkout, or any other mismatch), CI falls back to resolving each
-reviewer the ordinary way and the comment carries a `> [!WARNING]` block naming
-the reason: a reviewer whose content is unchanged from the branch's previous CI
-run is still carried, and the rest execute fresh. A PR that simply carries no note
-is not a refusal: CI runs every reviewer fresh and says nothing about attestation,
-so an un-attested PR is never nagged. Attestation short-circuits the note lookup,
-not carry.
+base, or any other mismatch), CI falls back to resolving each reviewer the
+ordinary way and the comment carries a `> [!WARNING]` block naming the reason: a
+reviewer whose content is unchanged from the branch's previous CI run is still
+carried, and the rest execute fresh. A dirty CI checkout (uncommitted or untracked
+files) is treated as a refusal too, and is checked before the note is even looked
+up: it warns even when HEAD carries no note, since the reviewers see content no
+attestation could bind. On a clean checkout that simply carries no note, nothing
+was offered to refuse: CI resolves reviewers the ordinary way (an unchanged prior
+pass still carries, the rest execute) and says nothing about attestation, so an
+un-attested PR is never nagged. Attestation short-circuits the note lookup, not
+carry.
 
 A reviewer can opt out of ever being replayed with `attestation: never` on that
 reviewer, for a gate your team wants CI to execute unconditionally regardless

@@ -271,9 +271,10 @@ first, falling back to the PR's head SHA when HEAD carries none (CI's
 checkout can be a merge commit, so the note the author actually attested may
 hang off the PR's own head commit instead). When *neither* carries a note, no
 attestation was offered: this is not a refusal, so the run resolves to
-`AttestationOutcome::NotAttested`, records no `run.attestation-fallback` event,
-runs every reviewer fresh, and says nothing about attestation on any surface (an
-un-attested PR is the ordinary case and must not be nagged). Given a note, it verifies the
+`AttestationOutcome::NotAttested`, continues through ordinary carry planning (an
+unchanged prior pass may still carry, the rest execute), records no
+`run.attestation-fallback` event, and says nothing about attestation on any
+surface (an un-attested PR is the ordinary case and must not be nagged). Given a note, it verifies the
 author's signature against the PR author's GitHub-registered signing keys
 (`GET /users/{username}/ssh_signing_keys`), verifies the run seal with its own
 embedded secret, and checks every binding (head tree, merge-base tree,
