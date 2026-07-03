@@ -164,7 +164,9 @@ version:
   the governance block (pure text, no network); `client.rs` is the REST seam,
   modeled on the backend's `CommandRunner`: a proof-carrying `ApiRequest`, a
   `GitHubApi` trait, the real `reqwest`-backed `RestClient`, and a recording double
-  for tests; `context.rs` is the GitHub *producer* of the review context (it gathers a
+  for tests; `signing.rs` fetches a user's registered SSH signing keys
+  (`GET /users/{username}/ssh_signing_keys`) over the same seam, for attestation
+  verification; `context.rs` is the GitHub *producer* of the review context (it gathers a
   PR's body and discussion over the same REST seam, maps `author_association` to the
   generic `Standing`, filters out Bastion's own marker-tagged comments, and resolves a
   finding-thread reply back to its `FindingId` when one carries the marker, so the core

@@ -77,8 +77,8 @@ run store edited after the fact, or a repository that has moved on (a new
 commit, a changed registry) since the review. Do not work around a refusal.
 Re-run `bastion review` and attest that fresh run instead.
 
-Attesting is optional even when the registry allows it: skip these two
-commands and CI just runs every reviewer fresh, and the PR report says why the
+Attesting is optional even when the registry allows it. If you skip these two
+commands, CI runs every reviewer fresh and the PR report says why the
 attestation was not honored. See
 [Attesting a run for CI](https://github.com/jssblck/bastion/blob/main/docs/user-guide/local-workflow.md#attesting-a-run-for-ci)
 for the full mechanics and trust model.

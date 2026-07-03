@@ -10,8 +10,10 @@ order: 6
 > billing.
 
 The local loop gets you to green before you open a PR. CI is the authoritative
-confirmation: it runs the reviewers from the repository's `.bastion.yaml` and reports
-one merge gate. Because routing and aggregation are shared, CI rarely surprises an
+confirmation: it executes or replays the reviewers from the repository's
+`.bastion.yaml` (replay draws from a verified attestation, when the registry sets
+`attestations: true`) and reports one merge gate. Because routing and aggregation are
+shared, CI rarely surprises an
 author who looped locally. It can differ in two ways: CI adds the PR's description and
 discussion that a default local run lacks, and CI runs the repository's reviewers
 only, while a local run can also include your personal user-level reviewers (see
@@ -27,9 +29,10 @@ chapter covers the GitHub adapter, the one forge Bastion targets.
 
 On each pull-request event (`opened`, `synchronize`, `reopened`) the workflow runs
 `bastion review`, which computes the changed files, routes to the matching
-reviewers, runs them in parallel with per-reviewer timeouts, and persists the run. A
-second step, `bastion github report`, reads that run and posts it. A verdict reaches
-two GitHub surfaces:
+reviewers, then executes them in parallel with timeouts or replays those covered by a
+verified attestation (a replayed reviewer is reconstructed from the bundle, with no
+backend dispatch or timeout), and persists the run. A second step, `bastion github
+report`, reads that run and posts it. A verdict reaches two GitHub surfaces:
 
 - **Findings are posted to the PR.** `bastion github report` renders every finding
   (blocking and optional) into a single sticky PR comment, and attaches each located
@@ -285,8 +288,8 @@ reviewers:
   # ...
 ```
 
-This works only for a review over committed content: commit the final change,
-run `bastion review`, then `bastion attest` (see [The local
+This works only for a review over committed content. To use attestation, commit the
+final change, run `bastion review`, then run `bastion attest` (see [The local
 workflow](./local-workflow.md#attesting-a-run-for-ci)). A review over a dirty
 working tree still runs and still seals, but the seal records that the tree
 was dirty, and `bastion attest` refuses to sign it; attest the clean,

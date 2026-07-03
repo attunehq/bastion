@@ -64,7 +64,7 @@ A repository can opt in (`attestations: true` in its registry) to let CI reuse a
 
 **Seal verification and binding checks.** The adapter verifies the run seal with its own embedded secret (the same secret every binary of that release shares), then re-derives its own bindings from the checkout (HEAD's tree, the merge base's tree, the diff's patch-id, and the effective config hash) and compares them against what the bundle recorded. Any mismatch, or a seal that shows a test seam was active during the local run, falls back to a full run rather than partially trusting the bundle.
 
-**Per-reviewer replay or execute.** Verification and binding checks pass or fail for the bundle as a whole, but replay is decided per routed reviewer: one the bundle covers and that has not opted out (`attestation: never`) replays; a reviewer CI routed that the bundle does not cover, or one that opted out, executes fresh. A replayed verdict carries the same fail-closed policy a fresh one would, so a replayed block still blocks the gate.
+**Per-reviewer replay or execute.** Verification and binding checks pass or fail for the bundle as a whole, but replay is decided per routed reviewer. CI replays covered reviewers that have not opted out; missing or opted-out reviewers execute fresh. A replayed verdict carries the same fail-closed policy a fresh one would, so a replayed block still blocks the gate.
 
 **Reporting.** The merged result (replayed and freshly executed reviewers together) flows through the normal report path, with two additions. The sticky comment opens with a `[!NOTE]` callout naming which reviewers replayed, the attesting key, and when it was signed, right alongside the skills-drift `[!WARNING]` block. Each replayed reviewer's check-run summary adds a line stating its verdict was replayed rather than executed. When attestation was attempted but not honored, the comment instead carries a line naming why (a missing note, an unregistered key, a seal mismatch, a stale binding), taken from the run's `run.attestation-fallback` event.
 
@@ -75,7 +75,7 @@ Honoring an attestation needs two small additions to an ordinary `bastion` workf
 - **Check out the PR head, not the merge commit.** `actions/checkout`'s default `pull_request` behavior checks out a synthetic merge commit, whose tree never matches the head tree an author attested. Set `ref: ${{ github.event.pull_request.head.sha }}` so CI's HEAD is the commit the note is actually attached to.
 - **Fetch the notes ref.** `actions/checkout` does not fetch notes by default, so add `git fetch origin +refs/notes/bastion:refs/notes/bastion`, tolerant of the ref being absent (most PRs will not carry a note; that is the ordinary case, not an error).
 
-A repository that skips either step, or has not set `attestations: true`, never replays: every reviewer executes fresh.
+If a repository skips either step or has not set `attestations: true`, every reviewer executes fresh.
 
 ### The aggregate check
 

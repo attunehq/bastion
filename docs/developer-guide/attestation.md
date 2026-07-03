@@ -55,13 +55,11 @@ contributors are not disabling lints." Three rules define what is trusted and wh
 
 ## The attestation bundle
 
-A verdict is a judgment about a changeset under a policy, so the bundle binds
-to the committed HEAD tree, the merge-base tree, the `base..HEAD` patch-id,
-the effective config hash, and the resolved reviewer events, alongside the
-seam and dirty flags. CI verifies every binding and falls back to a full run
-on any mismatch. A review that included uncommitted or untracked work is
-sealed dirty, and `bastion attest` refuses to attest it, so only a review over
-committed content ever reaches CI as an attestation.
+The bundle binds to the committed HEAD tree, the merge-base tree, the
+`base..HEAD` patch-id, the effective config hash, the resolved reviewer events,
+and the seam and dirty flags. CI verifies every binding and falls back to a
+full run on any mismatch. `bastion attest` refuses dirty runs, so only
+committed content reaches CI as an attestation.
 
 - **The changeset, not the commit.** The merge-base tree and the head tree (with
   a patch-id over the diff). CI recomputes its own merge base against the PR's
@@ -81,8 +79,8 @@ committed content ever reaches CI as an attestation.
   bundle.
 - **Coverage.** The set of repository reviewers the local run routed and
   executed. CI routes its own diff; a reviewer CI routes that the bundle does
-  not cover runs fresh. Coverage mismatch degrades, it does not invalidate: the
-  attested reviewers replay, the rest execute.
+  not cover runs fresh. On a coverage mismatch, CI replays the attested
+  reviewers and executes the rest.
 - **The engine.** Implicit in the run seal rather than checked as a field: each
   release embeds its own sealing secret, so a bundle verifies only under the
   same release that produced it, and a new release (meaning new reviewer
@@ -105,9 +103,11 @@ workflow and shared by every platform binary of that release; a locally
 compiled binary embeds a random per-build secret instead, so a dev build can
 seal runs only for itself. When an eligible run finishes, the runner computes
 a canonical digest over the committed HEAD tree, the merge-base tree, the
-`base..HEAD` patch-id, the effective reviewer-config hash, and the run's
-events and verdicts, seals it with a MAC keyed by the embedded secret, and
-persists the seal with the run. A keyed MAC rather than an asymmetric
+`base..HEAD` patch-id, the effective reviewer-config hash, and the repository
+reviewers' `reviewer.resolved` events, seals it with a MAC keyed by the
+embedded secret, and persists the seal with the run (`run.started`,
+`reviewer.started`, `run.completed`, and the audit events are not sealed). A
+keyed MAC rather than an asymmetric
 signature is deliberate: the sealer and the verifier are the same binary on
 both ends, so a keypair would ship both halves in the same artifact and add
 nothing.
@@ -133,9 +133,8 @@ The secret ships inside a public binary, so this is tamper evidence, not
 secrecy: an actor who deliberately extracts the secret and forges a seal
 produces bundles CI cannot distinguish from real ones. That act is the
 deliberate malice the
-[threat model](./design.md#threat-model--trust-boundary) already excludes; the
-seal stops the inadvertent version: an agent editing run-store files,
-replaying a stale run, or stubbing a reviewer.
+[threat model](./design.md#threat-model--trust-boundary) already excludes. The
+seal stops inadvertent run-store edits, stale-run replay, and reviewer stubbing.
 
 The seal binds the reviewed content, not commit metadata. It names the content
 reviewed, the base it was diffed against, the policy that ran, the engine that

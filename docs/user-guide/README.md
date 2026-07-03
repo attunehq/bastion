@@ -79,10 +79,10 @@ parallel, and aggregates their verdicts into one decision: all gates must pass.
 A local run can also merge in personal reviewers from a user-level `.bastion.yaml`,
 so you can run a reviewer locally even where a repo has not adopted Bastion. An
 authoring agent loops `bastion review` until it is green, then opens a PR where CI
-runs the repository's reviewers (the user-level ones are local-only). CI usually
-confirms the result, and can differ when it adds the PR's description and discussion
-to the reviewers' context. Humans stay in the loop by owning the reviewer registry,
-not by reading every diff.
+executes or replays the repository's reviewers (the user-level ones are local-only).
+CI usually confirms the result, and can differ when it adds the PR's description and
+discussion to the reviewers' context. Humans stay in the loop by owning the reviewer
+registry, not by reading every diff.
 
 ## Status
 

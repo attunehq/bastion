@@ -9,9 +9,9 @@ order: 5
 > Running `bastion review` for real: the loop, the two output formats, exit codes,
 > and inspecting what was saved.
 
-The local CLI is the surface an authoring agent optimizes against before opening a
-PR. It runs the *same* reviewers CI will run, so a green local loop usually means a PR
-that CI confirms. Two things can make a local run differ: CI feeds reviewers the PR's
+The local CLI applies the same reviewers and decisions CI enforces: CI executes them
+fresh or replays an attested local run. So a green local loop usually means a PR that
+CI confirms. Two things can make a local run differ: CI feeds reviewers the PR's
 description and discussion that a default local run lacks, and a local run also merges
 in any personal reviewers from your user-level registry, which CI never sees (see
 [Authoring reviewers](./authoring-reviewers.md#user-level-reviewers)). This chapter
@@ -261,12 +261,12 @@ git push origin refs/notes/bastion
 the latest recorded run, which is what you want right after `bastion review`.
 Pass one explicitly (`bastion attest r-0f3a`) to attest an older run instead.
 
-The review has to run over committed content for this to work: commit your
-final change, then run `bastion review`, then `bastion attest`. A review over
-a dirty working tree (uncommitted tracked changes or untracked files) still
-runs and seals, but the seal records that the tree was dirty, and `bastion
-attest` refuses that run outright, naming the reason: commit the final
-content, re-run the review, and attest that run instead. `bastion attest`
+The review has to run over committed content for this to work. To use attestation,
+commit your final change, then run `bastion review`, then `bastion attest`. A review
+over a dirty working tree (uncommitted tracked changes or untracked files) still
+runs and seals, but the seal records that the tree was dirty, and `bastion attest`
+refuses that run outright and tells you to commit the final content, re-run the
+review, and attest that run instead. `bastion attest`
 also re-checks that your repository has not moved on since a clean review
 (the same tree, the same diff, the same effective reviewer config) and
 refuses to sign if it has, so the note can never claim the reviewers saw
