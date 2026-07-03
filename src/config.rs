@@ -509,9 +509,8 @@ pub struct Sources {
 /// resolved (the hash, the reviewer set, the opt-in flag) rather than the
 /// *files* it read from. A caller building a run seal needs this to know which
 /// resolved reviewer events are eligible to be sealed (`reviewers`) and what
-/// config hash to bind (`config_hash`); a later phase's `bastion attest` also
-/// needs `attestations_enabled` to know whether the repository has opted in at
-/// all.
+/// config hash to bind (`config_hash`); the `bastion attest` path also needs
+/// `attestations_enabled` to know whether the repository has opted in at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoAttestation {
     /// [`Config::effective_hash`] of the repository-only config (before the

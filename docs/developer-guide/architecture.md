@@ -32,7 +32,7 @@ through it.
 | [`src/render.rs`](../../src/render.rs) | Human and JSONL output (`Format`). |
 | [`src/runner.rs`](../../src/runner.rs) | The parallel, timeout-bounded runner: fans matched reviewers out over a `JoinSet`, fails closed on error/timeout, streams events, persists each run, and seals an eligible run on a best-effort basis at persist time. |
 | [`src/seal.rs`](../../src/seal.rs) | The run seal: an HMAC-SHA256 over a canonical digest of the committed HEAD tree, the merge-base tree, the `base..HEAD` patch-id, the effective reviewer config, whether a test seam was active, whether the working tree was dirty, and the resolved reviewer events, keyed by a secret embedded in the binary at build time. Sealed by the runner, verified by `bastion attest` and CI; a run sealed dirty cannot be attested. See [Attestation](./attestation.md). |
-| [`src/attest.rs`](../../src/attest.rs) | `bastion attest`: verifies a run's seal, re-derives the repository state, signs a bundle with the author's SSH key, and writes it as a git note. Also the CI-side verify-and-replay planner (`plan`, `AttestationOutcome`) that decides which routed reviewers replay from a verified note. See [Attestation](./attestation.md). |
+| [`src/attest/`](../../src/attest/) | Attestation, split by concern: `mod.rs` is the `bastion attest` flow (verifies a run's seal, re-derives the repository state, signs a bundle, writes the git note), `bundle.rs` the bundle and note envelope, `sign.rs` SSH signing and signing-key resolution, and `replay.rs` the CI-side verify-and-replay planner (`plan`, `AttestationOutcome`) plus note lookup. See [Attestation](./attestation.md). |
 | [`src/skills.rs`](../../src/skills.rs) | The agent skills bundled into the binary (from `skills/<slug>/SKILL.md`) and installed into a consuming repo by `bastion skills install`/`check`/`list`. The rendered file is deterministic so `check` is a version-independent drift guard. |
 | [`src/backend/`](../../src/backend/) | The agent execution boundary. See [Backends](./backends.md). |
 | [`src/github/`](../../src/github/) | The GitHub adapter (CI surface): `codeowners.rs` generates the governance block, `client.rs` is the `reqwest`-backed REST seam (a proof-carrying `ApiRequest` plus a `GitHubApi` trait and a recording test double, modeled on the backend's `CommandRunner`), `report.rs` posts a finished run as a sticky PR comment and check runs, and `context.rs` gathers a PR's description and discussion into a `ReviewContext` (the GitHub producer), plus the PR author's login, head SHA, and registered SSH signing keys for attestation verification. See the [GitHub adapter](./github-adapter.md). |
@@ -83,7 +83,7 @@ Following one review top to bottom touches most of the crate:
    messages as the fallback), the prior findings recalled from the last run of this
    branch, and (on GitHub) the PR's discussion. It is best effort: a failure to reach GitHub falls back to the local
    context. Empty context leaves every reviewer's prompt unchanged.
-5a. **Verify and plan attestation replay** (`attest.rs`, GitHub CI only). When the
+5a. **Verify and plan attestation replay** (`attest/replay.rs`, GitHub CI only). When the
     repository registry sets `attestations: true` and the run carries a GitHub
     source (`--repo`/`--pr`), `commands::review` looks up the note on HEAD (falling
     back to the PR's head SHA), verifies its signature against the PR author's

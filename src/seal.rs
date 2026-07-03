@@ -145,7 +145,7 @@ pub fn embedded_secret() -> &'static [u8] {
 /// ([`crate::backend::container::ENGINE_ENV`]).
 ///
 /// A run that used any of these exercised the binary for real, but not a real
-/// review: `bastion attest` (a later phase) refuses to attest such a run. This
+/// review: `bastion attest` refuses to attest such a run. This
 /// only *records* whether a seam was active on the sealer's box; it says nothing
 /// about whether the reviewer itself behaved honestly.
 #[must_use]
@@ -229,9 +229,9 @@ pub fn seal(
 /// Verify a persisted [`Seal`] against the `events` it claims to cover.
 ///
 /// Recomputes the digest from the seal's own recorded fields (not from a
-/// caller-supplied [`SealBindings`]: a later re-derivation check, comparing
-/// those recorded fields against the *current* repository state, is
-/// `bastion attest`'s job in a later phase) plus `events`, and constant-time
+/// caller-supplied [`SealBindings`]: comparing those recorded fields against
+/// the *current* repository state is `bastion attest`'s separate
+/// re-derivation check) plus `events`, and constant-time
 /// compares the MAC. Returns `false` on any mismatch, including a MAC that
 /// fails to hex-decode.
 #[must_use]

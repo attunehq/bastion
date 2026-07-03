@@ -120,8 +120,8 @@ pub enum RunEvent {
     },
     /// A CI run that replayed one or more reviewers from a signed local
     /// attestation instead of executing them, recorded once per run as the
-    /// audit trail for what was replayed, by which key, and when. A later phase
-    /// emits this; the schema lands now so the wire shape is fixed.
+    /// audit trail for what was replayed, by which key, and when. The runner
+    /// emits it when a verified attestation replays.
     #[serde(rename = "run.attested")]
     AttestationReplayed {
         /// The run id.

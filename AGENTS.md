@@ -34,7 +34,7 @@ verdict returns an error, never a fabricated pass, and gates fail closed on it.
     GitHub adapter does not.
   - `docs/developer-guide/attestation.md`: the design for signed local runs that
     CI verifies and replays instead of re-executing reviewers. Implemented: the
-    seal in `src/seal.rs`, `bastion attest` and the CI planner in `src/attest.rs`.
+    seal in `src/seal.rs`, `bastion attest` and the CI planner in `src/attest/`.
 - `.bastion.yaml`: the example reviewer registry at the repository root (the
   `.bastion.yml` spelling is also honored); update it when the schema changes.
 - `.agents/skills/readme.md`: repo-local Rust coding skills and their provenance.
@@ -120,7 +120,7 @@ version:
   out over a `JoinSet`, fails closed on error/timeout, streams run events, and
   persists each run, sealing an eligible run on a best-effort basis at persist
   time.
-- `src/seal.rs` / `src/attest.rs`: signed local-run attestation
+- `src/seal.rs` / `src/attest/`: signed local-run attestation
   (`docs/developer-guide/attestation.md`). `seal.rs` is the run seal: an
   HMAC-SHA256 keyed by a secret embedded in the binary at build time, over a
   canonical digest of the committed HEAD tree, the merge-base tree, the
@@ -132,11 +132,14 @@ version:
   `seal_run` skips when the bindings it needs are absent or no repo reviewer
   resolved). A dirty review still runs and still seals, but the seal records
   `dirty: true`; `bastion attest` refuses to attest such a run.
-  `attest.rs` is `bastion attest` (verifies the seal, re-derives the repository
-  state, signs a bundle with the author's SSH key, writes it as a git note
-  under `refs/notes/bastion`) and the CI-side verify-and-replay planner
-  (`plan`, `AttestationOutcome`) that `commands::review` calls when the
-  registry sets `attestations: true` and the run carries a GitHub source.
+  `attest/` is split by concern: `mod.rs` is the `bastion attest` flow
+  (verifies the seal, re-derives the repository state, signs a bundle with the
+  author's SSH key, writes it as a git note under `refs/notes/bastion`),
+  `bundle.rs` the bundle and note envelope, `sign.rs` SSH signing and
+  signing-key resolution, and `replay.rs` the CI-side verify-and-replay
+  planner (`plan`, `AttestationOutcome`) plus note lookup, which
+  `commands::review` calls when the registry sets `attestations: true` and the
+  run carries a GitHub source.
 - `src/backend/`: the agent execution boundary. `mod.rs` defines the `Backend`
   trait, the deterministic `MockBackend`, `dispatch`, and the shared prompt helpers
   (including the fenced-YAML `SCHEMA_INSTRUCTION`/`extract_verdict` that the Codex
@@ -184,7 +187,7 @@ version:
   When one or more reviewers replayed from a verified attestation, `report.rs` adds a
   `[!NOTE]` callout naming them, the attesting key, and when it was signed, plus a line
   on each replayed reviewer's own check-run summary; a fallback (attestation attempted
-  but not honored) surfaces as a line naming why. See `src/seal.rs` / `src/attest.rs`
+  but not honored) surfaces as a line naming why. See `src/seal.rs` / `src/attest/`
   below and `docs/developer-guide/attestation.md`.
   Check runs need a GitHub App installation token, so this
   runs under one (the default Actions `GITHUB_TOKEN` qualifies; a classic PAT does
