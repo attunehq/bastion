@@ -625,6 +625,17 @@ fn failing_or_blocking_advisors_never_block() {
     assert_eq!(gates.total, 1);
     assert_eq!(gates.passed, 1);
     assert_eq!(run.resolved_count(), 3);
+
+    // The blocking advisor is clamped to pass and its blocking finding is recorded
+    // as optional end to end, so its persisted row honors the universal invariant
+    // (a pass carries no blocking finding) while the advice still surfaces.
+    let (verdict, _summary, findings, _usage) = run.resolved("blocky-advisor");
+    assert_eq!(verdict, Decision::Pass);
+    assert!(!findings.is_empty(), "the advisory finding must surface");
+    assert!(
+        findings.iter().all(|f| f.kind == FindingKind::Optional),
+        "an advisor's blocking finding must be recorded as optional, got: {findings:?}"
+    );
 }
 
 /// An advisor that hangs past its timeout fails open (skipped), not closed.

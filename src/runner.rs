@@ -565,16 +565,20 @@ fn resolve_replayed(replay: &ReplayedReviewer) -> Resolved {
             duration_ms,
             ..
         } => {
+            // Normalize an advisor to its non-blocking shape first: an attested
+            // row (produced by any release, including one predating the universal
+            // invariant) may carry a blocking finding, which becomes optional here.
+            let (decision, findings) = clamp_advisor(is_gate, *verdict, findings.clone());
             let claimed = Verdict {
-                decision: *verdict,
+                decision,
                 summary: summary.clone(),
                 findings: findings.clone(),
             };
-            // Consistency is a *gate* invariant: an advisor's persisted row is
-            // legitimately a clamped pass that keeps its blocking findings as
-            // advice, so checking it here would discard exactly the advice the
-            // replay exists to preserve.
-            if is_gate && !claimed.is_consistent() {
+            // Consistency is now a universal invariant: a pass must carry no
+            // blocking finding. A gate that violates it fails closed; a normalized
+            // advisor always satisfies it, so this never discards an advisor's
+            // advice (that advice now rides as optional findings).
+            if !claimed.is_consistent() {
                 return fail(
                     &replay.reviewer,
                     is_gate,
@@ -585,9 +589,9 @@ fn resolve_replayed(replay: &ReplayedReviewer) -> Resolved {
             }
             Resolved {
                 reviewer: replay.reviewer.clone(),
-                decision: *verdict,
+                decision,
                 summary: summary.clone(),
-                findings: findings.clone(),
+                findings,
                 usage: *usage,
                 // There is no local transcript in the CI store: the bundle carries
                 // only the resolved event, never the transcript file.
@@ -633,15 +637,20 @@ fn resolve_carried(carry: &crate::carry::Carried) -> Resolved {
             scope_digest,
             ..
         } => {
+            // As in [`resolve_replayed`], normalize an advisor to its non-blocking
+            // shape before the consistency check, so a carried advisor's blocking
+            // finding becomes optional rather than tripping the universal invariant.
+            let (decision, findings) = clamp_advisor(is_gate, *verdict, findings.clone());
             let claimed = Verdict {
-                decision: *verdict,
+                decision,
                 summary: summary.clone(),
                 findings: findings.clone(),
             };
-            // As in [`resolve_replayed`]: consistency is a gate invariant; an
-            // advisor's persisted row is legitimately a clamped pass that keeps
-            // its blocking findings as advice.
-            if is_gate && !claimed.is_consistent() {
+            // Consistency is a universal invariant: a gate that violates it fails
+            // closed, so a hand-edited (user-level, unsealed) store cannot smuggle
+            // in a pass that carries a blocking finding; a normalized advisor
+            // always satisfies it.
+            if !claimed.is_consistent() {
                 return fail(
                     &carry.reviewer,
                     is_gate,
@@ -652,9 +661,9 @@ fn resolve_carried(carry: &crate::carry::Carried) -> Resolved {
             }
             Resolved {
                 reviewer: carry.reviewer.clone(),
-                decision: *verdict,
+                decision,
                 summary: summary.clone(),
-                findings: findings.clone(),
+                findings,
                 usage: None,
                 transcript: None,
                 duration: Duration::ZERO,
@@ -791,18 +800,15 @@ fn resolve(
             duration,
         }) => {
             let verdict = outcome.verdict;
-            // An advisor never blocks: clamp its decision to pass for aggregation,
-            // but keep its findings so they still surface.
-            let decision = if is_gate {
-                verdict.decision
-            } else {
-                Decision::Pass
-            };
+            // An advisor never blocks: clamp its decision to pass and record any
+            // blocking finding as optional, so the row still surfaces the advice
+            // while satisfying the universal pass-carries-no-blocking invariant.
+            let (decision, findings) = clamp_advisor(is_gate, verdict.decision, verdict.findings);
             Resolved {
                 reviewer: reviewer.clone(),
                 decision,
                 summary: verdict.summary,
-                findings: verdict.findings,
+                findings,
                 usage: outcome.usage,
                 transcript: outcome.transcript,
                 duration,
@@ -835,6 +841,40 @@ fn resolve(
             Duration::ZERO,
         ),
     }
+}
+
+/// Normalize a reviewer's judgment to the shape its mode allows, so every
+/// resolution path (fresh [`resolve`], [`resolve_replayed`], [`resolve_carried`])
+/// records advisors identically.
+///
+/// A gate's verdict passes through untouched. An advisor never blocks, so its
+/// decision is clamped to [`Decision::Pass`] and every [`FindingKind::Blocking`]
+/// finding is recorded as [`FindingKind::Optional`]: an advisor's findings are
+/// advice, not a merge blocker, so recording them as blocking would be a lie the
+/// data model then has to carve exceptions around. Downgrading the finding kind
+/// here (rather than clamping only the decision and leaving a blocking finding on
+/// a passing row) is what makes [`Verdict::is_consistent`] a *universal* invariant:
+/// a persisted `pass` carries no blocking finding, gate or advisor alike, so the
+/// consistency check the replay and carry paths apply no longer has to special-case
+/// advisor mode (issue #74).
+fn clamp_advisor(
+    is_gate: bool,
+    decision: Decision,
+    findings: Vec<crate::verdict::Finding>,
+) -> (Decision, Vec<crate::verdict::Finding>) {
+    if is_gate {
+        return (decision, findings);
+    }
+    let findings = findings
+        .into_iter()
+        .map(|mut finding| {
+            if finding.kind == crate::verdict::FindingKind::Blocking {
+                finding.kind = crate::verdict::FindingKind::Optional;
+            }
+            finding
+        })
+        .collect();
+    (Decision::Pass, findings)
 }
 
 /// Build the resolved row for a failed/timed-out reviewer: a gate fails closed
@@ -1331,15 +1371,37 @@ mod tests {
 
     #[tokio::test]
     async fn an_advisor_block_does_not_block_the_run() {
-        // Even a clean `block` verdict from an advisor is non-blocking.
+        // Even a clean `block` verdict from an advisor is non-blocking, and its
+        // blocking finding is recorded as optional so the persisted row satisfies
+        // the universal pass-carries-no-blocking invariant while the advice survives.
         let a1 = reviewer("a1", Mode::Advisor);
         let reviewers = [&a1];
-        let (decision, _events, _layout) = run_scenario(
+        let (decision, events, _layout) = run_scenario(
             &reviewers,
             responses(vec![("a1", Response::Outcome(block("advisory concern")))]),
         )
         .await;
         assert_eq!(decision, Decision::Pass);
+
+        // The advisor's finding (blocking as emitted) is downgraded to optional.
+        let (verdict, findings) = events
+            .iter()
+            .find_map(|e| match e {
+                RunEvent::ReviewerResolved {
+                    reviewer,
+                    verdict,
+                    findings,
+                    ..
+                } if reviewer == "a1" => Some((*verdict, findings.clone())),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(verdict, Decision::Pass);
+        assert_eq!(findings.len(), 1, "the advisory finding must survive");
+        assert!(
+            findings.iter().all(|f| f.kind == FindingKind::Optional),
+            "an advisor's blocking finding must be recorded as optional, got: {findings:?}"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1682,10 +1744,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_carried_advisor_keeps_its_clamped_pass_and_blocking_findings() {
-        // An advisor's persisted row is legitimately a clamped pass that keeps
-        // blocking findings as advice; carrying it must preserve that advice,
-        // not fail it as inconsistent.
+    async fn a_carried_advisor_downgrades_a_blocking_finding_to_optional() {
+        // A prior advisor row from an older release can carry a clamped pass with a
+        // blocking finding. Carrying it must preserve the advice (not fail it as
+        // inconsistent) and normalize the finding to optional, so the re-persisted
+        // row satisfies the universal invariant.
         let a1 = reviewer("a1", Mode::Advisor);
         let mut entry = carried_entry("a2", Decision::Pass, "digest-1");
         entry.reviewer = reviewer("a2", Mode::Advisor);
@@ -1724,6 +1787,10 @@ mod tests {
             .unwrap();
         assert_eq!(verdict, Decision::Pass);
         assert_eq!(findings.len(), 1, "the advisory finding must survive carry");
+        assert!(
+            findings.iter().all(|f| f.kind == FindingKind::Optional),
+            "the carried advisor's blocking finding must be normalized to optional, got: {findings:?}"
+        );
     }
 
     #[tokio::test]
@@ -2463,11 +2530,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_inconsistent_replayed_advisor_stays_fail_open() {
-        // Mirror the fresh-execution advisor policy exactly: a broken/inconsistent
-        // result never blocks the run for an advisor, only a gate. This mirrors
-        // `fail`'s advisor branch, which resolves to `Decision::Pass` and does not
-        // count toward the gate tally.
+    async fn a_replayed_advisor_with_a_blocking_finding_normalizes_to_optional() {
+        // A pass-with-a-blocking-finding row would be inconsistent for a gate, but an
+        // advisor is normalized before the check: its decision stays pass and the
+        // blocking finding becomes optional, so it never trips the universal
+        // invariant, never blocks the aggregate, and keeps its advice as an optional
+        // finding rather than being dropped through `fail`.
         let a1 = reviewer("a1", Mode::Advisor);
         let mut ctx = ctx(&[&a1]);
         ctx.replayed.insert(
@@ -2486,7 +2554,30 @@ mod tests {
         assert_eq!(
             decision,
             Decision::Pass,
-            "an advisor never blocks the aggregate, even on a broken replay"
+            "an advisor never blocks the aggregate"
+        );
+
+        let (verdict, findings) = events
+            .iter()
+            .find_map(|e| match e {
+                RunEvent::ReviewerResolved {
+                    reviewer,
+                    verdict,
+                    findings,
+                    ..
+                } if reviewer == "a1" => Some((*verdict, findings.clone())),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(verdict, Decision::Pass);
+        assert_eq!(
+            findings.len(),
+            1,
+            "the advisory finding is preserved, not dropped through fail"
+        );
+        assert!(
+            findings.iter().all(|f| f.kind == FindingKind::Optional),
+            "the replayed advisor's blocking finding must be normalized to optional, got: {findings:?}"
         );
 
         let gates = events
@@ -2496,9 +2587,6 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        assert_eq!(
-            gates.total, 0,
-            "a failed advisor replay does not count as a gate"
-        );
+        assert_eq!(gates.total, 0, "an advisor replay does not count as a gate");
     }
 }
