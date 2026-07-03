@@ -1755,6 +1755,36 @@ fn review_warns_on_stderr_when_skills_are_stale() {
     );
 }
 
+/// The stale-skills advisory is gated on the *repository* having adopted Bastion.
+/// A review that runs on the author's user-level reviewers alone (no repo
+/// `.bastion.yaml`) must not nudge them to install skills into a project that never
+/// configured Bastion, even though the skills are absent. Only the local surface is
+/// gated this way; the CI report path is unchanged.
+#[test]
+fn review_does_not_warn_on_stale_skills_without_a_repo_registry() {
+    let Some(fake) = tooling() else { return };
+
+    // No repo registry: the reviewers come solely from the user config dir, and the
+    // bundled skills were never installed into this throwaway repo.
+    let repo = TestRepo::without_registry().with_user_registry(&registry(&[Reviewer::new(
+        "my-personal",
+        "claude-code",
+        "gate",
+    )
+    .behavior("pass")]));
+
+    let run = repo.review(fake);
+
+    // The review still runs the user's reviewer to a pass...
+    assert!(run.exited_zero(), "stderr:\n{}", run.stderr);
+    // ...but stays silent about skills, because the project has not adopted Bastion.
+    assert!(
+        !run.stderr.contains("bundled agent skills"),
+        "a user-only review must not nudge about repo skills; got:\n{}",
+        run.stderr
+    );
+}
+
 // ---------------------------------------------------------------------------
 // `bastion github report`: drive the real binary against a fake GitHub.
 // ---------------------------------------------------------------------------
