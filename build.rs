@@ -38,6 +38,13 @@ fn main() {
         sanitize_version(&version)
     );
 
+    // The rustc target triple this binary is built for, so `bastion update` can
+    // name the exact release asset it was produced from (`bastion-<target>.tar.gz`).
+    // Runtime OS/arch detection cannot tell the musl and gnu Linux builds apart;
+    // the compile-time target can, which is why it is baked in rather than probed.
+    let target = std::env::var("TARGET").unwrap_or_default();
+    println!("cargo:rustc-env=BASTION_TARGET={target}");
+
     println!("cargo:rerun-if-env-changed=BASTION_SEAL_SECRET");
     println!("cargo:rustc-env=BASTION_SEAL_SECRET={}", seal_secret());
 }

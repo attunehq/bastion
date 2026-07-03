@@ -80,6 +80,30 @@ cargo build --release
 `bastion --version` reports a release tag when one is reachable, otherwise the
 short commit SHA, with a `-dirty` suffix when the tree has uncommitted changes.
 
+Once installed, `bastion update` upgrades in place: it resolves the latest
+release, downloads the archive built for your platform, verifies its SHA-256
+against the release checksums, and swaps it over the running binary, no shell or
+`curl` needed. It installs the same bits as the install scripts, so a self-update
+and a fresh install converge. `bastion update --check` reports whether a newer
+release exists without installing it: it exits 0 whenever the release lookup
+succeeds (including when an update is available, or when the running binary is a
+development build), and non-zero only when the check itself fails, such as when
+the network is unreachable. So `--check` is a status report, not a pass/fail gate;
+script against its printed output rather than its exit code. `bastion update
+--force` reinstalls the latest release even when the running version is already
+current.
+
+Bastion also prints a notice on stderr when a release build detects that a newer
+version is available: a line naming the available version, followed by the
+`bastion update` command to run. It shows only on an interactive terminal, never
+in CI or a pipe; set `BASTION_NO_UPDATE_CHECK=1` to silence it entirely.
+
+Two environment variables retarget where updates come from, for a fork or a
+private mirror of the releases: `BASTION_REPO` overrides the `owner/name`
+repository (default `jssblck/bastion`), and `BASTION_BASE_URL` overrides the base
+URL the release archive and `checksums.txt` are fetched from. Leave both unset for
+the normal case.
+
 ## 2. Make sure the backend is ready
 
 Bastion does not run its own agent loop. It shells out to an existing coding-agent
