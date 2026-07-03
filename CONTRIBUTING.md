@@ -68,7 +68,12 @@ To cut a release:
    git push origin v0.2.0
    ```
 
-3. The [release workflow](.github/workflows/release.yml) builds the binary for
+3. The [release workflow](.github/workflows/release.yml) generates one run-seal
+   secret in its prepare job and passes it to every matrix build as
+   `BASTION_SEAL_SECRET`, so all platform binaries of the release seal and
+   verify run attestations identically (see
+   `docs/developer-guide/attestation.md`, "The run seal"). It then builds the
+   binary for
    every supported target -- Linux x86_64/aarch64 (glibc and musl), macOS
    x86_64/aarch64, and Windows x86_64 -- packages each as a `.tar.gz` alongside
    `README.md`, `LICENSE`, and `NOTICE`, generates SHA-256 `checksums.txt`, and

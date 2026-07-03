@@ -211,6 +211,13 @@ impl SigningKeySource {
 /// key's `.pub` sibling when one exists, derived with `ssh-keygen -y`
 /// otherwise, or used directly when the resolved key was already a literal
 /// public key.
+///
+/// # Errors
+///
+/// Returns an error when no key is configured (no `--key` and no
+/// `user.signingkey`), when a literal configured key cannot be written to the
+/// temporary file, or when the public key line can be neither read from the
+/// `.pub` sibling nor derived with `ssh-keygen -y`.
 pub fn resolve_signing_key(
     repo_root: &Path,
     explicit_key: Option<&Path>,

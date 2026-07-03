@@ -308,9 +308,12 @@ a release is just a tag, never a crates.io publish.
 
 - To cut a release, push a tag in the shape `vX.Y.Z` to the remote (for example
   `git tag v0.2.0 && git push origin v0.2.0`). The
-  [release workflow](.github/workflows/release.yml) fires on `v*` tags, builds the
-  platform matrix, and publishes a GitHub Release (created as a draft so its notes
-  and assets are complete, then flipped to published in a final step).
+  [release workflow](.github/workflows/release.yml) fires on `v*` tags, generates
+  one per-release run-seal secret and threads it through `BASTION_SEAL_SECRET`
+  into every platform build (so the release's binaries verify each other's run
+  seals), builds the platform matrix, and publishes a GitHub Release (created as
+  a draft so its notes and assets are complete, then flipped to published in a
+  final step).
 - Do not bump the crate version in `Cargo.toml`. Leave `version = "0.0.0"` as it is:
   it is a deliberate placeholder, not a real version. The released binary's
   `--version` comes from the git tag (CI passes the tag through `BASTION_VERSION`;

@@ -371,7 +371,7 @@ where
             });
         }
     };
-    let keys = match crate::github::context::ssh_signing_keys(&client, author).await {
+    let keys = match crate::github::signing::ssh_signing_keys(&client, author).await {
         Ok(keys) => keys,
         Err(err) => {
             return Some(crate::attest::AttestationOutcome::Fallback {

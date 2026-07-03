@@ -59,10 +59,9 @@ A verdict is a judgment about a changeset under a policy, so the bundle binds
 to the committed HEAD tree, the merge-base tree, the `base..HEAD` patch-id,
 the effective config hash, and the resolved reviewer events, alongside the
 seam and dirty flags. CI verifies every binding and falls back to a full run
-on any mismatch. The dirty flag carries its own rule: a review that included
-uncommitted or untracked work is sealed dirty, and `bastion attest` refuses to
-attest it, so only a review over committed content ever reaches CI as an
-attestation.
+on any mismatch. A review that included uncommitted or untracked work is
+sealed dirty, and `bastion attest` refuses to attest it, so only a review over
+committed content ever reaches CI as an attestation.
 
 - **The changeset, not the commit.** The merge-base tree and the head tree (with
   a patch-id over the diff). CI recomputes its own merge base against the PR's
@@ -130,13 +129,13 @@ honoring any binding. Only the runner holds the secret and produces seals. A
 successful run can be attested; a bundle without that run has no seal to
 verify.
 
-One boundary of that claim is worth stating exactly. The secret ships inside a
-public binary, so this is tamper evidence, not secrecy: an actor who
-deliberately extracts the secret and forges a seal produces bundles CI cannot
-distinguish from real ones. That act is the deliberate malice the
+The secret ships inside a public binary, so this is tamper evidence, not
+secrecy: an actor who deliberately extracts the secret and forges a seal
+produces bundles CI cannot distinguish from real ones. That act is the
+deliberate malice the
 [threat model](./design.md#threat-model--trust-boundary) already excludes; the
-seal exists to stop the inadvertent version (an agent editing run-store files,
-replaying a stale run, or stubbing a reviewer), and those it stops outright.
+seal stops the inadvertent version: an agent editing run-store files,
+replaying a stale run, or stubbing a reviewer.
 
 The seal binds the reviewed content, not commit metadata. It names the content
 reviewed, the base it was diffed against, the policy that ran, the engine that
