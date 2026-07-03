@@ -58,6 +58,8 @@ bastion --version
 bastion validate
 bastion review --base main
 bastion review --base main --format jsonl
+bastion review --base main --reviewer <name> --reviewer <other>
+bastion review --base main --fresh
 bastion runs
 bastion show
 bastion transcript <reviewer>
@@ -117,9 +119,21 @@ version:
   (`store::prior_findings` recalls the last run's findings for a branch).
 - `src/render.rs`: human and JSONL output.
 - `src/runner.rs`: the parallel, timeout-bounded runner: fans matched reviewers
-  out over a `JoinSet`, fails closed on error/timeout, streams run events, and
-  persists each run, sealing an eligible run on a best-effort basis at persist
-  time.
+  out over a `JoinSet`, fails closed on error/timeout, streams run events, folds
+  in replayed and carried verdicts, and persists each run, sealing an eligible
+  run on a best-effort basis at persist time (a partial run, one narrowed by
+  `bastion review --reviewer`, is never sealed).
+- `src/carry.rs`: incremental re-review for purely local runs. Every resolved
+  reviewer is stamped with a trigger-scoped diff digest (`scope_digest`: its
+  effective definition plus the diff of the changed files its trigger matched);
+  on a re-run of the same branch, a prior *pass* with an identical digest is
+  carried forward (`carried: true` on `reviewer.resolved`, no backend dispatch,
+  still counted in the gate tally) while blocks and changed-scope reviewers
+  execute fresh. A repository reviewer carries only from a prior run whose seal
+  verifies and records no test seam; `attestation: never` opts a reviewer out;
+  `--fresh` disables carry. CI never carries: its skip mechanism is the
+  signature-verified attestation replay, which an unsigned restored run store
+  must not bypass.
 - `src/seal.rs` / `src/attest/`: signed local-run attestation
   (`docs/developer-guide/attestation.md`). `seal.rs` is the run seal: an
   HMAC-SHA256 keyed by a secret embedded in the binary at build time, over a

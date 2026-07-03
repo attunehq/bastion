@@ -75,6 +75,15 @@ pub enum RunEvent {
         changed: u32,
         /// The reviewers that matched and will run.
         reviewers: Vec<ReviewerRef>,
+        /// Whether this run was deliberately narrowed to a subset of the
+        /// triggered reviewers (`bastion review --reviewer`). A partial run's
+        /// aggregate verdict speaks only for the reviewers that ran, so the
+        /// flag is load-bearing: it keeps a filtered green from being read (or
+        /// attested) as a full green. Additive: runs persisted before this
+        /// field existed were never filtered, so `false` is the correct
+        /// default.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        partial: bool,
     },
     /// A reviewer began executing (its spinner).
     #[serde(rename = "reviewer.started")]
@@ -117,6 +126,21 @@ pub enum RunEvent {
         /// before the feature existed).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         replayed: bool,
+        /// Whether this verdict was carried forward from the branch's previous
+        /// run because the reviewer's trigger-scoped diff was unchanged, rather
+        /// than executed fresh this run (`docs/developer-guide/local-surface.md`,
+        /// "Incremental re-review"). Additive: `false` for runs persisted before
+        /// the field existed, which is the correct reading.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        carried: bool,
+        /// A digest of everything this reviewer's verdict was scoped to: its own
+        /// effective definition plus the diff of the changed files its trigger
+        /// matched. A later run whose digest is identical may carry this verdict
+        /// forward instead of re-executing the reviewer. `None` for runs
+        /// persisted before the field existed and for replayed events, which
+        /// simply makes them ineligible to carry from.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope_digest: Option<String>,
     },
     /// A CI run that replayed one or more reviewers from a signed local
     /// attestation instead of executing them, recorded once per run as the
@@ -172,6 +196,12 @@ pub enum RunEvent {
         cache_read: u64,
         /// Total cost across reviewers.
         cost_usd: Money,
+        /// Whether this run was narrowed to a subset of the triggered reviewers
+        /// (see [`RunEvent::RunStarted`]'s `partial`). Repeated on the closing
+        /// event so a consumer reading only the verdict line still sees that the
+        /// green (or red) is partial.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        partial: bool,
     },
 }
 
@@ -198,6 +228,8 @@ mod tests {
     #[test]
     fn resolved_event_matches_the_documented_jsonl_shape() {
         let event = RunEvent::ReviewerResolved {
+            carried: false,
+            scope_digest: None,
             run: RunId("r-0f3a".into()),
             reviewer: "tenant-isolation".into(),
             verdict: Decision::Block,
@@ -248,6 +280,8 @@ mod tests {
     #[test]
     fn a_replayed_resolved_event_serializes_the_flag() {
         let event = RunEvent::ReviewerResolved {
+            carried: false,
+            scope_digest: None,
             run: RunId("r-1".into()),
             reviewer: "tenant-isolation".into(),
             verdict: Decision::Pass,
@@ -261,6 +295,79 @@ mod tests {
         let line = serde_json::to_string(&event).unwrap();
         assert!(line.contains(r#""replayed":true"#));
         assert_eq!(serde_json::from_str::<RunEvent>(&line).unwrap(), event);
+    }
+
+    #[test]
+    fn a_carried_resolved_event_serializes_the_flag_and_digest() {
+        let event = RunEvent::ReviewerResolved {
+            run: RunId("r-1".into()),
+            reviewer: "tenant-isolation".into(),
+            verdict: Decision::Pass,
+            summary: "carried forward from the branch's previous run".into(),
+            findings: vec![],
+            usage: None,
+            duration_ms: 0,
+            has_transcript: false,
+            replayed: false,
+            carried: true,
+            scope_digest: Some("abc123".into()),
+        };
+        let line = serde_json::to_string(&event).unwrap();
+        assert!(line.contains(r#""carried":true"#));
+        assert!(line.contains(r#""scope_digest":"abc123""#));
+        assert_eq!(serde_json::from_str::<RunEvent>(&line).unwrap(), event);
+    }
+
+    #[test]
+    fn a_legacy_resolved_event_defaults_carried_false_and_no_digest() {
+        // A run persisted before incremental re-review existed must load with
+        // `carried: false` and no digest, which correctly makes it ineligible
+        // to carry from while still readable.
+        let line = r#"{"type":"reviewer.resolved","run":"r-old","reviewer":"r","verdict":"pass","summary":"s","duration_ms":1,"has_transcript":false}"#;
+        match serde_json::from_str::<RunEvent>(line).expect("legacy event loads") {
+            RunEvent::ReviewerResolved {
+                carried,
+                scope_digest,
+                ..
+            } => {
+                assert!(!carried);
+                assert_eq!(scope_digest, None);
+            }
+            other => panic!("expected reviewer.resolved, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn partial_flags_round_trip_and_default_to_false_on_legacy_events() {
+        let started = RunEvent::RunStarted {
+            run: RunId("r-1".into()),
+            branch: "feat".into(),
+            base: "main".into(),
+            changed: 2,
+            reviewers: vec![],
+            partial: true,
+        };
+        let line = serde_json::to_string(&started).unwrap();
+        assert!(line.contains(r#""partial":true"#));
+        assert_eq!(serde_json::from_str::<RunEvent>(&line).unwrap(), started);
+
+        // The unfiltered common case stays off the wire entirely.
+        let full = RunEvent::RunStarted {
+            run: RunId("r-1".into()),
+            branch: "feat".into(),
+            base: "main".into(),
+            changed: 2,
+            reviewers: vec![],
+            partial: false,
+        };
+        assert!(!serde_json::to_string(&full).unwrap().contains("partial"));
+
+        // Legacy events (no field) load as full runs.
+        let legacy = r#"{"type":"run.completed","run":"r-old","verdict":"pass","gates":{"total":1,"passed":1,"blocked":0},"duration_ms":1,"cost_usd":0.0}"#;
+        match serde_json::from_str::<RunEvent>(legacy).expect("legacy run.completed loads") {
+            RunEvent::RunCompleted { partial, .. } => assert!(!partial),
+            other => panic!("expected run.completed, got {other:?}"),
+        }
     }
 
     #[test]
@@ -294,6 +401,7 @@ mod tests {
     #[test]
     fn run_started_round_trips() {
         let event = RunEvent::RunStarted {
+            partial: false,
             run: RunId("r-0f3a".into()),
             branch: "feat/cart".into(),
             base: "main".into(),

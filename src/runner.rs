@@ -126,6 +126,24 @@ pub struct ExecContext {
     /// Drives the single `run.attested` audit-trail event; `None` whenever
     /// `replayed` is empty.
     pub attestation: Option<AttestationAudit>,
+    /// Whether this run was deliberately narrowed to a subset of the triggered
+    /// reviewers (`bastion review --reviewer`). A partial run persists and
+    /// renders as partial, and is never sealed: its aggregate speaks only for
+    /// the reviewers that ran, so it must not become attestable as a verdict on
+    /// the full triggered set.
+    pub partial: bool,
+    /// Reviewers carrying their verdict forward from the branch's previous run
+    /// because their trigger-scoped diff is unchanged ([`crate::carry`]), keyed
+    /// by name. Like `replayed`, these fold into the tally and the persisted
+    /// stream without being handed to the backend `JoinSet`. Populated only by
+    /// a purely local review; disjoint from both `replayed` and the fresh set.
+    pub carried: std::collections::BTreeMap<String, crate::carry::Carried>,
+    /// The current scope digest for each reviewer executing fresh this run,
+    /// keyed by name, stamped onto its `reviewer.resolved` event so a later run
+    /// can decide whether to carry it. An absent entry (a digest that failed to
+    /// compute) leaves the event without one, which simply makes it ineligible
+    /// to carry from.
+    pub scope_digests: std::collections::BTreeMap<String, String>,
     /// The `run.attestation-fallback` event, when the caller already rendered one
     /// (attestations were enabled but the note did not verify or replay).
     /// Carried here so persistence includes it too: the caller renders it to the
@@ -187,6 +205,12 @@ struct Resolved {
     /// Whether this verdict was replayed from a signed local attestation rather
     /// than executed fresh this run.
     replayed: bool,
+    /// Whether this verdict was carried forward from the branch's previous run
+    /// ([`crate::carry`]) rather than executed fresh this run.
+    carried: bool,
+    /// The scope digest to stamp on this reviewer's `reviewer.resolved` event,
+    /// when one was computed.
+    scope_digest: Option<String>,
 }
 
 /// Execute the matched reviewers for a run using the real backends.
@@ -237,7 +261,8 @@ pub async fn execute_with(
     // non-replayed matched reviewers are. The started events are also retained
     // for persistence so `run.jsonl` is the *full* event stream the docs
     // promise, not just the resolve/completed tail.
-    let mut started_events = Vec::with_capacity(matched.len() + ctx.replayed.len());
+    let mut started_events =
+        Vec::with_capacity(matched.len() + ctx.replayed.len() + ctx.carried.len());
     for reviewer in matched {
         let event = RunEvent::ReviewerStarted {
             run: ctx.run.clone(),
@@ -254,6 +279,18 @@ pub async fn execute_with(
             reviewer: replay.reviewer.name.clone(),
             mode: replay.reviewer.mode,
             backend: replay.reviewer.backend,
+        };
+        emit(&event);
+        started_events.push(event);
+    }
+    // A carried reviewer is announced the same way a replayed one is: it is
+    // part of the run's plan even though no backend executes for it.
+    for carry in ctx.carried.values() {
+        let event = RunEvent::ReviewerStarted {
+            run: ctx.run.clone(),
+            reviewer: carry.reviewer.name.clone(),
+            mode: carry.reviewer.mode,
+            backend: carry.reviewer.backend,
         };
         emit(&event);
         started_events.push(event);
@@ -310,12 +347,16 @@ pub async fn execute_with(
     // replayed row is never subject to fail-closed/fail-open: it already carries
     // a real, previously-resolved verdict, so it is reconstructed verbatim
     // (verdict, findings, usage, duration) rather than re-derived.
-    let mut resolved = Vec::with_capacity(matched.len() + ctx.replayed.len());
+    let mut resolved = Vec::with_capacity(matched.len() + ctx.replayed.len() + ctx.carried.len());
     for (index, reviewer) in matched.iter().enumerate() {
-        resolved.push(resolve(reviewer, results[index].take()));
+        let digest = ctx.scope_digests.get(&reviewer.name).cloned();
+        resolved.push(resolve(reviewer, results[index].take(), digest));
     }
     for replay in ctx.replayed.values() {
         resolved.push(resolve_replayed(replay));
+    }
+    for carry in ctx.carried.values() {
+        resolved.push(resolve_carried(carry));
     }
 
     // Persist per-reviewer artifacts and build the resolve events. The persisted
@@ -341,6 +382,8 @@ pub async fn execute_with(
             duration_ms: duration_ms(item.duration),
             has_transcript: item.transcript.is_some(),
             replayed: item.replayed,
+            carried: item.carried,
+            scope_digest: item.scope_digest.clone(),
         };
         emit(&event);
         events.push(event);
@@ -374,6 +417,7 @@ pub async fn execute_with(
     let usage = total_usage(&resolved);
 
     let completed = RunEvent::RunCompleted {
+        partial: ctx.partial,
         run: ctx.run.clone(),
         verdict: aggregate,
         gates,
@@ -456,6 +500,11 @@ fn resolve_replayed(replay: &ReplayedReviewer) -> Resolved {
                 duration: Duration::from_millis(*duration_ms),
                 counts_as_gate: is_gate,
                 replayed: true,
+                carried: false,
+                // A replayed event's digest (if any) describes the attester's
+                // working tree; do not re-stamp it here, so a replayed verdict
+                // is never itself carried from.
+                scope_digest: None,
             }
         }
         _ => fail(
@@ -463,6 +512,65 @@ fn resolve_replayed(replay: &ReplayedReviewer) -> Resolved {
             is_gate,
             "the attested reviewer.resolved event was not a reviewer.resolved event \
              (a defect in the attestation planner, not the bundle)",
+            Duration::ZERO,
+        ),
+    }
+}
+
+/// Reconstruct a [`Resolved`] row for a carried reviewer from the branch's
+/// previous run ([`crate::carry`]).
+///
+/// The prior event was produced by this same pipeline and, for a repository
+/// reviewer, re-verified against the prior run's seal by [`crate::carry::plan`].
+/// A user-level reviewer's store carries no seal, so the same
+/// internal-consistency check [`resolve_replayed`] applies guards a hand-edited
+/// event from smuggling in an inconsistent verdict; anything inconsistent fails
+/// closed per the reviewer's mode. Usage is dropped (no tokens were spent this
+/// run) and the duration reads zero; the scope digest is re-stamped from the
+/// prior event so the carry chain stays unbroken on the next run.
+fn resolve_carried(carry: &crate::carry::Carried) -> Resolved {
+    let is_gate = carry.reviewer.mode == Mode::Gate;
+    match &carry.event {
+        RunEvent::ReviewerResolved {
+            verdict,
+            summary,
+            findings,
+            scope_digest,
+            ..
+        } => {
+            let claimed = Verdict {
+                decision: *verdict,
+                summary: summary.clone(),
+                findings: findings.clone(),
+            };
+            if !claimed.is_consistent() {
+                return fail(
+                    &carry.reviewer,
+                    is_gate,
+                    "the prior run's reviewer.resolved event was internally inconsistent \
+                     (a pass carrying a blocking finding, or a block with none)",
+                    Duration::ZERO,
+                );
+            }
+            Resolved {
+                reviewer: carry.reviewer.clone(),
+                decision: *verdict,
+                summary: summary.clone(),
+                findings: findings.clone(),
+                usage: None,
+                transcript: None,
+                duration: Duration::ZERO,
+                counts_as_gate: is_gate,
+                replayed: false,
+                carried: true,
+                scope_digest: scope_digest.clone(),
+            }
+        }
+        _ => fail(
+            &carry.reviewer,
+            is_gate,
+            "the carried event was not a reviewer.resolved event \
+             (a defect in the carry planner, not the store)",
             Duration::ZERO,
         ),
     }
@@ -476,6 +584,12 @@ fn resolve_replayed(replay: &ReplayedReviewer) -> Resolved {
 /// bindings, zero repo-reviewer events, a persistence error) logs at most a
 /// `tracing::warn!` and returns without touching `aggregate`.
 fn seal_run(layout: &Layout, ctx: &ExecContext, stream: &[RunEvent]) {
+    // A partial run is never sealed: its aggregate speaks only for the selected
+    // reviewers, and a seal would let `bastion attest` present a filtered green
+    // as a verdict on the full triggered set.
+    if ctx.partial {
+        return;
+    }
     let Some(bindings) = &ctx.seal else {
         return;
     };
@@ -562,7 +676,16 @@ enum TaskOutcome {
 ///
 /// A `None` result means the task neither completed nor errored cleanly (a
 /// panic); it is treated as a crash, i.e. fail-closed for a gate.
-fn resolve(reviewer: &Reviewer, result: Option<ReviewTaskResult>) -> Resolved {
+///
+/// `scope_digest` is the current trigger-scoped digest to stamp on the resolved
+/// row (see [`ExecContext::scope_digests`]). Only a real verdict gets the
+/// stamp: a crash, timeout, or malformed output resolves through [`fail`]
+/// without one, so a fail-closed block can never seed a later carry.
+fn resolve(
+    reviewer: &Reviewer,
+    result: Option<ReviewTaskResult>,
+    scope_digest: Option<String>,
+) -> Resolved {
     let is_gate = reviewer.mode == Mode::Gate;
     match result {
         Some(ReviewTaskResult {
@@ -587,6 +710,8 @@ fn resolve(reviewer: &Reviewer, result: Option<ReviewTaskResult>) -> Resolved {
                 duration,
                 counts_as_gate: is_gate,
                 replayed: false,
+                carried: false,
+                scope_digest,
             }
         }
         Some(ReviewTaskResult {
@@ -634,6 +759,8 @@ fn fail(reviewer: &Reviewer, is_gate: bool, reason: &str, duration: Duration) ->
             duration,
             counts_as_gate: true,
             replayed: false,
+            carried: false,
+            scope_digest: None,
         }
     } else {
         Resolved {
@@ -646,6 +773,8 @@ fn fail(reviewer: &Reviewer, is_gate: bool, reason: &str, duration: Duration) ->
             duration,
             counts_as_gate: false,
             replayed: false,
+            carried: false,
+            scope_digest: None,
         }
     }
 }
@@ -747,6 +876,7 @@ fn persist_run(layout: &Layout, run: &RunId, ctx: &ExecContext, tail: &[RunEvent
     // opening event here so a replayed run is complete; `changed` is recorded by
     // the caller's emitted event, which is the canonical one shown on screen.
     let started = RunEvent::RunStarted {
+        partial: ctx.partial,
         run: run.clone(),
         branch: ctx.branch.clone(),
         base: ctx.base.clone(),
@@ -892,6 +1022,9 @@ mod tests {
             dirty: false,
             replayed: Default::default(),
             attestation: None,
+            partial: false,
+            carried: Default::default(),
+            scope_digests: Default::default(),
             attestation_fallback: None,
         }
     }
@@ -1340,6 +1473,213 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_partial_run_is_marked_partial_and_never_sealed() {
+        let _seam_lock = SEAM_ENV_LOCK.lock().await;
+        let _seam_guard = SeamEnvGuard::cleared();
+        let g1 = reviewer("g1", Mode::Gate);
+        let reviewers = [&g1];
+        let mut ctx = ctx(&reviewers);
+        ctx.partial = true;
+        // Bindings are present and would seal a full run; `partial` must win.
+        ctx.seal = Some(seal_bindings(&["g1"]));
+
+        let (decision, events, layout) = run_scenario_with_ctx(
+            &reviewers,
+            ctx,
+            responses(vec![("g1", Response::Outcome(pass("ok")))]),
+        )
+        .await;
+
+        assert_eq!(decision, Decision::Pass);
+        let run = RunId("r-exec".into());
+        assert_eq!(
+            crate::store::read_seal(&layout, &run).unwrap(),
+            None,
+            "a partial run must never seal, or a filtered green becomes attestable"
+        );
+        // Both the live stream and the persisted run carry the partial flag.
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, RunEvent::RunCompleted { partial, .. } if *partial))
+        );
+        let persisted = crate::store::read_run(&layout, &run).unwrap();
+        assert!(
+            persisted
+                .iter()
+                .any(|e| matches!(e, RunEvent::RunStarted { partial, .. } if *partial))
+        );
+        assert!(
+            persisted
+                .iter()
+                .any(|e| matches!(e, RunEvent::RunCompleted { partial, .. } if *partial))
+        );
+    }
+
+    /// A `Carried` entry for `name` whose prior event resolved to `verdict`
+    /// with the given digest.
+    fn carried_entry(name: &str, verdict: Decision, digest: &str) -> crate::carry::Carried {
+        crate::carry::Carried {
+            reviewer: reviewer(name, Mode::Gate),
+            event: RunEvent::ReviewerResolved {
+                run: RunId("r-prior".into()),
+                reviewer: name.into(),
+                verdict,
+                summary: "unchanged since the previous run".into(),
+                findings: vec![],
+                usage: Some(Usage {
+                    tokens_in: 999,
+                    tokens_out: 99,
+                    cache_read: 0,
+                    cost_usd: Money::from_cents(50),
+                }),
+                duration_ms: 1234,
+                has_transcript: false,
+                replayed: false,
+                carried: false,
+                scope_digest: Some(digest.into()),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn a_carried_reviewer_counts_toward_the_gate_without_executing() {
+        let g1 = reviewer("g1", Mode::Gate);
+        let reviewers = [&g1];
+        let mut ctx = ctx(&reviewers);
+        ctx.carried
+            .insert("g2".into(), carried_entry("g2", Decision::Pass, "digest-1"));
+        ctx.reviewers.push(ReviewerRef {
+            name: "g2".into(),
+            mode: Mode::Gate,
+        });
+
+        let (decision, events, _layout) = run_scenario_with_ctx(
+            &reviewers,
+            ctx,
+            responses(vec![("g1", Response::Outcome(pass("ok")))]),
+        )
+        .await;
+
+        assert_eq!(decision, Decision::Pass);
+        // The carried reviewer is announced and resolved like the rest.
+        assert!(
+            events.iter().any(
+                |e| matches!(e, RunEvent::ReviewerStarted { reviewer, .. } if reviewer == "g2")
+            )
+        );
+        let (carried_flag, usage, digest) = events
+            .iter()
+            .find_map(|e| match e {
+                RunEvent::ReviewerResolved {
+                    reviewer,
+                    carried,
+                    usage,
+                    scope_digest,
+                    ..
+                } if reviewer == "g2" => Some((*carried, *usage, scope_digest.clone())),
+                _ => None,
+            })
+            .expect("the carried reviewer resolves");
+        assert!(carried_flag);
+        assert_eq!(usage, None, "no tokens were spent this run");
+        assert_eq!(
+            digest.as_deref(),
+            Some("digest-1"),
+            "the digest is re-stamped so the chain continues next run"
+        );
+        // Both gates count in the tally.
+        let gates = events
+            .iter()
+            .find_map(|e| match e {
+                RunEvent::RunCompleted { gates, .. } => Some(*gates),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(gates.total, 2);
+        assert_eq!(gates.passed, 2);
+    }
+
+    #[tokio::test]
+    async fn a_carried_repo_reviewer_is_sealed_into_the_new_run() {
+        // A carried verdict participates in the new run's seal exactly like a
+        // fresh one: the carry planner already verified the prior seal, so the
+        // new seal extends the chain rather than dropping the reviewer.
+        let _seam_lock = SEAM_ENV_LOCK.lock().await;
+        let _seam_guard = SeamEnvGuard::cleared();
+        let g1 = reviewer("g1", Mode::Gate);
+        let reviewers = [&g1];
+        let mut ctx = ctx(&reviewers);
+        ctx.seal = Some(seal_bindings(&["g1", "g2"]));
+        ctx.carried
+            .insert("g2".into(), carried_entry("g2", Decision::Pass, "digest-1"));
+
+        let (_decision, _events, layout) = run_scenario_with_ctx(
+            &reviewers,
+            ctx,
+            responses(vec![("g1", Response::Outcome(pass("ok")))]),
+        )
+        .await;
+
+        let seal = crate::store::read_seal(&layout, &RunId("r-exec".into()))
+            .unwrap()
+            .expect("a full run with bindings seals");
+        assert_eq!(seal.reviewers, vec!["g1".to_string(), "g2".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_fresh_pass_is_stamped_with_its_scope_digest() {
+        let g1 = reviewer("g1", Mode::Gate);
+        let reviewers = [&g1];
+        let mut ctx = ctx(&reviewers);
+        ctx.scope_digests.insert("g1".into(), "digest-fresh".into());
+
+        let (_decision, events, _layout) = run_scenario_with_ctx(
+            &reviewers,
+            ctx,
+            responses(vec![("g1", Response::Outcome(pass("ok")))]),
+        )
+        .await;
+
+        let digest = events
+            .iter()
+            .find_map(|e| match e {
+                RunEvent::ReviewerResolved { scope_digest, .. } => Some(scope_digest.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(digest.as_deref(), Some("digest-fresh"));
+    }
+
+    #[tokio::test]
+    async fn an_inconsistent_carried_event_fails_closed() {
+        // A pass carrying a blocking finding is not a coherent pass; a carried
+        // event gets the same consistency check a replayed one does, so a
+        // hand-edited (user-level, unsealed) store cannot smuggle one in.
+        let reviewers: [&Reviewer; 0] = [];
+        let mut ctx = ctx(&reviewers);
+        let mut entry = carried_entry("g1", Decision::Pass, "d");
+        if let RunEvent::ReviewerResolved { findings, .. } = &mut entry.event {
+            findings.push(Finding {
+                kind: FindingKind::Blocking,
+                path: "a.rs".into(),
+                line_start: 1,
+                line_end: 1,
+                detail: "contradiction".into(),
+            });
+        }
+        ctx.carried.insert("g1".into(), entry);
+        ctx.reviewers.push(ReviewerRef {
+            name: "g1".into(),
+            mode: Mode::Gate,
+        });
+
+        let (decision, _events, _layout) =
+            run_scenario_with_ctx(&reviewers, ctx, responses(vec![])).await;
+        assert_eq!(decision, Decision::Block);
+    }
+
+    #[tokio::test]
     async fn a_reviewer_outside_the_repo_set_is_excluded_from_the_seal() {
         // A user-level-only reviewer (not in `repo_reviewers`) must not be sealed:
         // its events are excluded, and if it is the only reviewer that ran, no
@@ -1510,6 +1850,8 @@ mod tests {
     /// hand it to the runner after parsing and checking it, for a replay test.
     fn attested_event(name: &str, verdict: Decision, summary: &str) -> RunEvent {
         RunEvent::ReviewerResolved {
+            carried: false,
+            scope_digest: None,
             run: RunId("r-attested-elsewhere".into()),
             reviewer: name.into(),
             verdict,
@@ -1732,6 +2074,8 @@ mod tests {
     /// outcome), so this simulates a malformed or tampered attestation bundle.
     fn inconsistent_pass_event(name: &str) -> RunEvent {
         RunEvent::ReviewerResolved {
+            carried: false,
+            scope_digest: None,
             run: RunId("r-attested-elsewhere".into()),
             reviewer: name.into(),
             verdict: Decision::Pass,

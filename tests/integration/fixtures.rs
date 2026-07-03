@@ -78,6 +78,9 @@ pub(crate) struct Reviewer {
     prompt: Option<&'static str>,
     /// `attestation: never`, opting this reviewer out of attestation replay.
     attestation_never: bool,
+    /// The trigger glob (defaults to `src/**/*.rs`, which the test repo always
+    /// dirties).
+    trigger: &'static str,
 }
 
 impl Reviewer {
@@ -96,7 +99,16 @@ impl Reviewer {
             effort: None,
             prompt: None,
             attestation_never: false,
+            trigger: "src/**/*.rs",
         }
+    }
+
+    /// Route this reviewer on `trigger` instead of the default `src/**/*.rs`,
+    /// for scenarios that need reviewers scoped to disjoint parts of the tree
+    /// (the incremental-review carry scenarios, say).
+    pub(crate) fn trigger(mut self, trigger: &'static str) -> Self {
+        self.trigger = trigger;
+        self
     }
 
     /// Pin the reviewer's `model`.
@@ -166,7 +178,7 @@ impl Reviewer {
     fn to_yaml(&self) -> String {
         let mut s = String::new();
         s.push_str(&format!("  - name: {}\n", self.name));
-        s.push_str("    trigger: [src/**/*.rs]\n");
+        s.push_str(&format!("    trigger: [{}]\n", self.trigger));
         s.push_str(&format!("    mode: {}\n", self.mode));
         s.push_str(&format!("    backend: {}\n", self.backend));
         if let Some(model) = self.model {
@@ -567,6 +579,36 @@ impl ReviewRun {
             .iter()
             .filter(|e| matches!(e, RunEvent::ReviewerStarted { .. }))
             .count()
+    }
+
+    /// Whether the closing `run.completed` (or the opening `run.started`) marked
+    /// the run partial (`bastion review --reviewer`).
+    pub(crate) fn partial(&self) -> bool {
+        self.events.iter().any(|e| {
+            matches!(
+                e,
+                RunEvent::RunStarted { partial: true, .. }
+                    | RunEvent::RunCompleted { partial: true, .. }
+            )
+        })
+    }
+
+    /// Whether `name`'s resolved event was carried forward from the branch's
+    /// previous run rather than executed fresh.
+    pub(crate) fn carried(&self, name: &str) -> bool {
+        for event in &self.events {
+            if let RunEvent::ReviewerResolved {
+                reviewer, carried, ..
+            } = event
+                && reviewer == name
+            {
+                return *carried;
+            }
+        }
+        panic!(
+            "no reviewer.resolved for '{name}'; stderr:\n{}",
+            self.stderr
+        );
     }
 
     /// The reason from the stream's `run.attestation-fallback` event, if one was

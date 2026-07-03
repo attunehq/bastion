@@ -30,7 +30,8 @@ through it.
 | [`src/paths.rs`](../../src/paths.rs) | The data-directory layout (`Layout`), resolved by platform convention or `BASTION_DATA_DIR`. Maps a reviewer name to a portable run-store path component (`path_component`), so the `repo:` merge sentinel cannot produce an unwritable path; `config.rs` enforces that distinct names never collapse to the same component. |
 | [`src/store.rs`](../../src/store.rs) | Run-history persistence: writing/reading `run.jsonl`, listing and pruning runs, and recalling a branch's prior findings (`prior_findings`) from its last run for the review context. |
 | [`src/render.rs`](../../src/render.rs) | Human and JSONL output (`Format`). |
-| [`src/runner.rs`](../../src/runner.rs) | The parallel, timeout-bounded runner: fans matched reviewers out over a `JoinSet`, fails closed on error/timeout, streams events, persists each run, and seals an eligible run on a best-effort basis at persist time. |
+| [`src/runner.rs`](../../src/runner.rs) | The parallel, timeout-bounded runner: fans matched reviewers out over a `JoinSet`, fails closed on error/timeout, streams events, folds in replayed and carried verdicts, persists each run, and seals an eligible (full, never partial) run on a best-effort basis at persist time. |
+| [`src/carry.rs`](../../src/carry.rs) | Incremental re-review: computes each triggered reviewer's trigger-scoped diff digest (`scope_digest`) and plans which prior passes carry forward on a re-run of the same branch (`plan`). Local runs only; a repository reviewer carries only from a prior run whose seal verifies. See [the local surface](./local-surface.md#incremental-re-review). |
 | [`src/seal.rs`](../../src/seal.rs) | The run seal: an HMAC-SHA256 over a canonical digest of the committed HEAD tree, the merge-base tree, the `base..HEAD` patch-id, the effective reviewer config, whether a test seam was active, whether the working tree was dirty (sampled before reviewers ran and again at seal time, dirty if either sample was), and the resolved reviewer events, keyed by a secret embedded in the binary at build time. Sealed by the runner, verified by `bastion attest` and CI; a run sealed dirty cannot be attested. See [Attestation](./attestation.md). |
 | [`src/attest/`](../../src/attest/) | Attestation, split by concern: `mod.rs` is the `bastion attest` flow (verifies a run's seal, re-derives the repository state, signs a bundle, writes the git note), `bundle.rs` the bundle and note envelope, `sign.rs` SSH signing and signing-key resolution, and `replay.rs` the CI-side verify-and-replay planner (`plan`, `AttestationOutcome`) plus note lookup. See [Attestation](./attestation.md). |
 | [`src/skills.rs`](../../src/skills.rs) | The agent skills bundled into the binary (from `skills/<slug>/SKILL.md`) and installed into a consuming repo by `bastion skills install`/`check`/`list`. The rendered file is deterministic so `check` is a version-independent drift guard. |
@@ -76,7 +77,10 @@ Following one review top to bottom touches most of the crate:
    from `--base` (tracked edits *and* untracked files, committed or not) plus the
    current branch and repo root.
 4. **Route** (`routing.rs`). Each reviewer's trigger globs are compiled and matched
-   against the changed files; the matched reviewers are the ones that will run.
+   against the changed files; the matched reviewers are the ones that will run. An
+   explicit `--reviewer` selection then narrows that set (an unknown or untriggered
+   name errors here), and a selection that excludes a triggered reviewer marks the
+   run partial: persisted and rendered as such, and never sealed.
 5. **Gather context** (`context.rs`, `git.rs`, `store.rs`, `github/context.rs`).
    Bastion assembles a `ReviewContext` for the run: the author's stated intent (a
    non-empty PR body when reviewing a pull request, otherwise this branch's commit
@@ -96,6 +100,17 @@ Following one review top to bottom touches most of the crate:
     that has not opted out replays; everything else executes fresh in the next
     step. Every failure degrades to a full run for the affected reviewers; a
     purely local review skips this step entirely. See [Attestation](./attestation.md).
+5b. **Plan carry** (`carry.rs`, purely local runs only). Every reviewer about to run
+    gets a trigger-scoped diff digest (its own effective definition plus the diff of
+    the changed files its trigger matched), stamped onto its `reviewer.resolved`
+    event. On a re-run of the same branch, a reviewer whose prior verdict was a pass
+    with an identical digest is *carried*: its verdict folds into the run without a
+    backend executing. A repository reviewer carries only from a prior run whose
+    seal verifies (and records no test seam); `--fresh` disables carry, and an
+    explicit `--reviewer` selection executes its reviewers fresh. A run with a
+    GitHub source never carries: CI's skip mechanism is attestation replay, which is
+    signature-verified. See
+    [the local surface](./local-surface.md#incremental-re-review).
 6. **Run** (`runner.rs`). `execute` spawns every matched, non-replayed reviewer onto
    a `JoinSet`, bounds each by its `timeout` (default 15m), and emits
    `reviewer.started` up front (including for a replayed reviewer, so the plan reads

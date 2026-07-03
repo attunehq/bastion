@@ -29,6 +29,10 @@ pub struct RunSummary {
     pub verdict: Option<Decision>,
     /// Number of reviewers the run triggered.
     pub reviewers: u32,
+    /// Whether the run was narrowed to a subset of the triggered reviewers
+    /// (`bastion review --reviewer`), so its verdict speaks only for those.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub partial: bool,
 }
 
 /// Persist a run's full event stream and update the `latest` pointer.
@@ -272,6 +276,7 @@ fn summarize(layout: &Layout, id: &RunId) -> RunSummary {
         base: None,
         verdict: None,
         reviewers: 0,
+        partial: false,
     };
     for event in events {
         match event {
@@ -279,11 +284,13 @@ fn summarize(layout: &Layout, id: &RunId) -> RunSummary {
                 branch,
                 base,
                 reviewers,
+                partial,
                 ..
             } => {
                 summary.branch = Some(branch);
                 summary.base = Some(base);
                 summary.reviewers = u32::try_from(reviewers.len()).unwrap_or(u32::MAX);
+                summary.partial = partial;
             }
             RunEvent::RunCompleted { verdict, .. } => summary.verdict = Some(verdict),
             _ => {}
@@ -302,6 +309,7 @@ mod tests {
     fn sample_events(id: &str) -> Vec<RunEvent> {
         vec![
             RunEvent::RunStarted {
+                partial: false,
                 run: RunId(id.into()),
                 branch: "feat/x".into(),
                 base: "main".into(),
@@ -312,6 +320,7 @@ mod tests {
                 }],
             },
             RunEvent::RunCompleted {
+                partial: false,
                 run: RunId(id.into()),
                 verdict: Decision::Pass,
                 gates: Gates {
@@ -390,6 +399,20 @@ mod tests {
     }
 
     #[test]
+    fn a_partial_run_summarizes_as_partial() {
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = Layout::with_root(tmp.path().to_path_buf());
+        let id = RunId("r-part".into());
+        let mut events = sample_events("r-part");
+        if let RunEvent::RunStarted { partial, .. } = &mut events[0] {
+            *partial = true;
+        }
+        write_run(&layout, &id, &events).unwrap();
+        let summaries = list_runs(&layout).unwrap();
+        assert!(summaries[0].partial);
+    }
+
+    #[test]
     fn prune_keeps_the_most_recent_n() {
         let tmp = tempfile::tempdir().unwrap();
         let layout = Layout::with_root(tmp.path().to_path_buf());
@@ -427,6 +450,7 @@ mod tests {
     ) -> Vec<RunEvent> {
         vec![
             RunEvent::RunStarted {
+                partial: false,
                 run: RunId(id.into()),
                 branch: branch.into(),
                 base: "main".into(),
@@ -437,6 +461,8 @@ mod tests {
                 }],
             },
             RunEvent::ReviewerResolved {
+                carried: false,
+                scope_digest: None,
                 run: RunId(id.into()),
                 reviewer: reviewer.into(),
                 verdict: Decision::Block,
@@ -448,6 +474,7 @@ mod tests {
                 replayed: false,
             },
             RunEvent::RunCompleted {
+                partial: false,
                 run: RunId(id.into()),
                 verdict: Decision::Block,
                 gates: Gates {

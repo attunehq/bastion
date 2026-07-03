@@ -435,6 +435,7 @@ mod tests {
 
         let resolved_events = vec![
             RunEvent::RunStarted {
+                partial: false,
                 run: run_id.clone(),
                 branch: "feature".into(),
                 base: "base".into(),
@@ -451,6 +452,8 @@ mod tests {
                 ],
             },
             RunEvent::ReviewerResolved {
+                carried: false,
+                scope_digest: None,
                 run: run_id.clone(),
                 reviewer: "r1".into(),
                 verdict: Decision::Pass,
@@ -462,6 +465,8 @@ mod tests {
                 replayed: false,
             },
             RunEvent::ReviewerResolved {
+                carried: false,
+                scope_digest: None,
                 run: run_id.clone(),
                 reviewer: "r2".into(),
                 verdict: Decision::Pass,
@@ -473,6 +478,7 @@ mod tests {
                 replayed: false,
             },
             RunEvent::RunCompleted {
+                partial: false,
                 run: run_id.clone(),
                 verdict: Decision::Pass,
                 gates: Gates {

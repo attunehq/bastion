@@ -203,10 +203,30 @@ run and a run whose patch-id genuinely failed to compute are never confused.
 The seal persists alongside a run's other files, at `runs/<id>/seal.json`
 under the data directory (see [Local surface](./local-surface.md#the-data-directory)).
 `bastion attest` reads it to build a bundle. A run has no `seal.json`, and so
-cannot be attested, when it was a zero-match run, when its bindings could not
-be derived, when it resolved no repository-reviewer event, or when it predates
-sealing. Sealing failure never fails the review itself, so the run is
-otherwise complete, just unattestable.
+cannot be attested, when it was a zero-match run, when it was partial
+(`bastion review --reviewer` ran a subset of the triggered reviewers, and its
+aggregate must not become attestable as a full verdict; `bastion attest` also
+refuses such a run explicitly, with the partial reason rather than the generic
+unsealed one), when its bindings could not be derived, when it resolved no
+repository-reviewer event, or when it predates sealing. Sealing failure never
+fails the review itself, so the run is otherwise complete, just unattestable.
+
+### Carried verdicts and the seal chain
+
+A local re-run carries a prior pass forward when the reviewer's trigger-scoped
+diff is unchanged (see
+[the local surface](./local-surface.md#incremental-re-review)). A carried
+verdict participates in the new run's seal exactly like a fresh one, and that
+is sound because the chain never has an unverified link: a repository reviewer
+carries only from a prior run whose own seal verifies (and records no test
+seam), and the digest binds the actual content the reviewer judged, so digest
+equality is the binary's proof that the carried verdict still describes the
+content now under seal. Attesting a run with carried verdicts is therefore the
+author vouching for the same thing they always vouch for: a chain of
+binary-verified local runs over exactly this content. A user-level reviewer
+needs no such chain (it is never sealed and never gates anyone else's PR), and
+CI itself never carries, so no unsigned run store can reach the replay path
+through carry.
 
 ## The `bastion attest` flow
 
