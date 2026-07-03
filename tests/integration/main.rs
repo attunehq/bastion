@@ -28,6 +28,11 @@
 //! in CI (where `CI` is set) the tools must be present so the suite cannot silently
 //! become a no-op.
 
+// This whole target is test code, but clippy's allow-unwrap-in-tests only
+// exempts `#[test]` fns and `cfg(test)`, not the helper modules of an
+// integration target; in a test, a panic IS the failure report.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 mod fakes;
 mod fixtures;
 mod github;

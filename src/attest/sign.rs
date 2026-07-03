@@ -110,6 +110,10 @@ pub fn verify_signature(
         .spawn()
         .wrap_err("failed to invoke ssh-keygen; is it installed and on PATH?")
         .and_then(|mut child| {
+            #[expect(
+                clippy::expect_used,
+                reason = "stdin is present on a Stdio::piped() spawn"
+            )]
             std::io::Write::write_all(
                 child.stdin.as_mut().expect("stdin was requested as piped"),
                 data,
@@ -134,6 +138,10 @@ fn run_ssh_keygen_with_stdin(args: &[&str], data: &[u8]) -> Result<String> {
         .spawn()
         .wrap_err("failed to invoke ssh-keygen; is it installed and on PATH?")?;
 
+    #[expect(
+        clippy::expect_used,
+        reason = "stdin is present on a Stdio::piped() spawn"
+    )]
     std::io::Write::write_all(
         child.stdin.as_mut().expect("stdin was requested as piped"),
         data,

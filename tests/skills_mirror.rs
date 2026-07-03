@@ -11,6 +11,10 @@
 //! in CI as part of `cargo test`. Line endings are normalized (CR stripped) so
 //! the comparison holds identically on LF and CRLF checkouts.
 
+// Test code: a panic is the failure report. allow-unwrap-in-tests does not
+// reach an integration target's helper functions, so allow here explicitly.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;

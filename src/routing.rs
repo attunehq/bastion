@@ -160,13 +160,10 @@ mod tests {
             "docs/user-guide/concepts.md",
             "docs/developer-guide/architecture.md",
             "skills/using-bastion/SKILL.md",
-            ".github/PULL_REQUEST_TEMPLATE.md",
             "README.md",
             "CONTRIBUTING.md",
             "SECURITY.md",
             "CODE_OF_CONDUCT.md",
-            "AGENTS.md",
-            "CLAUDE.md",
         ] {
             let names = matched_names(&router, prose);
             assert!(
@@ -175,13 +172,17 @@ mod tests {
             );
         }
 
-        // Code never routes to the prose gate; neither do the vendored skill trees
-        // or the stop-slop skill's own reference files, which carry intentional
+        // Code never routes to the prose gate; neither do repository-internal
+        // markdown (agent guidance, PR templates), the vendored skill trees, or
+        // the stop-slop skill's own reference files, which carry intentional
         // "before" slop the gate must not flag.
         for excluded in [
             "src/main.rs",
             "Cargo.toml",
             ".bastion.yaml",
+            "AGENTS.md",
+            "CLAUDE.md",
+            ".github/PULL_REQUEST_TEMPLATE.md",
             ".agents/skills/parse-dont-validate/SKILL.md",
             ".agents/skills/readme.md",
             ".claude/skills/stop-slop/references/examples.md",

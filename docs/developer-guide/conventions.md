@@ -44,8 +44,8 @@ stringly-typed and re-checked at each use. Examples in the codebase:
 - A backend parses the agent's envelope into a `Verdict` at the boundary; nothing
   downstream re-validates it.
 
-The `parse-dont-validate` reviewer in the registry flags regressions as advisory
-findings.
+The `parse-dont-validate` skill under `.agents/skills/` enforces this at write
+time.
 
 ## Newtypes over stringly-typed data
 
@@ -64,13 +64,17 @@ context, not a `thiserror` library-error taxonomy:
   with `?` and add context (`.wrap_err(...)`).
 - `expect` is for genuine, documented invariants only: "this cannot fail because
   ...", not laziness.
-- The `error-handling` reviewer in the registry gates this.
+- `clippy::unwrap_used` and `clippy::expect_used` are denied in `Cargo.toml`
+  (tests are exempt via `clippy.toml`), so this is a compile-time gate. A
+  genuine invariant `expect` carries a statement-level
+  `#[expect(clippy::expect_used, reason = "...")]` stating the invariant.
 
 ## Documentation
 
 The crate sets `#![warn(missing_docs)]`. Public items carry doc comments, and
 public functions returning `Result` document their failure conditions under a
-`# Errors` heading. The `public-api-docs` reviewer flags gaps as advisory findings.
+`# Errors` heading; `clippy::missing_errors_doc` is denied, so a missing section
+fails the build.
 
 ## Testing discipline
 
@@ -101,6 +105,9 @@ doctests, mocking, generics vs. `dyn`) are recorded in
 - `clippy::inline_always` is denied.
 - `clippy::unnecessary_wraps` is denied, to catch functions that claim fallibility
   without needing it.
+- `clippy::unwrap_used` and `clippy::expect_used` are denied outside tests, and
+  `clippy::missing_errors_doc` is denied, so error-handling discipline and
+  `# Errors` coverage are compile-time checks rather than review findings.
 
 The enforced checks are:
 
@@ -113,10 +120,14 @@ nudge check
 
 `just check` runs all four. `nudge check` enforces the mechanical conventions in
 `.nudge.yaml` (no Unicode dashes in authored text); it runs in CI and as an
-agent-time hook, so the rule is a gate rather than a suggestion. Everything not
-mechanically enforced (parse-don't-validate, newtypes, fail-closed handling) is
-caught at review time: by a human and, fittingly, by Bastion's own reviewers
-running over the PR.
+agent-time hook, so the rule is a gate rather than a suggestion. `cargo test`
+also carries two structural checks: `tests/skills_mirror.rs` (the two skill
+trees stay byte-identical) and `tests/user_guide_integrity.rs` (user-guide
+frontmatter, `order` uniqueness, and relative-link resolution, the invariants
+the site build depends on). What needs judgment rather than mechanics
+(parse-don't-validate, newtypes, fail-closed handling) is caught at write time
+by the repo-local skills and at review time by a human and Bastion's own
+reviewers running over the PR.
 
 ## Text and prose
 
