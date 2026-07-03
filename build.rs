@@ -15,6 +15,10 @@
 //!    `OUT_DIR` so a dev binary's incremental rebuilds keep sealing with the same
 //!    secret rather than invalidating every previously sealed local run.
 
+// A build script reports failure by panicking: there is no caller to hand an
+// error to, and cargo turns the panic into a build failure with the message.
+#![expect(clippy::expect_used)]
+
 use std::process::Command;
 
 fn main() {

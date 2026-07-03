@@ -262,6 +262,10 @@ fn mac_hex(secret: &[u8], input: &SealInput<'_>) -> String {
     // An HMAC key may be any length (RFC 2104 recommends hashing an over-long key
     // down first, which `Mac::new_from_slice` already does), so a
     // `new_from_slice` failure here is not something ordinary input can trigger.
+    #[expect(
+        clippy::expect_used,
+        reason = "HMAC-SHA256 accepts a key of any length"
+    )]
     let mut hmac =
         HmacSha256::new_from_slice(secret).expect("HMAC-SHA256 accepts a key of any length");
     hmac.update(&canonical_bytes(input));
@@ -273,6 +277,10 @@ fn mac_hex(secret: &[u8], input: &SealInput<'_>) -> String {
 /// (documented on [`SealInput`]); this is the one place that serialization
 /// happens, so sealing and verification can never disagree about it.
 fn canonical_bytes(input: &SealInput<'_>) -> Vec<u8> {
+    #[expect(
+        clippy::expect_used,
+        reason = "SealInput serializes: every field is already JSON-safe"
+    )]
     serde_json::to_vec(input).expect("SealInput serializes: every field is already JSON-safe")
 }
 

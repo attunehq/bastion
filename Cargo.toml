@@ -54,6 +54,14 @@ perf = { level = "warn", priority = -1 }
 style = { level = "warn", priority = -1 }
 inline_always = "deny"
 unnecessary_wraps = "deny"
+# These three replace the retired `error-handling` and `public-api-docs` LLM
+# reviewers: a recoverable error that panics in production and an undocumented
+# failure path are mechanical defects, so clippy catches them for free.
+# clippy.toml sets allow-unwrap-in-tests / allow-expect-in-tests, so test code
+# keeps its idiomatic unwraps.
+unwrap_used = "deny"
+expect_used = "deny"
+missing_errors_doc = "deny"
 
 [profile.release]
 opt-level = 3

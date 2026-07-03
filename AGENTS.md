@@ -247,7 +247,12 @@ version:
   commands at scale. One scenario also drives `bastion github report` against the
   in-process fake GitHub (the binary's `GITHUB_API_URL` is pointed at it), asserting
   the real comment and check-run requests with no network. It detect-and-skips when
-  `rustc`/`git` are absent.
+  `rustc`/`git` are absent. Sibling structural test targets:
+  `tests/skills_mirror.rs` (the two skill trees stay byte-identical),
+  `tests/script_safety.rs` (installer fail-closed pins), and
+  `tests/user_guide_integrity.rs` (user-guide frontmatter, unique `order`
+  values, and relative-link resolution, the invariants the site build under
+  `site/src/content.config.ts` depends on).
 - `scripts/install.sh` / `scripts/install.ps1`: the public install scripts
   (`curl | bash` and `irm | iex`). They detect the platform, download the matching
   release archive plus `checksums.txt`, verify the SHA-256, and place `bastion` on

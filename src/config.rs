@@ -357,6 +357,10 @@ impl Config {
             attestations: self.attestations,
             reviewers: &self.reviewers,
         };
+        #[expect(
+            clippy::expect_used,
+            reason = "Config's reviewers are already loaded, so they serialize"
+        )]
         let bytes = serde_json::to_vec(&hashed)
             .expect("Config's reviewers are already loaded, so they serialize");
         let digest = sha2::Sha256::digest(&bytes);

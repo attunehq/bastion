@@ -1,0 +1,4 @@
+# unwrap/expect discipline applies to production code; in tests a panic is the
+# failure report, so the unwrap_used/expect_used lints skip test code.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
