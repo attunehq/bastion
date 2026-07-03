@@ -58,6 +58,12 @@ files the concern depends on, and carry keys the verdict to exactly that. A
 reviewer with `attestation: never` in the registry is never carried, and `--fresh`
 re-runs everything.
 
+One extra condition applies to the repository's own reviewers (not personal
+user-level ones): they carry only from a prior run the binary sealed and can still
+verify, with no test seam recorded. A prior run that was never sealed, or whose
+seal no longer checks out, executes those reviewers fresh; nothing warns about it,
+since carry is an optimization and fresh execution is always correct.
+
 This is a purely local behavior. In CI the equivalent saving is
 [attestation replay](#attesting-a-run-for-ci), which is signature-verified; CI
 never reuses an unsigned prior run.
@@ -116,9 +122,9 @@ The event types:
 
 | Event | Meaning |
 | --- | --- |
-| `run.started` | The run began; lists the reviewers that matched. Each either executes or replays from a verified attestation. |
-| `reviewer.started` | One reviewer began: dispatched to its backend, or, for a reviewer covered by a verified attestation, reconstructed from the bundle with no backend dispatched. |
-| `reviewer.resolved` | One reviewer finished; carries its `verdict`, `summary`, `findings`, `usage`, and a `has_transcript` flag. Carries `replayed: true` when the verdict came from a verified attestation, and `carried: true` when it was carried forward from the branch's previous local run, instead of a fresh execution. |
+| `run.started` | The run began; lists the reviewers in the plan: each executes, replays from a verified attestation, or (locally) carries from the branch's previous run. Under `--reviewer` the list holds only the selected reviewers, and the event carries `partial: true`. |
+| `reviewer.started` | One reviewer began: dispatched to its backend, reconstructed from a verified attestation bundle, or carried from the branch's previous local run; the latter two dispatch no backend. |
+| `reviewer.resolved` | One reviewer finished; carries its `verdict`, `summary`, `findings`, `usage`, and a `has_transcript` flag. Carries `replayed: true` when the verdict came from a verified attestation, and `carried: true` when it was carried forward from the branch's previous local run, instead of a fresh execution. A local run also stamps `scope_digest`, the trigger-scoped content hash a later run compares to decide whether this verdict can carry. |
 | `run.completed` | The aggregate decision and the gate tally, plus the run's wall-clock `duration_ms` and the usage totals (`tokens_in`, `tokens_out`, `cache_read`, `cost_usd`) summed across reviewers. Carries `partial: true` (as does `run.started`) when `--reviewer` narrowed the run. |
 | `run.attested` | A signed local run was replayed; carries the replayed `reviewers`, the attesting `public_key`, and `attested_at`. |
 | `run.attestation-fallback` | Attestation was attempted but not honored; carries the `reason` (a missing note, an unregistered key, a stale binding, and so on). |

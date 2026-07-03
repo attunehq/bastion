@@ -241,12 +241,15 @@ timeout: 15m
 
 ### `attestation`
 
-Set to `never` to opt a reviewer out of ever being replayed from a signed local
-run, even when the repository sets `attestations: true`. Absent means
-replayable: CI may replay this reviewer's verdict from an attested run instead
-of executing it fresh. Use `never` for a gate your team wants CI to execute
-unconditionally regardless of what was attested locally. See [Attesting a run
-so CI can replay it](./continuous-integration.md#attesting-a-run-so-ci-can-replay-it).
+Set to `never` to ask for fresh execution every time, on both surfaces: the
+reviewer is never replayed from a signed local run in CI (even when the
+repository sets `attestations: true`), and a local re-run never carries its
+prior pass forward (see
+[the local workflow](./local-workflow.md#re-runs-are-incremental)). Absent
+means both apply: CI may replay this reviewer's verdict from an attested run,
+and a local re-run may carry its unchanged pass. Use `never` for a gate your
+team wants executed unconditionally regardless of any prior run. See
+[Attesting a run so CI can replay it](./continuous-integration.md#attesting-a-run-so-ci-can-replay-it).
 
 ```yaml
 attestation: never

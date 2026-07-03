@@ -188,6 +188,30 @@ pub fn commit_messages(cwd: &Path, base: &str) -> Option<String> {
         .filter(|messages| !messages.is_empty())
 }
 
+/// The commit messages on `base_commit..HEAD` that touched any of `paths`,
+/// oldest first: `git log --reverse --format=%B <base_commit>..HEAD -- <paths...>`.
+///
+/// This is the trigger-scoped slice of the intent that [`commit_messages`]
+/// gathers for the prompt, used by the carry digest (`crate::carry`): a
+/// reviewer's verdict is keyed to the stated intent for the files its trigger
+/// covers, so rewording a commit that touched them re-runs the reviewer while
+/// a commit that touched only unrelated files does not. An empty `paths`
+/// yields an empty string without invoking git, since `git log -- ` with no
+/// pathspec would cover every commit.
+///
+/// # Errors
+///
+/// Returns an error if `base_commit` does not resolve or `git` fails.
+pub fn scoped_commit_messages(cwd: &Path, base_commit: &str, paths: &[&str]) -> Result<String> {
+    if paths.is_empty() {
+        return Ok(String::new());
+    }
+    let range = format!("{base_commit}..HEAD");
+    let mut args = vec!["log", "--reverse", "--format=%B", &range, "--"];
+    args.extend_from_slice(paths);
+    run_git(cwd, &args)
+}
+
 /// The short commit hash of `HEAD`, or `None` when git cannot supply one (for
 /// example a repository with no commits yet).
 ///

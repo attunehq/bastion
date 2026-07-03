@@ -17,7 +17,7 @@
 //! files outside its trigger should widen its trigger; that is the same
 //! contract routing itself enforces.
 //!
-//! Two hard limits keep carry honest:
+//! Carry has two hard limits:
 //!
 //! - **Local only.** In CI the run store arrives as a restored artifact, and a
 //!   seal is only tamper *evidence* (the HMAC secret ships inside the public
@@ -76,20 +76,72 @@ struct DigestInput<'a> {
     /// config loading), so any edit to the reviewer (prompt, backend, model,
     /// trigger, capabilities) invalidates its carried verdicts.
     reviewer: &'a Reviewer,
+    /// The merge-base commit the diff below is taken against, so a digest can
+    /// never survive the base branch moving under the changeset: a new merge
+    /// base means a new comparison point, even where the textual diff happens
+    /// to coincide.
+    merge_base: &'a str,
     /// The changed files the reviewer's trigger matched, sorted.
     files: &'a [&'a str],
     /// `git diff <merge-base> -- <files>` over the working tree: the tracked
     /// slice of the changeset this reviewer's verdict judged.
     diff: &'a str,
+    /// The commit messages on `merge_base..HEAD` that touched the matched
+    /// files: the trigger-scoped slice of the stated intent the reviewer's
+    /// prompt carries. Rewording a commit that touched this reviewer's files
+    /// invalidates its carried verdict; rewording one that did not leaves it
+    /// carryable. (The prompt's other context, a reviewer's own prior
+    /// findings, is deliberately excluded: it changes on every loop iteration
+    /// by construction, so keying the digest to it would disable carry
+    /// entirely, and a pass is not made unsound by the findings that preceded
+    /// it.)
+    intent: &'a str,
     /// Untracked matched files, which `git diff` cannot see, as
-    /// `(path, sha256-of-content)` pairs sorted by path.
+    /// `(path, descriptor)` pairs sorted by path, where the descriptor is
+    /// [`untracked_descriptor`]'s encoding of kind, mode, and content.
     untracked: &'a [(String, String)],
 }
 
+/// The digest's encoding of one untracked file: its kind and git-relevant
+/// mode, not just its bytes, so a chmod or a retargeted symlink invalidates a
+/// carried verdict the way it would change a git changeset.
+///
+/// - A symlink hashes its *target path* (`symlink:<sha256 of target>`), never
+///   the content behind it, mirroring how git records symlinks.
+/// - A regular file hashes its content, tagged with the executable bit on
+///   Unix (`file:x:<sha256>` vs `file:-:<sha256>`), the one mode bit git
+///   tracks. Windows has no such bit, so files there always encode as `-`.
+fn untracked_descriptor(repo_root: &Path, path: &str) -> std::io::Result<String> {
+    let full = repo_root.join(path);
+    let meta = std::fs::symlink_metadata(&full)?;
+    if meta.file_type().is_symlink() {
+        let target = std::fs::read_link(&full)?;
+        let target_bytes = target.to_string_lossy();
+        return Ok(format!(
+            "symlink:{}",
+            hex::encode(Sha256::digest(target_bytes.as_bytes()))
+        ));
+    }
+    let bytes = std::fs::read(&full)?;
+    #[cfg(unix)]
+    let executable = {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o111 != 0
+    };
+    #[cfg(not(unix))]
+    let executable = false;
+    Ok(format!(
+        "file:{}:{}",
+        if executable { "x" } else { "-" },
+        hex::encode(Sha256::digest(&bytes))
+    ))
+}
+
 /// Compute the scope digest for one triggered reviewer: a lowercase-hex
-/// SHA-256 over the reviewer's effective definition and the diff of the
-/// changed files its trigger matched (working tree against `merge_base`,
-/// untracked matched files hashed by content).
+/// SHA-256 over the reviewer's effective definition, the merge-base commit,
+/// the diff of the changed files its trigger matched (working tree against
+/// `merge_base`, untracked matched files encoded by kind, mode, and content),
+/// and the `merge_base..HEAD` commit messages that touched those files.
 ///
 /// `changed` is the full changed-file set the run routed on
 /// ([`git::changed_files`]); the trigger scoping happens here so the digest and
@@ -133,6 +185,14 @@ pub fn scope_digest(
         )
     })?;
 
+    let intent =
+        git::scoped_commit_messages(repo_root, merge_base, &files).wrap_err_with(|| {
+            format!(
+                "gathering the scoped commit messages reviewer '{}' is keyed to",
+                reviewer.name
+            )
+        })?;
+
     let untracked_set: BTreeSet<String> = git::untracked_files(repo_root)
         .wrap_err("listing untracked files for the scope digest")?
         .into_iter()
@@ -140,16 +200,18 @@ pub fn scope_digest(
     let mut untracked: Vec<(String, String)> = Vec::new();
     for path in &files {
         if untracked_set.contains(*path) {
-            let bytes = std::fs::read(repo_root.join(path))
+            let descriptor = untracked_descriptor(repo_root, path)
                 .wrap_err_with(|| format!("reading untracked file {path} for the scope digest"))?;
-            untracked.push(((*path).to_string(), hex::encode(Sha256::digest(&bytes))));
+            untracked.push(((*path).to_string(), descriptor));
         }
     }
 
     let input = DigestInput {
         reviewer,
+        merge_base,
         files: &files,
         diff: &diff,
+        intent: &intent,
         untracked: &untracked,
     };
     let bytes =
@@ -425,6 +487,7 @@ mod tests {
         name: &str,
         digest: &str,
         seal_it: Option<&[u8]>,
+        dirty_seal: bool,
     ) -> RunId {
         let run = RunId("r-prior".into());
         let resolved = RunEvent::ReviewerResolved {
@@ -483,7 +546,7 @@ mod tests {
                     repo_reviewers: [name.to_string()].into_iter().collect(),
                 },
                 false,
-                false,
+                dirty_seal,
                 vec![name.to_string()],
                 &values,
             );
@@ -503,7 +566,7 @@ mod tests {
     #[test]
     fn a_repo_reviewer_carries_only_from_a_verified_seal() {
         let (_tmp, layout) = layout();
-        persist_prior_run(&layout, "feat", "g1", "digest-1", Some(SECRET));
+        persist_prior_run(&layout, "feat", "g1", "digest-1", Some(SECRET), false);
         let g1 = reviewer("g1", &["src/**"]);
         let repo_set: BTreeSet<String> = ["g1".to_string()].into_iter().collect();
 
@@ -529,9 +592,96 @@ mod tests {
     }
 
     #[test]
+    fn a_dirty_but_verified_seal_still_carries_a_repo_reviewer() {
+        // A dirty seal is acceptable for carry (unlike for attestation): the
+        // digest binds the actual working-tree content the reviewer judged, so
+        // digest equality is itself the proof the content is unchanged.
+        let (_tmp, layout) = layout();
+        persist_prior_run(&layout, "feat", "g1", "digest-1", Some(SECRET), true);
+        let g1 = reviewer("g1", &["src/**"]);
+        let repo_set: BTreeSet<String> = ["g1".to_string()].into_iter().collect();
+
+        let carried = plan(
+            &layout,
+            "feat",
+            &[(&g1, "digest-1".to_string())],
+            &repo_set,
+            SECRET,
+        );
+        assert!(carried.contains_key("g1"), "a dirty verified seal carries");
+    }
+
+    #[test]
+    fn digest_changes_when_a_scoped_commit_message_is_reworded() {
+        let tmp = repo();
+        let dir = tmp.path();
+        std::fs::write(dir.join("src/a.rs"), "fn a() { /* edit */ }\n").unwrap();
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-m", "src: first wording"]);
+        let merge_base = git::merge_base(dir, "base").unwrap();
+        let changed = git::changed_files(dir, "base").unwrap();
+        let src = reviewer("src-only", &["src/**"]);
+        let first = scope_digest(dir, &merge_base, &src, &changed).unwrap();
+
+        // Rewording the commit that touched the matched files changes the
+        // stated intent the reviewer's prompt carries, so the digest changes.
+        git(dir, &["commit", "--amend", "-m", "src: entirely reworded"]);
+        let reworded = scope_digest(dir, &merge_base, &src, &changed).unwrap();
+        assert_ne!(first, reworded);
+
+        // A later commit that touches only unmatched files leaves this
+        // reviewer's scoped intent, and so its digest, unchanged.
+        std::fs::write(dir.join("docs/guide.md"), "guide, edited\n").unwrap();
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-m", "docs: unrelated note"]);
+        let changed = git::changed_files(dir, "base").unwrap();
+        let after_docs = scope_digest(dir, &merge_base, &src, &changed).unwrap();
+        assert_eq!(reworded, after_docs);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn digest_changes_when_an_untracked_files_exec_bit_flips() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = repo();
+        let dir = tmp.path();
+        std::fs::write(dir.join("src/run.rs"), "#!/bin/sh\n").unwrap();
+        let merge_base = git::merge_base(dir, "base").unwrap();
+        let changed = git::changed_files(dir, "base").unwrap();
+        let src = reviewer("src-only", &["src/**"]);
+        let plain = scope_digest(dir, &merge_base, &src, &changed).unwrap();
+
+        let path = dir.join("src/run.rs");
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(perms.mode() | 0o111);
+        std::fs::set_permissions(&path, perms).unwrap();
+        let executable = scope_digest(dir, &merge_base, &src, &changed).unwrap();
+        assert_ne!(plain, executable, "a chmod must invalidate the carry");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn digest_hashes_an_untracked_symlinks_target_not_the_content_behind_it() {
+        let tmp = repo();
+        let dir = tmp.path();
+        std::os::unix::fs::symlink("a.rs", dir.join("src/link.rs")).unwrap();
+        let merge_base = git::merge_base(dir, "base").unwrap();
+        let changed = git::changed_files(dir, "base").unwrap();
+        let src = reviewer("src-only", &["src/**"]);
+        let first = scope_digest(dir, &merge_base, &src, &changed).unwrap();
+
+        // Retargeting the symlink changes the digest, the same way git would
+        // record a different blob for it.
+        std::fs::remove_file(dir.join("src/link.rs")).unwrap();
+        std::os::unix::fs::symlink("../docs/guide.md", dir.join("src/link.rs")).unwrap();
+        let retargeted = scope_digest(dir, &merge_base, &src, &changed).unwrap();
+        assert_ne!(first, retargeted);
+    }
+
+    #[test]
     fn an_unsealed_prior_run_does_not_carry_a_repo_reviewer_but_carries_a_user_one() {
         let (_tmp, layout) = layout();
-        persist_prior_run(&layout, "feat", "g1", "digest-1", None);
+        persist_prior_run(&layout, "feat", "g1", "digest-1", None, false);
         let g1 = reviewer("g1", &["src/**"]);
 
         let repo_set: BTreeSet<String> = ["g1".to_string()].into_iter().collect();
@@ -560,7 +710,7 @@ mod tests {
     #[test]
     fn a_changed_digest_a_block_or_a_never_policy_executes_fresh() {
         let (_tmp, layout) = layout();
-        persist_prior_run(&layout, "feat", "g1", "digest-1", Some(SECRET));
+        persist_prior_run(&layout, "feat", "g1", "digest-1", Some(SECRET), false);
         let g1 = reviewer("g1", &["src/**"]);
         let repo_set: BTreeSet<String> = ["g1".to_string()].into_iter().collect();
 
@@ -669,7 +819,7 @@ mod tests {
     #[test]
     fn a_seam_tainted_seal_does_not_carry() {
         let (_tmp, layout) = layout();
-        let run = persist_prior_run(&layout, "feat", "g1", "digest-1", Some(SECRET));
+        let run = persist_prior_run(&layout, "feat", "g1", "digest-1", Some(SECRET), false);
         // Re-seal with `seams: true` under the same secret, so only the seam
         // flag disqualifies.
         let events = store::read_run(&layout, &run).unwrap();

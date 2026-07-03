@@ -77,7 +77,8 @@ Following one review top to bottom touches most of the crate:
    from `--base` (tracked edits *and* untracked files, committed or not) plus the
    current branch and repo root.
 4. **Route** (`routing.rs`). Each reviewer's trigger globs are compiled and matched
-   against the changed files; the matched reviewers are the ones that will run. An
+   against the changed files; the matched reviewers are the ones in scope for this
+   run (each will execute, replay, or carry). An
    explicit `--reviewer` selection then narrows that set (an unknown or untriggered
    name errors here), and a selection that excludes a triggered reviewer marks the
    run partial: persisted and rendered as such, and never sealed.
@@ -101,26 +102,32 @@ Following one review top to bottom touches most of the crate:
     step. Every failure degrades to a full run for the affected reviewers; a
     purely local review skips this step entirely. See [Attestation](./attestation.md).
 5b. **Plan carry** (`carry.rs`, purely local runs only). Every reviewer about to run
-    gets a trigger-scoped diff digest (its own effective definition plus the diff of
-    the changed files its trigger matched), stamped onto its `reviewer.resolved`
-    event. On a re-run of the same branch, a reviewer whose prior verdict was a pass
-    with an identical digest is *carried*: its verdict folds into the run without a
+    gets a trigger-scoped diff digest: its own effective definition, the merge-base
+    commit, the diff of the changed files its trigger matched (untracked matched
+    files encoded by kind, executable bit, and content), and the scoped commit
+    messages that touched those files. The runner re-derives each digest after the
+    reviewers finish and stamps it onto `reviewer.resolved` only when it still
+    matches, so a tree that changed mid-run leaves nothing to carry from. On a
+    re-run of the same branch, a reviewer whose prior verdict was a pass with an
+    identical digest is *carried*: its verdict folds into the run without a
     backend executing. A repository reviewer carries only from a prior run whose
     seal verifies (and records no test seam); `--fresh` disables carry, and an
     explicit `--reviewer` selection executes its reviewers fresh. A run with a
     GitHub source never carries: CI's skip mechanism is attestation replay, which is
     signature-verified. See
     [the local surface](./local-surface.md#incremental-re-review).
-6. **Run** (`runner.rs`). `execute` spawns every matched, non-replayed reviewer onto
-   a `JoinSet`, bounds each by its `timeout` (default 15m), and emits
-   `reviewer.started` up front (including for a replayed reviewer, so the plan reads
-   the same either way). Each spawned task calls `backend::dispatch`
+6. **Run** (`runner.rs`). `execute` spawns every matched reviewer that is neither
+   replaying nor carrying onto a `JoinSet`, bounds each by its `timeout` (default
+   15m), and emits `reviewer.started` up front (including for replayed and carried
+   reviewers, so the plan reads the same either way). Each spawned task calls `backend::dispatch`
    (`backend/mod.rs`), which resolves the reviewer's `ExecutionPlan` (failing closed
    on an unprovisioned capability tier), selects the concrete backend, and runs the
    agent either natively or inside a container for a reviewer with a `runner` block
    and `capabilities.network: true` (`backend/container/`; see
-   [Containers](./containers.md)). A replayed reviewer skips dispatch: its verdict is
-   reconstructed from the attested bundle's event instead.
+   [Containers](./containers.md)). A replayed or carried reviewer skips dispatch
+   entirely and is never handed to the `JoinSet`: its verdict is folded in from
+   the attested bundle's event (replay) or the prior run's persisted
+   `reviewer.resolved` event (carry) instead.
 7. **Resolve & aggregate** (`runner.rs`). Each result has fail-closed/fail-open
    policy applied: a gate that blocks, errors, or times out resolves to `block`
    (with a synthetic blocking finding); an advisor that fails is dropped. A replayed

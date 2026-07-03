@@ -33,7 +33,7 @@ Each line carries a `type`:
 
 | Event | What to do with it |
 | --- | --- |
-| `run.started` | Lists the reviewers that matched your changes and will run. |
+| `run.started` | Lists the reviewers that matched your changes. Each executes, or has an unchanged prior pass carried forward. |
 | `reviewer.started` | One reviewer began. Nothing to do. |
 | `reviewer.resolved` | One reviewer finished. If its `verdict` is `block`, act on its `findings`. |
 | `run.completed` | The aggregate `verdict` (`pass` or `block`) and the gate tally. |

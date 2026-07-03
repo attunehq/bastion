@@ -144,6 +144,15 @@ pub struct ExecContext {
     /// compute) leaves the event without one, which simply makes it ineligible
     /// to carry from.
     pub scope_digests: std::collections::BTreeMap<String, String>,
+    /// What the runner needs to *recompute* a scope digest after the reviewers
+    /// finish. Reviewers judge the live working tree, so a digest sampled
+    /// before execution can go stale while they run; when this probe is
+    /// present, the runner re-derives each stamped digest post-execution and
+    /// drops any that no longer matches, so a later run can never carry a
+    /// verdict whose scoped content changed mid-run. `None` (a caller with no
+    /// merge base, or a test that stamps digests directly) skips the check
+    /// and stamps the pre-run digests as given.
+    pub digest_probe: Option<DigestProbe>,
     /// The `run.attestation-fallback` event, when the caller already rendered one
     /// (attestations were enabled but the note did not verify or replay).
     /// Carried here so persistence includes it too: the caller renders it to the
@@ -151,6 +160,18 @@ pub struct ExecContext {
     /// which reviewers execute fresh), so without this the persisted `run.jsonl`
     /// would silently drop the one event that explains why nothing replayed.
     pub attestation_fallback: Option<RunEvent>,
+}
+
+/// The inputs [`crate::carry::scope_digest`] needs beyond the reviewer itself,
+/// so the runner can re-derive a digest after execution and confirm the scoped
+/// content did not change while the reviewer ran (see
+/// [`ExecContext::digest_probe`]).
+#[derive(Debug, Clone)]
+pub struct DigestProbe {
+    /// The merge-base commit the run's diffs are taken against.
+    pub merge_base: String,
+    /// The full changed-file set the run routed on.
+    pub changed: Vec<String>,
 }
 
 /// One reviewer's replayed verdict, carried into [`ExecContext`] so the runner
@@ -357,6 +378,34 @@ pub async fn execute_with(
     }
     for carry in ctx.carried.values() {
         resolved.push(resolve_carried(carry));
+    }
+
+    // Reviewers judge the live working tree, so a digest sampled before
+    // execution can go stale while they run. Re-derive each stamped digest now
+    // and keep it only when it still matches; a mismatch (or a failed
+    // recompute) drops the stamp, which fails safe: the next run simply cannot
+    // carry from this one.
+    if let Some(probe) = &ctx.digest_probe {
+        for item in &mut resolved {
+            if let Some(pre) = item.scope_digest.take() {
+                let now = crate::carry::scope_digest(
+                    &ctx.repo_root,
+                    &probe.merge_base,
+                    &item.reviewer,
+                    &probe.changed,
+                )
+                .ok();
+                if now.as_deref() == Some(pre.as_str()) {
+                    item.scope_digest = Some(pre);
+                } else {
+                    tracing::warn!(
+                        reviewer = %item.reviewer.name,
+                        "the working tree changed while this reviewer ran; \
+                         dropping its scope digest so the next run cannot carry it"
+                    );
+                }
+            }
+        }
     }
 
     // Persist per-reviewer artifacts and build the resolve events. The persisted
@@ -1022,6 +1071,7 @@ mod tests {
             dirty: false,
             replayed: Default::default(),
             attestation: None,
+            digest_probe: None,
             partial: false,
             carried: Default::default(),
             scope_digests: Default::default(),
@@ -1649,6 +1699,109 @@ mod tests {
             })
             .unwrap();
         assert_eq!(digest.as_deref(), Some("digest-fresh"));
+    }
+
+    /// A throwaway repo for the digest-probe tests: a committed base branch
+    /// plus one changed file on top, so `carry::scope_digest` has real git
+    /// state to recompute against.
+    fn probe_repo() -> (tempfile::TempDir, String, Vec<String>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.email=t@bastion.dev",
+                    "-c",
+                    "user.name=T",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "init.defaultBranch=main",
+                ])
+                .args(args)
+                .current_dir(dir)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["init"]);
+        std::fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "base"]);
+        git(&["branch", "base"]);
+        std::fs::write(dir.join("a.rs"), "fn a() { /* edit */ }\n").unwrap();
+        let merge_base = crate::git::merge_base(dir, "base").unwrap();
+        let changed = crate::git::changed_files(dir, "base").unwrap();
+        (tmp, merge_base, changed)
+    }
+
+    #[tokio::test]
+    async fn the_digest_probe_keeps_a_digest_the_tree_still_matches() {
+        let (tmp, merge_base, changed) = probe_repo();
+        let g1 = reviewer("g1", Mode::Gate);
+        let real = crate::carry::scope_digest(tmp.path(), &merge_base, &g1, &changed).unwrap();
+
+        let reviewers = [&g1];
+        let mut ctx = ctx(&reviewers);
+        ctx.repo_root = tmp.path().to_path_buf();
+        ctx.scope_digests.insert("g1".into(), real.clone());
+        ctx.digest_probe = Some(DigestProbe {
+            merge_base,
+            changed,
+        });
+
+        let (_decision, events, _layout) = run_scenario_with_ctx(
+            &reviewers,
+            ctx,
+            responses(vec![("g1", Response::Outcome(pass("ok")))]),
+        )
+        .await;
+
+        let digest = events
+            .iter()
+            .find_map(|e| match e {
+                RunEvent::ReviewerResolved { scope_digest, .. } => Some(scope_digest.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(digest.as_deref(), Some(real.as_str()));
+    }
+
+    #[tokio::test]
+    async fn the_digest_probe_drops_a_digest_the_tree_no_longer_matches() {
+        // A pre-run digest that no longer matches the tree (here: a stale
+        // stamp standing in for a tree that changed while the reviewer ran)
+        // must not survive onto the resolved event, or a later run could
+        // carry a verdict about content the reviewer never judged.
+        let (tmp, merge_base, changed) = probe_repo();
+        let g1 = reviewer("g1", Mode::Gate);
+
+        let reviewers = [&g1];
+        let mut ctx = ctx(&reviewers);
+        ctx.repo_root = tmp.path().to_path_buf();
+        ctx.scope_digests
+            .insert("g1".into(), "stale-pre-run-digest".into());
+        ctx.digest_probe = Some(DigestProbe {
+            merge_base,
+            changed,
+        });
+
+        let (_decision, events, _layout) = run_scenario_with_ctx(
+            &reviewers,
+            ctx,
+            responses(vec![("g1", Response::Outcome(pass("ok")))]),
+        )
+        .await;
+
+        let digest = events
+            .iter()
+            .find_map(|e| match e {
+                RunEvent::ReviewerResolved { scope_digest, .. } => Some(scope_digest.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(digest, None, "a stale digest must be dropped");
     }
 
     #[tokio::test]

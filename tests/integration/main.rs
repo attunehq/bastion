@@ -277,6 +277,72 @@ fn a_prior_pass_carries_forward_only_while_its_scoped_diff_is_unchanged() {
     );
 }
 
+/// The boundary cases of an explicit selection: naming *every* triggered
+/// reviewer is a full run (coverage was not reduced, so nothing is marked
+/// partial), and naming any reviewer suppresses carry for it (asking for a
+/// reviewer by name means asking for it to run), even when an eligible prior
+/// pass exists.
+#[test]
+fn selecting_every_reviewer_is_full_and_a_selection_never_carries() {
+    let Some(fake) = tooling() else { return };
+
+    // A user-level reviewer, so a prior pass is carry-eligible despite the
+    // suite's seam-tainted seals.
+    let repo = TestRepo::new(&registry(&[Reviewer::new(
+        "src-gate",
+        "claude-code",
+        "gate",
+    )
+    .behavior("pass")]))
+    .with_user_registry(&registry(&[Reviewer::new("docs-gate", "codex", "gate")
+        .trigger("docs/**")
+        .behavior("pass")]));
+    std::fs::create_dir_all(repo.path().join("docs")).unwrap();
+    std::fs::write(repo.path().join("docs/note.md"), "first draft\n").unwrap();
+
+    // Seed a prior run whose docs-gate pass would carry on a plain re-run.
+    let first = repo.review(fake);
+    assert!(first.exited_zero(), "stderr:\n{}", first.stderr);
+
+    // Naming both triggered reviewers: full coverage, so not partial, and the
+    // named docs-gate executes fresh instead of carrying its eligible pass.
+    let output = repo.run(
+        fake,
+        &[
+            "review",
+            "--base",
+            "main",
+            "--reviewer",
+            "src-gate",
+            "--reviewer",
+            "docs-gate",
+            "--format",
+            "jsonl",
+        ],
+        &[],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let full = fixtures::ReviewRun {
+        code: output.status.code(),
+        events: parse_events(&stdout, &stderr),
+        stderr,
+    };
+    assert!(full.exited_zero(), "stderr:\n{}", full.stderr);
+    assert!(
+        !full.partial(),
+        "selecting the whole triggered set is a full run"
+    );
+    assert!(
+        !full.carried("docs-gate"),
+        "an explicitly selected reviewer must execute fresh, not carry"
+    );
+    assert_eq!(full.resolved_count(), 2);
+    let (aggregate, gates, _cost) = full.completed();
+    assert_eq!(aggregate, Decision::Pass);
+    assert_eq!(gates.total, 2);
+}
+
 /// Model and effort reach each backend's argv end to end, resolved through the real
 /// binary: an explicit per-reviewer value, a value inherited from the registry
 /// `defaults` block, the Claude selectors, the Codex ones, and Pi's

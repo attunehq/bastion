@@ -308,6 +308,7 @@ pub async fn review(
     // effort: a digest that fails to compute only leaves that reviewer
     // executing fresh and uncarryable, never fails the review.
     let mut scope_digests: std::collections::BTreeMap<String, String> = Default::default();
+    let mut digest_probe: Option<runner::DigestProbe> = None;
     match git::merge_base(&repo_root, base) {
         Ok(merge_base) => {
             for reviewer in &matched {
@@ -322,6 +323,13 @@ pub async fn review(
                     ),
                 }
             }
+            // The runner re-derives every stamped digest after the reviewers
+            // finish, so a tree that changed mid-run cannot leave a stale
+            // digest behind for a later run to carry from.
+            digest_probe = Some(runner::DigestProbe {
+                merge_base,
+                changed: changed.clone(),
+            });
         }
         Err(err) => {
             tracing::warn!(error = %err, "could not resolve a merge base; no scope digests this run");
@@ -384,6 +392,7 @@ pub async fn review(
         partial,
         carried,
         scope_digests,
+        digest_probe,
         attestation_fallback,
     };
 
