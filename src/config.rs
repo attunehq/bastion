@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use color_eyre::eyre::{Context, Result, bail, eyre};
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 
 use crate::reviewer::{Backend, Effort, ModelId, Reviewer};
 
@@ -78,6 +79,13 @@ pub struct Config {
     /// field itself.
     #[serde(default, skip_serializing_if = "Defaults::is_empty")]
     pub defaults: Defaults,
+    /// Whether this repository accepts a signed local attestation in place of
+    /// re-executing a reviewer in CI (`docs/developer-guide/attestation.md`).
+    /// Default off: CI ignores any attestation note entirely until a repository
+    /// opts in explicitly. Unset (and thus `false`) for the common case, so most
+    /// registries never mention this field.
+    #[serde(default)]
+    pub attestations: bool,
     /// The reviewers defined for this repository.
     #[serde(default)]
     pub reviewers: Vec<Reviewer>,
@@ -218,6 +226,38 @@ impl Config {
         start: &Path,
         user_dir: Option<&Path>,
     ) -> Result<(Sources, Self)> {
+        Self::discover_merged_attested(start, user_dir)
+            .map(|(sources, _, config)| (sources, config))
+    }
+
+    /// Like [`Config::discover_merged_located`], but also returns a
+    /// [`RepoAttestation`] describing the *repository-only* effective config: its
+    /// hash (before the user-level registry is layered in) and the set of
+    /// reviewer names that came from the repository registry.
+    ///
+    /// An attestation binds the effective *repository* reviewer config
+    /// (`docs/developer-guide/attestation.md`): the user-level registry is
+    /// deliberately excluded, since a personal reviewer never gates anyone
+    /// else's PR and so cannot attest anything either. Computing the hash here,
+    /// on the repo-only `Config` after `apply_defaults` but before
+    /// `layer_user`, is what keeps that exclusion exact: the returned hash and
+    /// reviewer set reflect only what the repository itself declares.
+    ///
+    /// A repository reviewer that collides with a user reviewer of the same
+    /// name gets scoped to `repo:<name>` by `layer_user`; `reviewers` here
+    /// already carries that scoped name; so a caller filtering a run's resolved
+    /// events down to "reviewers this seal covers" matches by the same names the
+    /// merged config exposes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if neither a repository nor a user-level registry is
+    /// found, if a candidate path cannot be inspected, if a discovered file
+    /// fails to load, or if the merged set fails validation.
+    pub fn discover_merged_attested(
+        start: &Path,
+        user_dir: Option<&Path>,
+    ) -> Result<(Sources, RepoAttestation, Self)> {
         let repo = locate_kind(start)?;
         let user = match user_dir {
             Some(dir) => locate_user(dir)?,
@@ -251,6 +291,16 @@ impl Config {
             None => Config::default(),
         };
 
+        // Snapshot the repo-only effective state before the user registry is
+        // layered in, so the attestation binding (the hash) excludes personal
+        // reviewers. The original names are kept separately so they can be
+        // resolved to their post-merge form (a repo-side collision is renamed to
+        // `repo:<name>` by `layer_user`) below.
+        let config_hash = config.effective_hash();
+        let attestations_enabled = config.attestations;
+        let original_repo_names: std::collections::BTreeSet<String> =
+            config.reviewers.iter().map(|r| r.name.clone()).collect();
+
         if let Some(path) = &user {
             config.layer_user(Self::load(path)?);
             // The two registries are validated independently; re-validate the merged
@@ -259,7 +309,58 @@ impl Config {
             config.validate()?;
         }
 
-        Ok((Sources { repo, user }, config))
+        // Resolve each original repo reviewer name to its post-merge form: either
+        // unchanged, or scoped to `repo:<name>` if `layer_user` renamed it to
+        // resolve a collision with a same-named user reviewer.
+        let reviewers = original_repo_names
+            .into_iter()
+            .map(|name| {
+                let scoped = format!("{REPO_SCOPE_PREFIX}{name}");
+                if config.reviewers.iter().any(|r| r.name == scoped) {
+                    scoped
+                } else {
+                    name
+                }
+            })
+            .collect();
+
+        let attestation = RepoAttestation {
+            config_hash,
+            reviewers,
+            attestations_enabled,
+        };
+
+        Ok((Sources { repo, user }, attestation, config))
+    }
+
+    /// A stable, lowercase-hex SHA-256 hash of this config's "effective"
+    /// reviewer set: [`Config::attestations`] plus every reviewer with each
+    /// file's `defaults` already applied (`Config::apply_defaults` runs during
+    /// `from_yaml`/`load`, before this is ever called).
+    ///
+    /// Field order in the hashed struct (`attestations` then `reviewers`) is
+    /// the canonical form: `Config::from_yaml`/`load` always resolve defaults
+    /// first, and `serde_json`'s struct serialization preserves declaration
+    /// order, so this hash is reproducible across processes without any
+    /// separate canonicalization step. Used to bind an attestation bundle to
+    /// the exact reviewer policy that produced it: a hash change (a reviewer
+    /// edited, added, or removed, or `attestations` flipped) invalidates every
+    /// bundle sealed under the old policy.
+    #[must_use]
+    pub fn effective_hash(&self) -> String {
+        #[derive(Serialize)]
+        struct Hashed<'a> {
+            attestations: bool,
+            reviewers: &'a [Reviewer],
+        }
+        let hashed = Hashed {
+            attestations: self.attestations,
+            reviewers: &self.reviewers,
+        };
+        let bytes = serde_json::to_vec(&hashed)
+            .expect("Config's reviewers are already loaded, so they serialize");
+        let digest = sha2::Sha256::digest(&bytes);
+        hex::encode(digest)
     }
 
     /// Fold the registry-wide [`Defaults`] into each reviewer: a reviewer's own
@@ -399,6 +500,28 @@ pub struct Sources {
     pub repo: Option<Found>,
     /// The user-level registry, if one was found in the config directory.
     pub user: Option<PathBuf>,
+}
+
+/// The repository-only attestation-relevant facts discovery exposes, alongside
+/// the merged config, from [`Config::discover_merged_attested`].
+///
+/// Kept separate from [`Sources`] because it describes the *content* discovery
+/// resolved (the hash, the reviewer set, the opt-in flag) rather than the
+/// *files* it read from. A caller building a run seal needs this to know which
+/// resolved reviewer events are eligible to be sealed (`reviewers`) and what
+/// config hash to bind (`config_hash`); the `bastion attest` path also needs
+/// `attestations_enabled` to know whether the repository has opted in at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoAttestation {
+    /// [`Config::effective_hash`] of the repository-only config (before the
+    /// user-level registry is layered in).
+    pub config_hash: String,
+    /// The names of the reviewers the repository registry defines, after
+    /// `layer_user` scoping (a repo-side collision becomes `repo:<name>`). A
+    /// user-level-only reviewer is never in this set.
+    pub reviewers: std::collections::BTreeSet<String>,
+    /// Whether the repository registry sets `attestations: true`.
+    pub attestations_enabled: bool,
 }
 
 /// Locate the registry file by walking up from `start`.
@@ -927,5 +1050,123 @@ reviewers:
                 reviewer.name
             );
         }
+    }
+
+    #[test]
+    fn effective_hash_is_stable_across_identical_loads() {
+        let a = Config::from_yaml(REPO_YAML).unwrap();
+        let b = Config::from_yaml(REPO_YAML).unwrap();
+        assert_eq!(a.effective_hash(), b.effective_hash());
+    }
+
+    #[test]
+    fn effective_hash_changes_when_a_reviewer_field_changes() {
+        let a = Config::from_yaml(REPO_YAML).unwrap();
+        let changed = Config::from_yaml(
+            "\
+reviewers:
+  - name: tenant-isolation
+    trigger: [src/**]
+    mode: gate
+    prompt: a DIFFERENT prompt
+",
+        )
+        .unwrap();
+        assert_ne!(a.effective_hash(), changed.effective_hash());
+    }
+
+    #[test]
+    fn effective_hash_changes_when_the_attestations_flag_changes() {
+        let off = Config::from_yaml(REPO_YAML).unwrap();
+        let on = Config::from_yaml(&format!("attestations: true\n{REPO_YAML}")).unwrap();
+        assert_ne!(off.effective_hash(), on.effective_hash());
+    }
+
+    #[test]
+    fn effective_hash_ignores_the_user_level_registry() {
+        // discover_merged_attested's hash is computed on the repo-only config, so
+        // layering in a user registry must not move it.
+        let repo = registry_dir(REPO_YAML);
+        let hash_without_user = Config::from_yaml(REPO_YAML).unwrap().effective_hash();
+
+        let user = registry_dir(
+            "reviewers:\n  - name: my-style\n    trigger: [src/**]\n    mode: advisor\n    prompt: p\n",
+        );
+        let (_, attestation, _) =
+            Config::discover_merged_attested(repo.path(), Some(user.path())).unwrap();
+        assert_eq!(attestation.config_hash, hash_without_user);
+    }
+
+    #[test]
+    fn effective_hash_reflects_applied_defaults_the_same_as_writing_the_field_inline() {
+        let via_defaults = Config::from_yaml(
+            "\
+defaults:
+  model: gpt-5
+reviewers:
+  - name: r
+    trigger: [src/**]
+    mode: gate
+    backend: codex
+    prompt: p
+",
+        )
+        .unwrap();
+        let inline = Config::from_yaml(
+            "\
+reviewers:
+  - name: r
+    trigger: [src/**]
+    mode: gate
+    backend: codex
+    model: gpt-5
+    prompt: p
+",
+        )
+        .unwrap();
+        assert_eq!(via_defaults.effective_hash(), inline.effective_hash());
+    }
+
+    #[test]
+    fn discover_merged_attested_reports_only_repo_reviewer_names() {
+        let repo = registry_dir(REPO_YAML);
+        let user = registry_dir(
+            "reviewers:\n  - name: my-style\n    trigger: [src/**]\n    mode: advisor\n    prompt: p\n",
+        );
+        let (_, attestation, config) =
+            Config::discover_merged_attested(repo.path(), Some(user.path())).unwrap();
+        assert_eq!(
+            config.reviewers.len(),
+            2,
+            "both reviewers are still merged in"
+        );
+        assert_eq!(
+            attestation.reviewers,
+            ["tenant-isolation".to_string()].into_iter().collect(),
+            "the user-level reviewer must not appear in the repo attestation set"
+        );
+        assert!(!attestation.attestations_enabled);
+    }
+
+    #[test]
+    fn discover_merged_attested_resolves_the_scoped_name_on_a_collision() {
+        let repo = registry_dir(REPO_YAML);
+        let user = registry_dir(
+            "reviewers:\n  - name: tenant-isolation\n    trigger: [src/**]\n    mode: gate\n    prompt: user prompt\n",
+        );
+        let (_, attestation, _) =
+            Config::discover_merged_attested(repo.path(), Some(user.path())).unwrap();
+        assert_eq!(
+            attestation.reviewers,
+            ["repo:tenant-isolation".to_string()].into_iter().collect(),
+            "the repo side of a collision is reported under its scoped name"
+        );
+    }
+
+    #[test]
+    fn discover_merged_attested_reports_the_attestations_flag() {
+        let repo = registry_dir(&format!("attestations: true\n{REPO_YAML}"));
+        let (_, attestation, _) = Config::discover_merged_attested(repo.path(), None).unwrap();
+        assert!(attestation.attestations_enabled);
     }
 }

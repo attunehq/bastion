@@ -10,8 +10,10 @@ order: 6
 > billing.
 
 The local loop gets you to green before you open a PR. CI is the authoritative
-confirmation: it runs the reviewers from the repository's `.bastion.yaml` and reports
-one merge gate. Because routing and aggregation are shared, CI rarely surprises an
+confirmation: it executes or replays the reviewers from the repository's
+`.bastion.yaml` (replay draws from a verified attestation, when the registry sets
+`attestations: true`) and reports one merge gate. Because routing and aggregation are
+shared, CI rarely surprises an
 author who looped locally. It can differ in two ways: CI adds the PR's description and
 discussion that a default local run lacks, and CI runs the repository's reviewers
 only, while a local run can also include your personal user-level reviewers (see
@@ -27,9 +29,10 @@ chapter covers the GitHub adapter, the one forge Bastion targets.
 
 On each pull-request event (`opened`, `synchronize`, `reopened`) the workflow runs
 `bastion review`, which computes the changed files, routes to the matching
-reviewers, runs them in parallel with per-reviewer timeouts, and persists the run. A
-second step, `bastion github report`, reads that run and posts it. A verdict reaches
-two GitHub surfaces:
+reviewers, then executes them in parallel with timeouts or replays those covered by a
+verified attestation (a replayed reviewer is reconstructed from the bundle, with no
+backend dispatch or timeout), and persists the run. A second step, `bastion github
+report`, reads that run and posts it. A verdict reaches two GitHub surfaces:
 
 - **Findings are posted to the PR.** `bastion github report` renders every finding
   (blocking and optional) into a single sticky PR comment, and attaches each located
@@ -130,6 +133,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0          # full history; reviewers diff against the base
+          # The PR head, not the default merge commit: attestation replay binds
+          # to the head tree the author attested, which a merge commit never matches.
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      # actions/checkout does not fetch notes by default. Tolerant of the ref
+      # being absent: attestation is optional, so most PRs will not carry a note.
+      - name: Fetch the attestation notes ref
+        run: git fetch origin +refs/notes/bastion:refs/notes/bastion || true
 
       # 1. Install a published bastion release (not built from the PR).
       # 2. For native reviewers: install your backend CLI (claude, codex, or pi) on
@@ -263,6 +274,61 @@ Configure branch protection on your default branch to require this job (and to
 require review of the reviewer-policy paths; see [Governance](./governance.md)).
 Merging stays GitHub-native: an author enables auto-merge, and once the required
 job is green GitHub merges. A push re-triggers the workflow and it resolves again.
+
+## Attesting a run so CI can replay it
+
+Every reviewer is an agent invocation, so a PR that ran clean locally pays for
+each reviewer again when CI confirms it. If you would rather CI trust a signed
+local run than re-execute every reviewer, opt in with one registry field:
+
+```yaml
+attestations: true
+
+reviewers:
+  # ...
+```
+
+This works only for a review over committed content. To use attestation, commit the
+final change, run `bastion review`, then run `bastion attest` (see [The local
+workflow](./local-workflow.md#attesting-a-run-for-ci)). A review over a dirty
+working tree still runs and still seals, but the seal records that the tree
+was dirty, and `bastion attest` refuses to sign it; attest the clean,
+committed run instead. Once an author pushes the resulting note, CI can replay
+the covered reviewers instead of re-running them. `bastion review` in CI
+verifies the note's signature against the PR author's GitHub-registered SSH
+signing keys, checks that the attested run reviewed the exact same content CI
+is looking at (the same trees, the same diff, the same effective reviewer
+config), and only then replays. A replayed block still blocks the merge,
+exactly as a fresh one would; attestation skips duplicate execution, not the
+gate.
+
+Two workflow additions are required for this to work, both already present in
+Bastion's own self-hosted example below: checking out the PR's head commit
+(`ref: ${{ github.event.pull_request.head.sha }}`), since attestation binds to
+that exact tree and the default merge-commit checkout will never match it, and
+fetching the notes ref (`git fetch origin +refs/notes/bastion:refs/notes/bastion
+|| true`), since `actions/checkout` does not fetch notes by default.
+
+When attestation replaces execution, the sticky comment opens with a callout
+naming which reviewers replayed, the key that attested, and when; each
+replayed reviewer's check-run summary says so too. When it does not (a missing
+note, an unregistered key, a stale base, or any other mismatch), CI simply
+executes every reviewer as usual and the comment includes the fallback reason.
+
+A reviewer can opt out of ever being replayed with `attestation: never` on that
+reviewer, for a gate your team wants CI to execute unconditionally regardless
+of what was attested locally.
+
+Whether the SSH key an author attests with is a plain file or a presence-gated
+one (a hardware token or an OS keychain entry that prompts per signature) is
+worth deciding deliberately. A coding agent running on the author's machine can
+use a plain file key without their involvement, so enrolling one means
+accepting that an agent on that machine could sign an attestation on its own,
+the same trust already extended to that machine through commit access. Bastion
+cannot tell the two kinds of key apart from the signature alone, so this is a
+call for the author (or your team's policy) to make, not something the tool
+enforces. See the [attestation design](https://github.com/jssblck/bastion/blob/main/docs/developer-guide/attestation.md#trust-posture)
+for the full reasoning.
 
 ## Authentication & billing
 

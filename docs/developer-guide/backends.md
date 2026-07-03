@@ -108,6 +108,11 @@ was given and returns canned stdout. This is what lets `claude_code.rs` and
 cost, while still exercising the real argument-building, env-injection, output
 parsing, and retry logic.
 
+The `BASTION_CLAUDE_BIN`/`BASTION_CODEX_BIN`/`BASTION_PI_BIN` overrides that point a
+backend at a fake executable are recorded in the run seal as an active test seam
+(`src/seal.rs`); a run sealed with one active cannot be attested (see
+[Attestation](./attestation.md)).
+
 `ContainerRunner`'s drop guard is the one exception to this seam. `ContainerGuard`
 runs the container teardown (`docker rm -f`) with a direct `std::process::Command` in
 `Drop`. The seam is async and a `Drop` is not, so the cancellation teardown cannot
@@ -167,6 +172,7 @@ about what is honored, so the code does not over-promise:
 | `runner` (`dockerfile`, `image`) | **Honored, with `capabilities.network: true`.** A reviewer with a `runner` block and `capabilities.network: true` runs its backend inside a container; `dockerfile` is built (cached by content hash), `image` is used as-is. A `runner` without `network: true` fails closed (see the `capabilities.network` row below). See [Containers](./containers.md). |
 | `capabilities.network` | **`network: true` is honored in a container; the default `network: false` fails closed.** `network: true` gives a containerized reviewer general (unscoped) egress: the container attaches the engine's default network. The default `network: false` fails closed in a container because provider-only scoped egress (an allowlisting proxy) is unbuilt, so `ExecutionPlan::resolve` rejects it rather than silently granting general egress under a flag that reads as restricted (a gate blocks, an advisor is skipped). A containerized reviewer must opt into `network: true` to run. A *native* `network: true` (no `runner`) also fails closed: with no container there is nothing to scope. |
 | `capabilities` (`mcp`, `skills`) | **Not provisioned: fails closed.** A reviewer that declares either is failed closed by `ExecutionPlan::resolve` in `dispatch`. |
+| `attestation` | **Honored, but not by backend dispatch.** The CI attestation replay planner (`src/attest/replay.rs`) reads `attestation: never` to skip replay for that reviewer, so it always executes fresh; absent, the reviewer is eligible for replay. A registry-wide `attestations: true` switch (`src/config.rs`) gates whether CI attempts replay at all. See [Attestation](./attestation.md). |
 
 ### How `model` and `effort` reach each backend
 

@@ -63,6 +63,34 @@ jobs:
           # Full history so the base branch resolves for the changeset diff and so
           # the Codex reviewer can run `git diff <base>` over the working tree.
           fetch-depth: 0
+          # The PR head, not the default merge commit: the review diffs the PR head
+          # against the base, mirroring what the author's local `bastion review` saw.
+          # Attestation replay needs this too, since it binds to the head tree the
+          # author attested; the merge-commit view would never match it.
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      # actions/checkout does not fetch notes by default. Tolerant only of the
+      # expected case (most PRs carry no attestation note, so the ref does not
+      # exist on the remote yet): probe for the ref first and fetch only when it
+      # is present, so a genuinely unreachable remote still fails the step
+      # instead of being swallowed by a blanket `|| true`.
+      - name: Fetch the attestation notes ref
+        run: |
+          set -euo pipefail
+          # `git ls-remote --exit-code` exits 2 for "no matching refs" but also
+          # exits nonzero for a genuine network or auth failure, so the status
+          # must be captured and inspected rather than used directly as an `if`
+          # condition: that would misreport every failure as an absent ref and
+          # silently skip the fetch instead of failing the step.
+          set +e
+          git ls-remote --exit-code origin refs/notes/bastion >/dev/null
+          status=$?
+          set -e
+          case "$status" in
+            0) git fetch origin +refs/notes/bastion:refs/notes/bastion ;;
+            2) echo "::notice::no refs/notes/bastion on origin yet; skipping attestation notes fetch" ;;
+            *) exit "$status" ;;
+          esac
 
       - name: Install the bastion release
         env:

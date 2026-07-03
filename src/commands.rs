@@ -24,6 +24,7 @@ use crate::render::{self, Format};
 use crate::reviewer::{Mode, ModelId};
 use crate::routing::Router;
 use crate::runner::{self, ExecContext};
+use crate::seal::SealBindings;
 use crate::skills;
 use crate::store;
 use crate::verdict::{Decision, Money};
@@ -69,7 +70,8 @@ pub async fn review(
     let repo_root = git::repo_root(cwd)?;
     warn_on_stale_skills(&repo_root);
     let branch = git::current_branch(&repo_root)?;
-    let config = Config::discover_merged(&repo_root, user_dir)?;
+    let (_sources, repo_attestation, config) =
+        Config::discover_merged_attested(&repo_root, user_dir)?;
     let changed = git::changed_files(&repo_root, base)?;
 
     let router = Router::compile(&config.reviewers)?;
@@ -127,21 +129,132 @@ pub async fn review(
         comments: Vec::new(),
         prior_findings: store::prior_findings(layout, &branch),
     };
+    let mut gathered_github: Option<crate::github::context::GatheredContext> = None;
     if let Some(source) = github.as_ref() {
         match gather_github_context(source).await {
             Ok(gathered) => {
                 // A PR body is a better statement of intent than the commit messages,
                 // so it wins when present; the discussion is GitHub-only.
                 if gathered.intent.is_some() {
-                    context.intent = gathered.intent;
+                    context.intent = gathered.intent.clone();
                 }
-                context.comments = gathered.comments;
+                context.comments = gathered.comments.clone();
+                gathered_github = Some(gathered);
             }
             Err(err) => {
                 eprintln!("bastion review: continuing without GitHub context ({err:#})");
             }
         }
     }
+
+    let seal = derive_seal_bindings(&repo_root, base, &repo_attestation);
+    // A dirty working tree is a first-class seal input, not merely a caveat: a
+    // green review over uncommitted content must not be attestable as a verdict
+    // on the committed tree the rest of the seal binds. Sealing still proceeds
+    // (the seal is the honest record); it is `bastion attest` that refuses.
+    let dirty = git::is_dirty(&repo_root).unwrap_or_else(|err| {
+        tracing::warn!(error = %err, "could not determine whether the working tree is dirty; treating the run as dirty out of caution");
+        true
+    });
+
+    // Attestation verify-and-replay is the CI surface only: a purely local
+    // review (no GithubSource) never attempts it. When the repository has
+    // opted in, look up the note, verify it against the author's registered
+    // signing keys, and replay whatever checks out; every failure is a
+    // fallback to full fresh execution, never a silent skip. A dirty checkout
+    // never replays: `changed_files` includes uncommitted and untracked files,
+    // so this run's reviewers see content no attestation's committed bindings
+    // name, and a replayed verdict would vouch for a changeset it never saw.
+    let attested = match (&github, repo_attestation.attestations_enabled) {
+        (Some(_), true) if dirty => Some(crate::attest::AttestationOutcome::Fallback {
+            reason: "the CI working tree has uncommitted or untracked files, which the \
+                     reviewers see but no attestation binds; executing every reviewer fresh"
+                .to_string(),
+        }),
+        (Some(_), true) => {
+            plan_attestation_replay(
+                &repo_root,
+                base,
+                &repo_attestation,
+                gathered_github.as_ref(),
+                &matched,
+            )
+            .await
+        }
+        _ => None,
+    };
+
+    let (replayed, attestation, attestation_fallback, matched): (
+        std::collections::BTreeMap<String, runner::ReplayedReviewer>,
+        Option<runner::AttestationAudit>,
+        Option<RunEvent>,
+        Vec<&crate::reviewer::Reviewer>,
+    ) = match attested {
+        Some(crate::attest::AttestationOutcome::Replay(plan)) => {
+            let bundle_public_key = plan.bundle.public_key.clone();
+            let bundle_attested_at = plan.bundle.attested_at.clone();
+            let mut replayed = std::collections::BTreeMap::new();
+            for reviewer in &matched {
+                if let Some(event) = plan.replay.get(&reviewer.name) {
+                    replayed.insert(
+                        reviewer.name.clone(),
+                        runner::ReplayedReviewer {
+                            reviewer: (*reviewer).clone(),
+                            event: event.clone(),
+                        },
+                    );
+                }
+            }
+            let fresh: Vec<&crate::reviewer::Reviewer> = matched
+                .iter()
+                .copied()
+                .filter(|r| !replayed.contains_key(&r.name))
+                .collect();
+            if replayed.is_empty() {
+                (replayed, None, None, fresh)
+            } else {
+                let callout = format!(
+                    "bastion review: {} reviewer(s) replayed from a signed local attestation (key {}, attested {}): {}",
+                    replayed.len(),
+                    bundle_public_key,
+                    bundle_attested_at,
+                    replayed.keys().cloned().collect::<Vec<_>>().join(", "),
+                );
+                // Fallible on purpose: a closed stderr must not panic the gate
+                // out of an otherwise valid review.
+                let _ = writeln!(io::stderr(), "{callout}");
+                (
+                    replayed,
+                    Some(runner::AttestationAudit {
+                        public_key: bundle_public_key,
+                        attested_at: bundle_attested_at,
+                    }),
+                    None,
+                    fresh,
+                )
+            }
+        }
+        Some(crate::attest::AttestationOutcome::Fallback { reason }) => {
+            // Fallible on purpose: the fallback must still render and the
+            // fresh reviewers must still run if stderr is closed.
+            let _ = writeln!(
+                io::stderr(),
+                "bastion review: attestation not honored: {reason}"
+            );
+            let fallback = RunEvent::AttestationFallback {
+                run: run.clone(),
+                reason,
+            };
+            render::write_event(&mut out, format, &fallback)?;
+            (
+                std::collections::BTreeMap::new(),
+                None,
+                Some(fallback),
+                matched,
+            )
+        }
+        None => (std::collections::BTreeMap::new(), None, None, matched),
+    };
 
     let ctx = ExecContext {
         run,
@@ -151,6 +264,11 @@ pub async fn review(
         changed: changed_count,
         reviewers: reviewer_refs,
         context,
+        seal,
+        dirty,
+        replayed,
+        attestation,
+        attestation_fallback,
     };
 
     // The runner streams the per-reviewer and completion events; render each as it
@@ -172,6 +290,122 @@ pub async fn review(
     }
 
     Ok(aggregate)
+}
+
+/// Attempt to verify and plan an attestation replay for a CI run.
+///
+/// Best effort in the same sense [`gather_github_context`] is: any failure to
+/// gather the inputs a verification needs (the author's login, their
+/// registered signing keys, or a note to verify) degrades to `None`, which the
+/// caller treats as "no attestation available" and falls through to the
+/// planner's own fallback reporting only when a note *was* found but failed to
+/// verify. A genuinely absent note (the ordinary case for most commits) is
+/// reported as a fallback too, since attestations are enabled for this repo
+/// and the author is simply expected to know why none applied.
+///
+/// `routed` is the reviewers CI's own diff matched, the same set `review`
+/// already computed.
+async fn plan_attestation_replay(
+    repo_root: &Path,
+    base: &str,
+    repo_attestation: &crate::config::RepoAttestation,
+    gathered: Option<&crate::github::context::GatheredContext>,
+    routed: &[&crate::reviewer::Reviewer],
+) -> Option<crate::attest::AttestationOutcome> {
+    plan_attestation_replay_with(
+        repo_root,
+        base,
+        repo_attestation,
+        gathered,
+        routed,
+        crate::github::client::RestClient::from_env,
+    )
+    .await
+}
+
+/// [`plan_attestation_replay`] with the GitHub client construction injected as
+/// `build_client`, so a test can exercise "the client could not be built" and
+/// "the key fetch failed" without mutating the real process environment
+/// (`GITHUB_API_URL`/`GITHUB_TOKEN` are process-global and racy to touch from
+/// parallel tests) or standing up a network fake for the happy path this
+/// function does not otherwise need.
+async fn plan_attestation_replay_with<C, B>(
+    repo_root: &Path,
+    base: &str,
+    repo_attestation: &crate::config::RepoAttestation,
+    gathered: Option<&crate::github::context::GatheredContext>,
+    routed: &[&crate::reviewer::Reviewer],
+    build_client: B,
+) -> Option<crate::attest::AttestationOutcome>
+where
+    C: crate::github::client::GitHubApi,
+    B: FnOnce() -> Result<C>,
+{
+    // Look up the note before deriving CI's own bindings: the ordinary case for
+    // most commits is simply "no note", which is a fallback in its own right and
+    // has nothing to do with whether bindings re-derive cleanly. Deriving
+    // bindings first would record a `could not re-derive CI bindings` fallback
+    // even when there was never a note to replay against, burying the real
+    // "no attestation note found" reason under irrelevant noise.
+    let head_sha = gathered.and_then(|g| g.head_sha.as_deref());
+    let note = match crate::attest::note_for_review(repo_root, "HEAD", head_sha) {
+        Ok(Some(note)) => note,
+        Ok(None) => {
+            return Some(crate::attest::AttestationOutcome::Fallback {
+                reason: "no attestation note found on HEAD".to_string(),
+            });
+        }
+        Err(err) => {
+            return Some(crate::attest::AttestationOutcome::Fallback {
+                reason: format!("could not look up the attestation note: {err:#}"),
+            });
+        }
+    };
+
+    let ci = match crate::attest::derive_ci_bindings(repo_root, base, &repo_attestation.config_hash)
+    {
+        Ok(ci) => ci,
+        Err(err) => {
+            return Some(crate::attest::AttestationOutcome::Fallback {
+                reason: format!("could not re-derive CI bindings: {err:#}"),
+            });
+        }
+    };
+
+    let Some(author) = gathered.and_then(|g| g.author_login.as_deref()) else {
+        return Some(crate::attest::AttestationOutcome::Fallback {
+            reason: "could not determine the pull request author to verify the attestation signature against".to_string(),
+        });
+    };
+
+    let client = match build_client() {
+        Ok(client) => client,
+        Err(err) => {
+            return Some(crate::attest::AttestationOutcome::Fallback {
+                reason: format!("could not build a GitHub client to fetch signing keys: {err:#}"),
+            });
+        }
+    };
+    let keys = match crate::github::signing::ssh_signing_keys(&client, author).await {
+        Ok(keys) => keys,
+        Err(err) => {
+            return Some(crate::attest::AttestationOutcome::Fallback {
+                reason: format!("could not fetch {author}'s registered SSH signing keys: {err:#}"),
+            });
+        }
+    };
+
+    let routed_map: std::collections::BTreeMap<&str, &crate::reviewer::Reviewer> =
+        routed.iter().map(|r| (r.name.as_str(), *r)).collect();
+
+    Some(crate::attest::plan(
+        &note,
+        author,
+        &keys,
+        &ci,
+        &routed_map,
+        crate::seal::embedded_secret(),
+    ))
 }
 
 /// The pull request a review is running against, so its description and discussion can
@@ -388,6 +622,35 @@ pub fn codeowners(owners: &[String]) -> Result<()> {
         .write_all(crate::github::codeowners::block(owners).as_bytes())
         .wrap_err("writing CODEOWNERS block")?;
     Ok(())
+}
+
+/// `bastion attest`: sign the latest sealed run (or `run`, when given) as an
+/// attestation note on HEAD.
+///
+/// Resolves the repository root from the current directory and hands off to
+/// [`crate::attest::attest`] with the build's embedded sealing secret; the real
+/// verification and signing logic lives there so it stays testable without a
+/// CLI harness.
+///
+/// # Errors
+///
+/// Returns an error under any of the refusals documented on
+/// [`crate::attest::attest`] (an unsealed run, a seam-tainted seal, a
+/// tampered run store, repository drift since the run, or no resolvable
+/// signing key), or if writing to stdout fails.
+pub fn attest(layout: &Layout, run: Option<&str>, key: Option<&Path>) -> Result<()> {
+    let cwd = std::env::current_dir().wrap_err("determining the current directory")?;
+    let root = git::repo_root(&cwd)?;
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    crate::attest::attest(
+        &root,
+        layout,
+        run,
+        key,
+        crate::seal::embedded_secret(),
+        &mut out,
+    )
 }
 
 /// `bastion github report`: post a finished run's results to its pull request.
@@ -647,6 +910,57 @@ fn local_run_id(repo_root: &Path) -> RunId {
     }
 }
 
+/// Derive the [`crate::seal::SealBindings`] a local review should seal its run
+/// with, or `None` when any git derivation fails.
+///
+/// Sealing is opportunistic: a detached-HEAD edge case, a base that shares no
+/// history with HEAD, or any other git failure here must never fail the review
+/// itself, only leave the run unattestable. Each failure is logged at `warn`
+/// with enough context to diagnose, then this returns `None` and the runner
+/// proceeds unsealed.
+fn derive_seal_bindings(
+    repo_root: &Path,
+    base: &str,
+    repo_attestation: &crate::config::RepoAttestation,
+) -> Option<SealBindings> {
+    let merge_base_commit = match git::merge_base(repo_root, base) {
+        Ok(commit) => commit,
+        Err(err) => {
+            tracing::warn!(error = %err, "could not derive a merge base; run will be unsealed");
+            return None;
+        }
+    };
+    let head_tree = match git::tree_hash(repo_root, "HEAD") {
+        Ok(tree) => tree,
+        Err(err) => {
+            tracing::warn!(error = %err, "could not resolve HEAD's tree; run will be unsealed");
+            return None;
+        }
+    };
+    let base_tree = match git::tree_hash(repo_root, &merge_base_commit) {
+        Ok(tree) => tree,
+        Err(err) => {
+            tracing::warn!(error = %err, "could not resolve the merge base's tree; run will be unsealed");
+            return None;
+        }
+    };
+    let patch_id = match git::patch_id(repo_root, &merge_base_commit) {
+        Ok(id) => id,
+        Err(err) => {
+            tracing::warn!(error = %err, "could not compute a patch id; run will be unsealed");
+            return None;
+        }
+    };
+
+    Some(SealBindings {
+        head_tree,
+        base_tree,
+        patch_id,
+        config_hash: repo_attestation.config_hash.clone(),
+        repo_reviewers: repo_attestation.reviewers.clone(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -732,6 +1046,14 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success(), "git {args:?} failed");
+        // The `-c` isolation only covers commands issued through this helper.
+        // Production code under test runs plain `git` in the same repo and
+        // needs an identity from config on a host that has none (CI), so
+        // persist one repo-locally at init.
+        if args.first() == Some(&"init") {
+            git(dir, &["config", "user.email", "grace@bastion.dev"]);
+            git(dir, &["config", "user.name", "Grace Hopper"]);
+        }
     }
 
     #[test]
@@ -843,5 +1165,204 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].verdict, Some(Decision::Pass));
         assert_eq!(runs[0].reviewers, 0);
+    }
+
+    /// A minimal repository whose HEAD carries a note under `NOTES_REF`, for
+    /// `plan_attestation_replay` tests. The note's own content never matters for
+    /// these tests: every scenario below fails (or is meant to fail) before the
+    /// note's bundle is ever parsed.
+    fn repo_with_a_note() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        git(dir, &["init"]);
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        git(dir, &["add", "a.txt"]);
+        git(dir, &["commit", "-m", "base"]);
+        git::note_add(dir, git::NOTES_REF, "HEAD", "not-a-real-bundle").unwrap();
+        tmp
+    }
+
+    /// Like [`repo_with_a_note`], but with a resolvable `base` branch too, so a
+    /// test can get past the note lookup *and* the CI-bindings derivation to
+    /// reach the author/client/key-fetch checks further down
+    /// `plan_attestation_replay_with`.
+    fn repo_with_a_note_and_resolvable_base() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        git(dir, &["init"]);
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        git(dir, &["add", "a.txt"]);
+        git(dir, &["commit", "-m", "base"]);
+        git(dir, &["branch", "base"]);
+        std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+        git(dir, &["commit", "-am", "feature work"]);
+        git::note_add(dir, git::NOTES_REF, "HEAD", "not-a-real-bundle").unwrap();
+        tmp
+    }
+
+    fn attestation_enabled() -> crate::config::RepoAttestation {
+        crate::config::RepoAttestation {
+            config_hash: "config-hash".into(),
+            reviewers: std::collections::BTreeSet::new(),
+            attestations_enabled: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_attestation_replay_falls_back_with_no_attestation_note_reason_when_absent() {
+        // The ordinary case: no note at all. This must stay the "no attestation
+        // note found" fallback, not get shadowed by an unrelated bindings failure.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        git(dir, &["init"]);
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        git(dir, &["add", "a.txt"]);
+        git(dir, &["commit", "-m", "base"]);
+
+        let outcome =
+            plan_attestation_replay(dir, "nonexistent-base", &attestation_enabled(), None, &[])
+                .await;
+        match outcome {
+            Some(crate::attest::AttestationOutcome::Fallback { reason }) => {
+                assert!(
+                    reason.contains("no attestation note found"),
+                    "a missing note must report its own reason even when the base is also \
+                     unresolvable, got: {reason}"
+                );
+            }
+            other => panic!("expected a fallback, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_attestation_replay_falls_back_when_ci_bindings_cannot_be_derived() {
+        // A note is present, but `base` does not resolve, so `derive_ci_bindings`
+        // fails. This must still record a persisted fallback (not `None`), and the
+        // reason must name the bindings failure, not the (irrelevant, since a note
+        // exists) "no attestation note found" reason.
+        let tmp = repo_with_a_note();
+        let dir = tmp.path();
+
+        let outcome = plan_attestation_replay(
+            dir,
+            "this-base-does-not-exist",
+            &attestation_enabled(),
+            None,
+            &[],
+        )
+        .await;
+        match outcome {
+            Some(crate::attest::AttestationOutcome::Fallback { reason }) => {
+                assert!(
+                    reason.contains("could not re-derive CI bindings"),
+                    "got: {reason}"
+                );
+            }
+            other => panic!("expected a fallback, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_attestation_replay_falls_back_when_the_pr_author_is_missing() {
+        // A note is present and the bindings re-derive cleanly, but `gathered`
+        // carries no author login (a deleted account, or GitHub simply omitting
+        // it). `plan_attestation_replay` takes `gathered` directly, so this
+        // branch is testable with no network at all: an author-less
+        // `GatheredContext` reaches the check directly.
+        let tmp = repo_with_a_note_and_resolvable_base();
+        let dir = tmp.path();
+        let gathered = crate::github::context::GatheredContext {
+            author_login: None,
+            ..Default::default()
+        };
+
+        let outcome =
+            plan_attestation_replay(dir, "base", &attestation_enabled(), Some(&gathered), &[])
+                .await;
+        match outcome {
+            Some(crate::attest::AttestationOutcome::Fallback { reason }) => {
+                assert!(reason.contains("pull request author"), "got: {reason}");
+            }
+            other => panic!("expected a fallback, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_attestation_replay_falls_back_when_the_github_client_cannot_be_built() {
+        // Every check ahead of the client construction passes (a note exists, the
+        // base resolves, an author is present), so the injected `build_client`
+        // closure's own failure is what is under test here. This is
+        // `plan_attestation_replay_with`'s whole reason for existing: exercising
+        // this branch without it would mean mutating the real
+        // `GITHUB_API_URL`/`GITHUB_TOKEN` environment, which is process-global
+        // and racy across this suite's parallel tests.
+        let tmp = repo_with_a_note_and_resolvable_base();
+        let dir = tmp.path();
+        let gathered = crate::github::context::GatheredContext {
+            author_login: Some("grace".to_string()),
+            ..Default::default()
+        };
+
+        let outcome = plan_attestation_replay_with(
+            dir,
+            "base",
+            &attestation_enabled(),
+            Some(&gathered),
+            &[],
+            || -> Result<crate::github::client::test_support::RecordingClient> {
+                Err(eyre!("simulated client construction failure"))
+            },
+        )
+        .await;
+        match outcome {
+            Some(crate::attest::AttestationOutcome::Fallback { reason }) => {
+                assert!(
+                    reason.contains("could not build a GitHub client"),
+                    "got: {reason}"
+                );
+                assert!(reason.contains("simulated client construction failure"));
+            }
+            other => panic!("expected a fallback, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_attestation_replay_falls_back_when_the_signing_key_fetch_fails() {
+        // The client itself builds fine, but the signing-key request comes back
+        // non-2xx. `RecordingClient` (the same double `github::report`'s own
+        // tests use) stands in for the network here, so this exercises
+        // `ssh_signing_keys`'s failure path with no real GitHub involved.
+        let tmp = repo_with_a_note_and_resolvable_base();
+        let dir = tmp.path();
+        let gathered = crate::github::context::GatheredContext {
+            author_login: Some("grace".to_string()),
+            ..Default::default()
+        };
+
+        let outcome = plan_attestation_replay_with(
+            dir,
+            "base",
+            &attestation_enabled(),
+            Some(&gathered),
+            &[],
+            || {
+                Ok(
+                    crate::github::client::test_support::RecordingClient::with_responder(|_req| {
+                        crate::github::client::ApiResponse {
+                            status: 404,
+                            body: serde_json::json!({"message": "Not Found"}),
+                        }
+                    }),
+                )
+            },
+        )
+        .await;
+        match outcome {
+            Some(crate::attest::AttestationOutcome::Fallback { reason }) => {
+                assert!(reason.contains("could not fetch"), "got: {reason}");
+                assert!(reason.contains("signing keys"));
+            }
+            other => panic!("expected a fallback, got: {other:?}"),
+        }
     }
 }

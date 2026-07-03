@@ -676,6 +676,7 @@ mod tests {
             env: Default::default(),
             capabilities: Capabilities::default(),
             inputs: Default::default(),
+            attestation: None,
             prompt: "Check the thing.".into(),
         }
     }

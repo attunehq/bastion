@@ -53,6 +53,36 @@ need to open anything else.
 
 Do not open transcripts to do this. The findings already say what to change.
 
+## Attesting a green run, if the registry opts in
+
+Check `.bastion.yaml` for a top-level `attestations: true`. When it is set, sign
+a clean local run and CI replays it instead of re-running every reviewer.
+
+```sh
+bastion attest
+git push origin refs/notes/bastion
+```
+
+Run this right after your final `run.completed.verdict: pass`, once you are
+done committing. Attestation binds to HEAD's tree, so a commit made after
+attesting invalidates the note; attest last. The note is not part of the
+branch, so it needs its own push, separate from `git push` on the branch.
+
+Signing uses your SSH key (`git config user.signingkey`, or `--key <path>`) and
+may prompt for presence (a hardware token or keychain confirmation). That
+prompt is expected, not a hang; wait for it.
+
+`bastion attest` refuses runs it cannot verify: a run through a test seam, a
+run store edited after the fact, or a repository that has moved on (a new
+commit, a changed registry) since the review. Do not work around a refusal.
+Re-run `bastion review` and attest that fresh run instead.
+
+Attesting is optional even when the registry allows it. If you skip these two
+commands, CI runs every reviewer fresh and the PR report says why the
+attestation was not honored. See
+[Attesting a run for CI](https://github.com/jssblck/bastion/blob/main/docs/user-guide/local-workflow.md#attesting-a-run-for-ci)
+for the full mechanics and trust model.
+
 ## When a verdict surprises you
 
 Transcripts and raw verdicts are saved to disk, not streamed, to keep the loop

@@ -51,7 +51,7 @@ We stream **JSONL**: one JSON object per line, emitted as each thing happens. It
 
 Note what is _not_ in the stream: the transcript. `reviewer.resolved` carries a `has_transcript` flag rather than the transcript itself; when it is set, the saved transcript is one command away (`bastion transcript <run> <reviewer>`). The reasoning is in the next section.
 
-A skills-freshness advisory is the one notice that rides **stderr** rather than the event stream. Before the run, `bastion review` checks the repo's bundled agent skills (`.claude/skills` and `.agents/skills`) against the running binary's embedded copy (the same check `bastion skills check` runs) and, when any are missing or drifted, prints a one-line warning naming the affected files and pointing at `bastion skills install`. It goes to stderr so it lands somewhere both a human and the driving agent read while leaving stdout as pure JSONL for a parser, and it is advisory, so it never changes the review's exit status. The notice is gated on the repository having adopted Bastion: `warn_on_stale_skills` routes through `local_skills_warning`, which returns nothing unless a repo-level reviewer registry is found (`config::locate_kind`), so a review running on the author's user-level reviewers alone stays silent even when every bundled skill is missing. Nudging skills into a project that has not configured Bastion would be misdirected. This mirrors the GitHub surface, where the same advisory is folded into the sticky comment (see [the GitHub adapter](github-adapter.md)); that report path is not gated, since CI always has a repo registry.
+A few human-facing notices ride **stderr** alongside the event stream: the skills-freshness advisory below, and on the CI surface a line mirroring the attestation replay callout or fallback reason. Those attestation outcomes are also events in the JSONL stream itself (`run.attested`, `run.attestation-fallback`); the stderr line is the human mirror, not the only record (see [Attestation](attestation.md)). Before the run, `bastion review` checks the repo's bundled agent skills (`.claude/skills` and `.agents/skills`) against the running binary's embedded copy (the same check `bastion skills check` runs) and, when any are missing or drifted, prints a one-line warning naming the affected files and pointing at `bastion skills install`. It goes to stderr so it lands somewhere both a human and the driving agent read while leaving stdout as pure JSONL for a parser, and it is advisory, so it never changes the review's exit status. The notice is gated on the repository having adopted Bastion: `warn_on_stale_skills` routes through `local_skills_warning`, which returns nothing unless a repo-level reviewer registry is found (`config::locate_kind`), so a review running on the author's user-level reviewers alone stays silent even when every bundled skill is missing. Nudging skills into a project that has not configured Bastion would be misdirected. This mirrors the GitHub surface, where the same advisory is folded into the sticky comment (see [the GitHub adapter](github-adapter.md)); that report path is not gated, since CI always has a repo registry.
 
 ---
 
@@ -83,6 +83,7 @@ Each run gets a directory keyed by its run id, holding the full event stream and
   runs/
     r-0f3a/
       run.jsonl                  # the full event stream, always JSONL regardless of display format
+      seal.json                  # the run seal, when the run was sealed
       reviewers/
         tenant-isolation/
           transcript.jsonl       # the full agent session
@@ -90,6 +91,21 @@ Each run gets a directory keyed by its run id, holding the full event stream and
           meta.json              # backend, timing, usage, matched trigger
     latest                       # a plain file holding the most recent run id
 ```
+
+The runner seals an eligible run on a best-effort basis as it finishes
+persisting: a canonical digest of the committed HEAD tree, the merge-base
+tree, the `base..HEAD` patch-id, the effective config hash, whether a test
+seam was active, whether the working tree was dirty (uncommitted tracked
+changes or untracked files), and the sorted `reviewer.resolved` events, MAC'd
+with a secret embedded in the binary at build time. `bastion attest` reads
+`seal.json` to build an attestation. A run has no `seal.json`, and so cannot
+be attested, in a few cases: a zero-match run (persisted without going
+through the runner), a run whose bindings could not be derived, a run that
+resolved no repository-reviewer event, or an older run predating sealing.
+Sealing failure is non-fatal and never fails the review itself; a review over
+a dirty working tree still seals, but the seal records `dirty: true`, which
+`bastion attest` also refuses. See [Attestation](./attestation.md) for the
+full design.
 
 The run is always persisted as JSONL regardless of the `--format` used on screen, so `run.jsonl` holds the same events whether a human or an agent triggered it; a run can be replayed or inspected after the fact without re-running it, and the per-reviewer files hold what was deliberately kept off the stream. Runs accumulate; `bastion review` does not prune, so history grows until you run `bastion clean` (which keeps the most recent 20 when given no arguments).
 
@@ -108,30 +124,41 @@ The commands that read saved data back are the local equivalent of clicking "Det
 
 Separate from these run-inspection commands, `bastion validate [FILE]` parses the reviewer registry through the same `Config` load path `review` uses, and reports any load-time error (malformed YAML, an unknown field, a duplicate name, a model under `backend: any`) without running a reviewer or spending a model call. With no `FILE` it validates the merged set `review` would run (the discovered repository registry plus the user-level one), naming each source it merged; an explicit `FILE` is validated on its own. A valid registry prints a summary and exits zero; an invalid one prints the error and exits non-zero, so it serves as a cheap pre-commit or CI lint. It has no GitHub mirror: in CI the same validation happens implicitly when `review` loads the registry.
 
+`bastion attest [<run>] [--key <path>]` signs a sealed local run as an attestation note on HEAD, so CI can verify and replay it instead of re-executing the reviewers (see [Attestation](./attestation.md) for the full design). It defaults to the latest recorded run; `--key` picks the SSH signing key, falling back to `git config user.signingkey` when omitted. It refuses to sign when:
+
+- the run was never sealed (a zero-match run, one whose bindings could not be derived, one with no repository-reviewer resolved events, or an older run predating sealing);
+- the seal recorded that a test seam (a `BASTION_*_BIN` backend override, or the container-engine override) was active, since a run against a stubbed reviewer is not a real review;
+- the seal recorded `dirty: true`, meaning the working tree carried uncommitted tracked changes or untracked files at review time: commit the final content, re-run the review, and attest that run instead;
+- the run store no longer matches its own seal, meaning it was edited after the run finished, or sealed by a different build of Bastion;
+- the repository has moved on since the run: HEAD's tree, the merge base's tree, the diff's patch-id, or the effective config hash no longer match what the seal recorded;
+- no signing key can be resolved (`--key` was not given and `git config user.signingkey` is unset).
+
+On success it prints the run id and the reviewers it covers, the resolved public key, and the push command for the notes ref:
+
+```
+Attested run 'r-0f3a' on HEAD (2 reviewer(s): fail-closed-gates, single-responsibility)
+Signed with ssh-ed25519 AAAA... you@example.com
+Push the note with: git push origin refs/notes/bastion
+```
+
+The note itself does not push automatically; run the printed command (or fold it into your usual `git push`) to make the attestation visible to CI. `bastion attest` is local-only, with no GitHub mirror: it is the only command that writes the note, and `bastion review` in CI verifies and replays it.
+
 ---
 
 ## Parity with GitHub
 
 For the repository's reviewers, the local and GitHub surfaces carry the same data; only the transport differs. How the events map to the GitHub surfaces:
 
-| GitHub                                                          | Local                                 |
-| --------------------------------------------------------------- | ------------------------------------- |
-| A per-reviewer check run reaching its conclusion                | `reviewer.resolved` event             |
-| Findings in the sticky PR comment and as check-run annotations  | `findings` in `reviewer.resolved`     |
-| Tokens and cost in the check output                             | `usage` in `reviewer.resolved`        |
-| The aggregate `bastion` check and the sticky PR comment         | `run.completed` event                 |
-| Transcript in the uploaded run artifact                         | saved on disk, `bastion transcript`   |
+| GitHub                                                            | Local                                             |
+| ----------------------------------------------------------------- | ------------------------------------------------- |
+| A per-reviewer check run reaching its conclusion                  | `reviewer.resolved` event                         |
+| Findings in the sticky PR comment and as check-run annotations    | `findings` in `reviewer.resolved`                 |
+| Tokens and cost in the check output                               | `usage` in `reviewer.resolved`                    |
+| The aggregate `bastion` check and the sticky PR comment           | `run.completed` event                             |
+| Transcript in the uploaded run artifact                           | saved on disk, `bastion transcript`               |
+| The `[!NOTE]` replay callout and replayed check-run summary lines | `run.attested`; `replayed` on `reviewer.resolved` |
+| A sticky-comment line naming why attestation was not honored      | `run.attestation-fallback` event                  |
 
 `bastion github report` runs after `bastion review` finishes, so the per-reviewer checks are created already completed, and the aggregate check and the sticky comment are written once. The local stream additionally carries `run.started` and `reviewer.started` for an agent reacting as the run goes; those have no separate GitHub surface. For the repository's reviewers the data each surface carries is the same; only the local stream is finer-grained than the post-hoc GitHub rendering.
 
 Anyone who understands one surface understands the other; this is deliberate, so that an agent's local loop and the CI gate never disagree about what a review means. An author's personal user-level reviewers run only locally, so a local run can carry reviewer events and findings that the GitHub surface will never report.
-
----
-
-## Known limitations & future
-
-Local-specific deferrals, separate from the core design's list.
-
-- Watch mode. A `bastion review --watch` that re-runs affected reviewers as files change, instead of once per invocation.
-- A shared verdict cache so an unchanged reviewer result can be reused across local runs, and even handed to CI, rather than recomputed.
-- Transport beyond a process. Driving Bastion over a socket with the same event stream, if an agent harness ever wants to consume it that way rather than from stdout.

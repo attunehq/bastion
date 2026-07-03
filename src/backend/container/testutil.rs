@@ -62,6 +62,7 @@ pub(crate) fn reviewer() -> Reviewer {
         env: Default::default(),
         capabilities: Capabilities::default(),
         inputs: Default::default(),
+        attestation: None,
         prompt: "p".into(),
     }
 }

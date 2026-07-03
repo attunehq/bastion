@@ -91,6 +91,9 @@ struct ReviewerRow {
     findings: Vec<Finding>,
     duration_ms: u64,
     usage: Option<Usage>,
+    /// Whether this verdict was replayed from a signed local attestation rather
+    /// than executed fresh (`docs/developer-guide/attestation.md`).
+    replayed: bool,
 }
 
 impl ReviewerRow {
@@ -147,6 +150,23 @@ struct RunDigest {
     /// Total cache-read input tokens across reviewers, as recorded on
     /// `run.completed`. 0 when no backend reported cache usage.
     cache_read: u64,
+    /// The attestation replay audit trail, when a `run.attested` event was
+    /// recorded: the reviewers replayed, the attesting key, and when it was
+    /// signed. `None` when nothing was replayed.
+    attested: Option<AttestedSummary>,
+    /// Why an enabled attestation was not honored, when a
+    /// `run.attestation-fallback` event was recorded. `None` when attestation
+    /// either replayed or was never attempted.
+    attestation_fallback: Option<String>,
+}
+
+/// The replay audit trail folded from a `run.attested` event, for the sticky
+/// comment's callout.
+#[derive(Debug, Clone)]
+struct AttestedSummary {
+    reviewers: Vec<String>,
+    public_key: String,
+    attested_at: String,
 }
 
 /// Fold an event stream into a [`RunDigest`].
@@ -183,6 +203,7 @@ fn digest(events: &[RunEvent]) -> RunDigest {
                 findings,
                 usage,
                 duration_ms,
+                replayed,
                 ..
             } => {
                 let mode = started
@@ -202,6 +223,7 @@ fn digest(events: &[RunEvent]) -> RunDigest {
                     findings: findings.clone(),
                     duration_ms: *duration_ms,
                     usage: *usage,
+                    replayed: *replayed,
                 });
             }
             RunEvent::RunCompleted {
@@ -221,6 +243,21 @@ fn digest(events: &[RunEvent]) -> RunDigest {
                 digest.tokens_out = *tokens_out;
                 digest.cache_read = *cache_read;
                 digest.cost = Some(*cost_usd);
+            }
+            RunEvent::AttestationReplayed {
+                reviewers,
+                public_key,
+                attested_at,
+                ..
+            } => {
+                digest.attested = Some(AttestedSummary {
+                    reviewers: reviewers.clone(),
+                    public_key: public_key.clone(),
+                    attested_at: attested_at.clone(),
+                });
+            }
+            RunEvent::AttestationFallback { reason, .. } => {
+                digest.attestation_fallback = Some(reason.clone());
             }
         }
     }
@@ -276,6 +313,14 @@ fn comment_body(
     if let Some(warning) = skills_warning {
         out.push_str(warning);
         out.push('\n');
+    }
+
+    if let Some(attested) = &digest.attested {
+        out.push_str(&attestation_callout(attested));
+        out.push('\n');
+    }
+    if let Some(reason) = &digest.attestation_fallback {
+        out.push_str(&format!("\n_Attestation was not honored: {reason}._\n\n"));
     }
 
     if digest.rows.is_empty() {
@@ -347,6 +392,50 @@ fn status_line(digest: &RunDigest) -> String {
         None => "**Incomplete.** The run did not finish.".to_string(),
     };
     format!("{headline} {reviewers} reviewer(s) ran{timing}{tokens}{cost}.")
+}
+
+/// The prominent `[!NOTE]` callout opening the comment when one or more
+/// reviewers replayed from a signed local attestation instead of executing
+/// fresh in CI (`docs/developer-guide/attestation.md`, "Verification and
+/// replay in CI"). Uses the same GitHub alert mechanism as the skills-drift
+/// `[!WARNING]` block so both advisories read consistently.
+fn attestation_callout(attested: &AttestedSummary) -> String {
+    let names = attested
+        .reviewers
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "> [!NOTE]\n\
+         > {} replayed from a signed local attestation rather than executed fresh: {names}.\n\
+         > Attested by {} at {}.\n",
+        if attested.reviewers.len() == 1 {
+            "1 reviewer was"
+        } else {
+            "reviewers were"
+        },
+        truncate_key(&attested.public_key),
+        attested.attested_at,
+    )
+}
+
+/// A truncated rendering of an SSH public key line for display: the key type
+/// and a short prefix of the base64 material, plus the comment if the key
+/// carries one. Keeps the callout from dumping the full base64 blob inline.
+fn truncate_key(public_key: &str) -> String {
+    let mut parts = public_key.split_whitespace();
+    let kind = parts.next().unwrap_or("key");
+    let material = parts.next().unwrap_or("");
+    let comment = parts.next();
+
+    let short_material: String = material.chars().take(12).collect();
+    match comment {
+        Some(comment) if !comment.is_empty() => {
+            format!("{kind} {short_material}... ({comment})")
+        }
+        _ => format!("{kind} {short_material}..."),
+    }
 }
 
 /// The reviewer summary table.
@@ -547,6 +636,9 @@ fn reviewer_check_summary(row: &ReviewerRow, annotations: &[Annotation]) -> Stri
         row.verdict_word(),
         row.duration_ms / 1000,
     );
+    if row.replayed {
+        out.push_str("- Replayed from an attested local run rather than executed fresh.\n");
+    }
     if let Some(usage) = row.usage {
         let cached = if usage.cache_read > 0 {
             format!(", {} cached", usage.cache_read)
@@ -982,6 +1074,7 @@ mod tests {
                 }),
                 duration_ms: 38_000,
                 has_transcript: true,
+                replayed: false,
             },
             RunEvent::ReviewerResolved {
                 run: run.clone(),
@@ -992,6 +1085,7 @@ mod tests {
                 usage: None,
                 duration_ms: 12_000,
                 has_transcript: true,
+                replayed: false,
             },
             RunEvent::ReviewerResolved {
                 run: run.clone(),
@@ -1008,6 +1102,7 @@ mod tests {
                 usage: None,
                 duration_ms: 5_000,
                 has_transcript: true,
+                replayed: false,
             },
             RunEvent::RunCompleted {
                 run,
@@ -1210,6 +1305,99 @@ mod tests {
         assert!(warn_at < none_at, "warning must precede the empty-run note");
     }
 
+    /// [`sample_events`] with `tenant-isolation`'s resolved row marked
+    /// `replayed: true` and a matching `run.attested` audit event appended.
+    fn sample_events_with_replay() -> Vec<RunEvent> {
+        let mut events = sample_events();
+        for event in &mut events {
+            if let RunEvent::ReviewerResolved {
+                reviewer, replayed, ..
+            } = event
+                && reviewer == "tenant-isolation"
+            {
+                *replayed = true;
+            }
+        }
+        events.push(RunEvent::AttestationReplayed {
+            run: RunId("r-1".into()),
+            reviewers: vec!["tenant-isolation".into()],
+            public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGVudGlyZWx5RmFrZQ== ada@example.com"
+                .into(),
+            attested_at: "2026-07-01T12:00:00Z".into(),
+        });
+        events
+    }
+
+    #[test]
+    fn comment_opens_with_a_replay_callout_naming_reviewers_key_and_timestamp() {
+        let digest = digest(&sample_events_with_replay());
+        let body = comment_body(&digest, false, None);
+        assert!(body.contains("[!NOTE]"));
+        assert!(body.contains("`tenant-isolation`"));
+        assert!(body.contains("2026-07-01T12:00:00Z"));
+        // The full base64 blob is not dumped verbatim; only a truncated form.
+        assert!(!body.contains("AAAAC3NzaC1lZDI1NTE5AAAAIGVudGlyZWx5RmFrZQ=="));
+        assert!(body.contains("ssh-ed25519"));
+        assert!(body.contains("ada@example.com"));
+
+        // The callout sits after the headline, before the reviewer table.
+        let headline_at = body.find("reviewer(s) ran").unwrap();
+        let note_at = body.find("[!NOTE]").unwrap();
+        let table_at = body.find("| Reviewer |").unwrap();
+        assert!(headline_at < note_at && note_at < table_at);
+    }
+
+    #[test]
+    fn comment_has_no_callout_when_nothing_replayed() {
+        let digest = digest(&sample_events());
+        let body = comment_body(&digest, false, None);
+        assert!(!body.contains("[!NOTE]"));
+    }
+
+    #[test]
+    fn comment_notes_a_fallback_reason_in_one_unobtrusive_line() {
+        let mut events = sample_events();
+        events.push(RunEvent::AttestationFallback {
+            run: RunId("r-1".into()),
+            reason: "no attestation note found on HEAD".into(),
+        });
+        let body = comment_body(&digest(&events), false, None);
+        assert!(body.contains("no attestation note found on HEAD"));
+        assert!(!body.contains("[!NOTE]"), "a fallback is not a replay");
+    }
+
+    #[test]
+    fn replayed_reviewer_check_summary_states_it_was_replayed() {
+        let digest = digest(&sample_events_with_replay());
+        let checks = check_runs(&ctx(), &digest);
+        let replayed_check = checks
+            .iter()
+            .find(|c| c.name == "bastion / tenant-isolation")
+            .unwrap();
+        assert!(
+            replayed_check
+                .summary
+                .contains("Replayed from an attested local run")
+        );
+
+        // A non-replayed reviewer's summary carries no such note.
+        let fresh_check = checks
+            .iter()
+            .find(|c| c.name == "bastion / file-responsibility")
+            .unwrap();
+        assert!(!fresh_check.summary.contains("Replayed"));
+    }
+
+    #[test]
+    fn truncate_key_shortens_the_material_and_keeps_type_and_comment() {
+        let long = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGVudGlyZWx5RmFrZWtleW1hdGVyaWFsaGVyZQ== ada@example.com";
+        let short = truncate_key(long);
+        assert!(short.starts_with("ssh-ed25519 AAAAC3NzaC1l"));
+        assert!(short.contains("..."));
+        assert!(short.contains("(ada@example.com)"));
+        assert!(short.len() < long.len());
+    }
+
     #[test]
     fn comment_cell_escaping_keeps_the_table_intact() {
         // A summary with a pipe and a newline must not break the row.
@@ -1315,6 +1503,7 @@ mod tests {
             usage: None,
             duration_ms: 1000,
             has_transcript: true,
+            replayed: false,
         }
     }
 
@@ -1496,6 +1685,7 @@ mod tests {
                 usage: None,
                 duration_ms: 1000,
                 has_transcript: true,
+                replayed: false,
             },
             RunEvent::RunCompleted {
                 run: RunId("r-rec".into()),
@@ -1624,6 +1814,7 @@ mod tests {
             findings,
             duration_ms: 1000,
             usage: None,
+            replayed: false,
         };
         let summary = reviewer_check_summary(&row, &annotations);
         assert!(summary.contains(&format!(
@@ -1647,6 +1838,7 @@ mod tests {
                 cache_read,
                 cost_usd: Money::from_cents(5),
             }),
+            replayed: false,
         };
 
         // Cache hits present: the cached figure rides the token line.

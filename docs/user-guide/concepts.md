@@ -168,7 +168,8 @@ which is forwarded in alongside the credentials.
    route: select reviewers whose trigger globs match
         |
         v
-   run matched reviewers in parallel (each on its backend, each timeout-bounded)
+   run matched reviewers in parallel, or on the CI surface replay from a verified
+   attestation with no backend dispatch (each executed reviewer is timeout-bounded)
         |
         v
    each returns a verdict (pass/block + summary + findings)

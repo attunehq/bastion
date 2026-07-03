@@ -113,9 +113,7 @@ That recovery depends on first-turn session state on disk. Each `docker run` her
 separate `--rm` container with no persisted home, so a resume in the second container
 cannot find the first turn's session: a containerized reviewer whose first turn is
 malformed blocks instead of returning a pass, but a flaky first turn fails instead of
-recovering. Persisting a shared agent home across the two turns would fix it, but
-bind-mounting a host directory as the container's `HOME` can conflict with auth or
-tools baked into the image, so this is left for a later pass. On Codex, when the first
+recovering. On Codex, when the first
 turn yields no thread id, Bastion reprompts with the full prompt in a fresh session,
 which works in a new container.
 
@@ -139,6 +137,10 @@ child already launched, the removal proceeds in the engine even if Bastion exits
 immediately. On a clean return the guard is defused, since `--rm` has already removed
 the container. That gives a containerized reviewer the same fail-closed teardown the
 native path gets from `kill_on_drop`.
+
+The `BASTION_CONTAINER_ENGINE` override is likewise recorded in the run seal as an
+active test seam; a run sealed with it active cannot be attested (see
+[Attestation](./attestation.md)).
 
 ## Testing
 

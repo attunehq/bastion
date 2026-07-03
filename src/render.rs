@@ -70,18 +70,33 @@ fn write_event_human<W: Write>(out: &mut W, event: &RunEvent) -> io::Result<()> 
             summary,
             findings,
             duration_ms,
+            replayed,
             ..
         } => {
             writeln!(
                 out,
-                "  {} {reviewer}: {summary} ({}s)",
+                "  {} {reviewer}: {summary} ({}s{})",
                 marker(*verdict),
-                duration_ms / 1000
+                duration_ms / 1000,
+                if *replayed { ", replayed" } else { "" },
             )?;
             for finding in findings {
                 write_finding(out, finding)?;
             }
             Ok(())
+        }
+        RunEvent::AttestationReplayed {
+            reviewers,
+            public_key,
+            attested_at,
+            ..
+        } => writeln!(
+            out,
+            "  attested: {} reviewer(s) replayed from a signed local run (key {public_key}, attested {attested_at})",
+            reviewers.len()
+        ),
+        RunEvent::AttestationFallback { reason, .. } => {
+            writeln!(out, "  attestation not honored: {reason}")
         }
         RunEvent::RunCompleted {
             verdict,
@@ -191,6 +206,7 @@ mod tests {
             usage: None,
             duration_ms: 4200,
             has_transcript: true,
+            replayed: false,
         }
     }
 
@@ -260,5 +276,68 @@ mod tests {
         assert!(line.contains(r#""type":"reviewer.resolved""#));
         let parsed: RunEvent = serde_json::from_str(line.trim()).unwrap();
         assert_eq!(parsed, resolved());
+    }
+
+    #[test]
+    fn a_replayed_resolved_event_carries_the_replayed_suffix() {
+        // A reviewer that replayed from a signed local attestation must say so
+        // inline, right next to the elapsed time, so a person watching the run
+        // can tell at a glance which verdicts were freshly computed.
+        let mut event = resolved();
+        let RunEvent::ReviewerResolved { replayed, .. } = &mut event else {
+            unreachable!()
+        };
+        *replayed = true;
+
+        let mut buf = Vec::new();
+        write_event(&mut buf, Format::Human, &event).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(
+            text.contains("(4s, replayed)"),
+            "expected the replayed suffix right after the elapsed time, got: {text}"
+        );
+    }
+
+    #[test]
+    fn a_fresh_resolved_event_carries_no_replayed_suffix() {
+        // The common case (`replayed: false`) must not print the suffix at all,
+        // not even an empty one.
+        let mut buf = Vec::new();
+        write_event(&mut buf, Format::Human, &resolved()).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(text.contains("(4s)"));
+        assert!(!text.contains("replayed"));
+    }
+
+    #[test]
+    fn run_attested_line_names_the_key_count_and_timestamp() {
+        let event = RunEvent::AttestationReplayed {
+            run: RunId("r-1".into()),
+            reviewers: vec!["r1".into(), "r2".into()],
+            public_key: "ssh-ed25519 AAAA grace@bastion.dev".into(),
+            attested_at: "2026-07-01T12:00:00Z".into(),
+        };
+        let mut buf = Vec::new();
+        write_event(&mut buf, Format::Human, &event).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(
+            text.contains(
+                "attested: 2 reviewer(s) replayed from a signed local run \
+                 (key ssh-ed25519 AAAA grace@bastion.dev, attested 2026-07-01T12:00:00Z)"
+            ),
+            "got: {text}"
+        );
+    }
+
+    #[test]
+    fn run_attestation_fallback_line_states_the_reason() {
+        let event = RunEvent::AttestationFallback {
+            run: RunId("r-1".into()),
+            reason: "no attestation note found on HEAD".into(),
+        };
+        let mut buf = Vec::new();
+        write_event(&mut buf, Format::Human, &event).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(text.contains("attestation not honored: no attestation note found on HEAD"));
     }
 }

@@ -20,12 +20,17 @@
 //! - [`render`]: turning events into human or JSONL output.
 //! - [`backend`]: the agent execution boundary (Claude Code and siblings).
 //! - [`runner`]: the parallel, timeout-bounded runner and aggregation.
+//! - [`seal`]: the run seal, an HMAC over everything a verdict depends on, that
+//!   makes a persisted run tamper-evident (`docs/developer-guide/attestation.md`).
+//! - [`attest`]: `bastion attest`, which turns a sealed run into a signed git-note
+//!   bundle CI can verify and replay (`docs/developer-guide/attestation.md`).
 //! - [`skills`]: the agent skills bundled into the binary and installed into a
 //!   consuming repo so its agents learn how to use Bastion.
 //! - [`cli`] / [`commands`]: the argument surface and command handlers.
 
 #![warn(missing_docs)]
 
+pub mod attest;
 pub mod backend;
 pub mod cli;
 pub mod commands;
@@ -39,6 +44,7 @@ pub mod render;
 pub mod reviewer;
 pub mod routing;
 pub mod runner;
+pub mod seal;
 pub mod skills;
 pub mod store;
 pub mod verdict;

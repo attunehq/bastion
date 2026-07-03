@@ -54,6 +54,16 @@ pub struct GatheredContext {
     /// The human discussion: top-level PR comments and inline review comments, with
     /// Bastion's own comments removed.
     pub comments: Vec<ContextComment>,
+    /// The PR author's GitHub login, when the response carried one. This is the
+    /// attestation signature's principal (`docs/developer-guide/attestation.md`,
+    /// "Signing") and the key for the signing-key lookup
+    /// ([`super::signing::ssh_signing_keys`]); a login the API omits (a deleted account) leaves
+    /// attestation with nothing to verify against, so the caller falls back.
+    pub author_login: Option<String>,
+    /// The PR's head commit SHA, when the response carried one. CI's checkout can
+    /// be a merge commit while the attestation note hangs off this commit, so a
+    /// caller retries the note lookup here when `HEAD` carries none.
+    pub head_sha: Option<String>,
 }
 
 /// Gather a pull request's intent and discussion over `api`.
@@ -83,6 +93,8 @@ pub async fn gather<A: GitHubApi + ?Sized>(
         .body
         .map(|body| body.trim().to_string())
         .filter(|body| !body.is_empty());
+    let author_login = pull.user.and_then(|u| u.login);
+    let head_sha = pull.head.map(|h| h.sha);
 
     let mut comments = Vec::new();
 
@@ -111,7 +123,12 @@ pub async fn gather<A: GitHubApi + ?Sized>(
         }
     }
 
-    Ok(GatheredContext { intent, comments })
+    Ok(GatheredContext {
+        intent,
+        comments,
+        author_login,
+        head_sha,
+    })
 }
 
 /// Map GitHub's `author_association` onto the generic [`Standing`].
@@ -168,7 +185,8 @@ fn review_comments_request(owner: &str, repo: &str, pr: u64) -> ApiRequest {
 
 /// Send a `GET` and deserialize its body, failing on a non-2xx status the way the
 /// reporting half does, so a rejected gather is a real error the caller can log.
-async fn get_json<A, T>(api: &A, req: &ApiRequest) -> Result<T>
+/// Shared with [`super::signing`], the other GET-shaped consumer of the seam.
+pub(super) async fn get_json<A, T>(api: &A, req: &ApiRequest) -> Result<T>
 where
     A: GitHubApi + ?Sized,
     T: serde::de::DeserializeOwned,
@@ -192,11 +210,24 @@ where
     })
 }
 
-/// The slice of a GitHub pull request Bastion reads: just the description body.
+/// The slice of a GitHub pull request Bastion reads: the description body, the
+/// author, and the head commit. The GET already happens in [`gather`], so the
+/// author login and head SHA ride the same response rather than a duplicate
+/// request.
 #[derive(Debug, Deserialize)]
 struct PullRequest {
     #[serde(default)]
     body: Option<String>,
+    #[serde(default)]
+    user: Option<User>,
+    #[serde(default)]
+    head: Option<PullRequestHead>,
+}
+
+/// The slice of a pull request's `head` Bastion reads: just the commit SHA.
+#[derive(Debug, Deserialize)]
+struct PullRequestHead {
+    sha: String,
 }
 
 /// A GitHub comment id: the key that threads a review-comment reply onto its root. A
@@ -417,5 +448,42 @@ mod tests {
             finding_marker("<!-- bastion-finding:ABC123DEF4560000 -->"),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn gathers_the_author_login_and_head_sha_from_the_same_pull_request_response() {
+        let client = responder(
+            serde_json::json!({
+                "body": "intent",
+                "user": { "login": "ada" },
+                "head": { "sha": "abc123deadbeef" },
+            }),
+            serde_json::json!([]),
+            serde_json::json!([]),
+        );
+        let gathered = gather(&client, "acme", "app", 1).await.expect("gathers");
+        assert_eq!(gathered.author_login.as_deref(), Some("ada"));
+        assert_eq!(gathered.head_sha.as_deref(), Some("abc123deadbeef"));
+
+        // Exactly one request reached the pull-request endpoint: no duplicate GET
+        // for the author or head SHA.
+        let pr_requests = client
+            .calls()
+            .into_iter()
+            .filter(|c| c.path.ends_with("/pulls/1"))
+            .count();
+        assert_eq!(pr_requests, 1);
+    }
+
+    #[tokio::test]
+    async fn missing_author_and_head_fields_degrade_to_none() {
+        let client = responder(
+            serde_json::json!({ "body": "" }),
+            serde_json::json!([]),
+            serde_json::json!([]),
+        );
+        let gathered = gather(&client, "o", "r", 1).await.expect("gathers");
+        assert_eq!(gathered.author_login, None);
+        assert_eq!(gathered.head_sha, None);
     }
 }

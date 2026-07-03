@@ -32,6 +32,9 @@ verdict returns an error, never a fabricated pass, and gates fail closed on it.
     deliberate mirror images; keep them in sync. The user-level registry is a
     local-only exception, so a purely local review can run personal reviewers the
     GitHub adapter does not.
+  - `docs/developer-guide/attestation.md`: the design for signed local runs that
+    CI verifies and replays instead of re-executing reviewers. Implemented: the
+    seal in `src/seal.rs`, `bastion attest` and the CI planner in `src/attest/`.
 - `.bastion.yaml`: the example reviewer registry at the repository root (the
   `.bastion.yml` spelling is also honored); update it when the schema changes.
 - `.agents/skills/readme.md`: repo-local Rust coding skills and their provenance.
@@ -64,6 +67,7 @@ bastion github report --repo OWNER/NAME --pr N --sha SHA
 bastion skills install
 bastion skills check
 bastion skills list
+bastion attest
 ```
 
 ## Architecture map
@@ -76,7 +80,9 @@ version:
 
 - `build.rs`: derives `BASTION_VERSION` from `git describe --always --tags
   --dirty=-dirty`, with a `BASTION_VERSION` env override and a `Cargo.toml`
-  fallback.
+  fallback; also resolves the run-seal secret (`BASTION_SEAL_SECRET` env
+  override, else a generated secret cached under `OUT_DIR`) that `src/seal.rs`
+  embeds at build time.
 - `src/main.rs`: thin binary entrypoint; wires the tokio runtime to
   `bastion::run`.
 - `src/lib.rs`: library root; installs `color_eyre` + `tracing` and dispatches.
@@ -112,7 +118,29 @@ version:
 - `src/render.rs`: human and JSONL output.
 - `src/runner.rs`: the parallel, timeout-bounded runner: fans matched reviewers
   out over a `JoinSet`, fails closed on error/timeout, streams run events, and
-  persists each run.
+  persists each run, sealing an eligible run on a best-effort basis at persist
+  time.
+- `src/seal.rs` / `src/attest/`: signed local-run attestation
+  (`docs/developer-guide/attestation.md`). `seal.rs` is the run seal: an
+  HMAC-SHA256 keyed by a secret embedded in the binary at build time, over a
+  canonical digest of the committed HEAD tree, the merge-base tree, the
+  `base..HEAD` patch-id, the effective config hash, whether a test seam was
+  active, whether the working tree was dirty (uncommitted tracked changes or
+  untracked files), and the sorted `reviewer.resolved` events; the runner
+  seals an eligible run on a best-effort basis and persists the seal to
+  `runs/<id>/seal.json` (the zero-match fast path persists without a seal, and
+  `seal_run` skips when the bindings it needs are absent or no repo reviewer
+  resolved). A dirty review still runs and still seals, but the seal records
+  `dirty: true`; `bastion attest` refuses to attest such a run.
+  `attest/` is split by concern: `mod.rs` is the `bastion attest` flow
+  (verifies the seal, re-derives the repository state, signs a bundle with the
+  author's SSH key, writes it as a git note under `refs/notes/bastion`),
+  `bundle.rs` the bundle and note envelope, `sign.rs` SSH signing and
+  signing-key resolution, and `replay.rs` the CI-side verify-and-replay
+  planner (`plan`, `AttestationOutcome`) plus note lookup, which
+  `commands::review` calls when the registry sets `attestations: true` and the
+  run carries a GitHub source, short-circuiting to a fallback (every reviewer
+  fresh, no note lookup) when the CI checkout is dirty.
 - `src/backend/`: the agent execution boundary. `mod.rs` defines the `Backend`
   trait, the deterministic `MockBackend`, `dispatch`, and the shared prompt helpers
   (including the fenced-YAML `SCHEMA_INSTRUCTION`/`extract_verdict` that the Codex
@@ -137,7 +165,9 @@ version:
   the governance block (pure text, no network); `client.rs` is the REST seam,
   modeled on the backend's `CommandRunner`: a proof-carrying `ApiRequest`, a
   `GitHubApi` trait, the real `reqwest`-backed `RestClient`, and a recording double
-  for tests; `context.rs` is the GitHub *producer* of the review context (it gathers a
+  for tests; `signing.rs` fetches a user's registered SSH signing keys
+  (`GET /users/{username}/ssh_signing_keys`) over the same seam, for attestation
+  verification; `context.rs` is the GitHub *producer* of the review context (it gathers a
   PR's body and discussion over the same REST seam, maps `author_association` to the
   generic `Standing`, filters out Bastion's own marker-tagged comments, and resolves a
   finding-thread reply back to its `FindingId` when one carries the marker, so the core
@@ -157,6 +187,11 @@ version:
   and never touches a check-run conclusion. The local `bastion review` mirrors it to
   stderr, but only when the repository has adopted Bastion (a repo-level registry is
   present); a user-level-only local review stays silent (see the `src/skills.rs` entry).
+  When one or more reviewers replayed from a verified attestation, `report.rs` adds a
+  `[!NOTE]` callout naming them, the attesting key, and when it was signed, plus a line
+  on each replayed reviewer's own check-run summary; a fallback (attestation attempted
+  but not honored) surfaces as a line naming why. See `src/seal.rs` / `src/attest/`
+  below and `docs/developer-guide/attestation.md`.
   Check runs need a GitHub App installation token, so this
   runs under one (the default Actions `GITHUB_TOKEN` qualifies; a classic PAT does
   not). API-created check runs carry no check-suite id, so under the shared
@@ -276,9 +311,12 @@ a release is just a tag, never a crates.io publish.
 
 - To cut a release, push a tag in the shape `vX.Y.Z` to the remote (for example
   `git tag v0.2.0 && git push origin v0.2.0`). The
-  [release workflow](.github/workflows/release.yml) fires on `v*` tags, builds the
-  platform matrix, and publishes a GitHub Release (created as a draft so its notes
-  and assets are complete, then flipped to published in a final step).
+  [release workflow](.github/workflows/release.yml) fires on `v*` tags, generates
+  one per-release run-seal secret and threads it through `BASTION_SEAL_SECRET`
+  into every platform build (so the release's binaries verify each other's run
+  seals), builds the platform matrix, and publishes a GitHub Release (created as
+  a draft so its notes and assets are complete, then flipped to published in a
+  final step).
 - Do not bump the crate version in `Cargo.toml`. Leave `version = "0.0.0"` as it is:
   it is a deliberate placeholder, not a real version. The released binary's
   `--version` comes from the git tag (CI passes the tag through `BASTION_VERSION`;

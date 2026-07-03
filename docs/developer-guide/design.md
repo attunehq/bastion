@@ -81,11 +81,13 @@ Formalized, Bastion is built around the following threat model:
 
 The PR description and discussion Bastion feeds a reviewer (the [review context](#review-context)) are authored by the gate's *subject*, not its policy authority. They explain intent and carry the author's pushback, the way a human reviewer reads them, but Bastion presents them as untrusted claims and excludes them from the gate logic, so an author cannot talk a gate into passing. Granting an exception remains a human governance act.
 
+[Attestation](./attestation.md) uses this same threat model: CI trusting a signed local run in place of re-executing a reviewer carries the same trust as any other aligned-contributor assumption above.
+
 ---
 
 ## The reviewer
 
-A reviewer is a bundle: **prompt + trigger + mode + backend + (optional) model + (optional) effort + capabilities + (optional) runner + (optional) environment**. We call it the reviewer's _execution profile_. The optional `runner` (paired with `capabilities.network: true`) provisions a container the backend runs inside (see the [honored-fields table](./backends.md#what-a-backend-applies-from-the-profile) and [Containers](./containers.md)); without a `runner` the reviewer runs natively on the host, and a `runner` without `network: true` fails closed.
+A reviewer is a bundle: **prompt + trigger + mode + backend + (optional) model + (optional) effort + capabilities + (optional) runner + (optional) environment + (optional) attestation policy**. We call it the reviewer's _execution profile_. The optional `runner` (paired with `capabilities.network: true`) provisions a container the backend runs inside (see the [honored-fields table](./backends.md#what-a-backend-applies-from-the-profile) and [Containers](./containers.md)); without a `runner` the reviewer runs natively on the host, and a `runner` without `network: true` fails closed. `attestation: never` opts a reviewer out of CI attestation replay: it always executes fresh in CI even when a verified attestation covers the run (see [Attestation](./attestation.md)).
 
 **Least privilege is the default.** This isn't intended as anti-exfil hardening but as plain hygiene and to keep the common case fast: a reviewer gets no secrets and no tools unless it asks. Most reviewers are hermetic and need nothing but the checkout and a model. A native reviewer runs on the host and reaches the model provider over the host network; `network: true` is the opt-in for _general_ outbound network beyond that, and is honored only inside a container. (One caveat in this build: a container's egress cannot be scoped to the provider alone yet, because the allowlisting proxy that would do it is unbuilt. So the only network tier a container can be given is general egress, and a containerized reviewer must declare `network: true` to reach its provider at all. A container with the default `network: false` reads as restricted but cannot be enforced, so it _fails closed_ rather than silently attaching general egress (provider-only scoped egress is unbuilt). See the implementation-status note below and the [honored-fields table](./backends.md#what-a-backend-applies-from-the-profile).)
 
@@ -99,9 +101,13 @@ Finally, Bastion does not own CI. One of the examples below indicates a preview 
 
 The schema is format-agnostic in principle, but YAML is the on-disk format we start with because it's human-friendly and widely used for config. The important part is that it's **declarative and static**: no code, no dynamic logic, so it's reviewable and generates a stable trigger set.
 
-The registry is a single top-level `reviewers:` list; each entry is one reviewer
-keyed by `name`. (This is the on-disk shape the loader expects; see
-[`src/config.rs`](../../src/config.rs) and [`.bastion.yaml`](../../.bastion.yaml).)
+The registry is a top-level mapping with three keys: `reviewers` (the list, each
+entry keyed by `name`), `defaults` (registry-wide fields folded into any reviewer
+that does not set them itself), and `attestations` (a boolean, default `false`,
+that lets CI replay a verified attested run instead of re-executing a reviewer; see
+[Attestation](./attestation.md)). Only `reviewers` is required. (This is the
+on-disk shape the loader expects; see [`src/config.rs`](../../src/config.rs) and
+[`.bastion.yaml`](../../.bastion.yaml).)
 
 ```yaml
 # Registry-wide defaults, inherited by any reviewer that does not set the field.
@@ -167,7 +173,10 @@ reviewers:
 > (a gate blocks, an advisor is skipped) rather than running without it. The
 > least-privilege default (`network: false`, no `mcp`/`skills`, no `runner`) runs
 > natively. `env` and
-> `inputs` values are literal strings (no shell `$VAR` expansion). See the
+> `inputs` values are literal strings (no shell `$VAR` expansion). `Config` also
+> parses a top-level `attestations` flag and `Reviewer` an `attestation: never`
+> field; both are honored by the CI verify-and-replay planner (see
+> [Attestation](./attestation.md)). See the
 > [honored-fields table](./backends.md#what-a-backend-applies-from-the-profile).
 
 ---

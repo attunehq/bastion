@@ -114,6 +114,17 @@ pub enum Command {
         #[command(subcommand)]
         command: SkillsCommand,
     },
+    /// Sign a sealed local run as an attestation note on HEAD, so CI can
+    /// verify and replay it instead of re-executing the reviewers
+    /// (`docs/developer-guide/attestation.md`).
+    Attest {
+        /// The run to attest; defaults to the latest recorded run.
+        run: Option<String>,
+        /// The SSH signing key to use. Defaults to `git config
+        /// user.signingkey`.
+        #[arg(long, value_name = "PATH")]
+        key: Option<PathBuf>,
+    },
 }
 
 /// Skills adapter subcommands. They install the skills bundled into this binary
@@ -284,6 +295,10 @@ pub async fn run() -> Result<ExitCode> {
             }
             SkillsCommand::List => crate::commands::skills_list().map(|()| ExitCode::SUCCESS),
         },
+        Command::Attest { run, key } => {
+            crate::commands::attest(&layout, run.as_deref(), key.as_deref())
+                .map(|()| ExitCode::SUCCESS)
+        }
     }
 }
 
@@ -448,6 +463,30 @@ mod tests {
                 assert!(!force);
             }
             other => panic!("expected skills install, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attest_defaults_to_the_latest_run_and_no_explicit_key() {
+        let cli = Cli::parse_from(["bastion", "attest"]);
+        match cli.command {
+            Command::Attest { run, key } => {
+                assert_eq!(run, None);
+                assert_eq!(key, None);
+            }
+            other => panic!("expected attest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attest_accepts_a_run_id_and_a_key_path() {
+        let cli = Cli::parse_from(["bastion", "attest", "r-0f3a", "--key", "/home/me/.ssh/id"]);
+        match cli.command {
+            Command::Attest { run, key } => {
+                assert_eq!(run.as_deref(), Some("r-0f3a"));
+                assert_eq!(key, Some(PathBuf::from("/home/me/.ssh/id")));
+            }
+            other => panic!("expected attest, got {other:?}"),
         }
     }
 

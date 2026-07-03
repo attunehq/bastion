@@ -37,6 +37,14 @@ fn git(dir: &Path, args: &[&str]) {
         .status()
         .unwrap_or_else(|e| panic!("git {args:?} failed to launch: {e}"));
     assert!(status.success(), "git {args:?} exited unsuccessfully");
+    // The `-c` isolation only covers commands issued through this helper. The
+    // compiled binary under test runs plain `git` in the same repo (writing an
+    // attestation note, say) and needs an identity from config on a host that
+    // has none (CI), so persist one repo-locally at init.
+    if args.first() == Some(&"init") {
+        git(dir, &["config", "user.email", "grace@bastion.dev"]);
+        git(dir, &["config", "user.name", "Grace Hopper"]);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -68,6 +76,8 @@ pub(crate) struct Reviewer {
     effort: Option<&'static str>,
     /// The prompt body (defaults to a generic instruction).
     prompt: Option<&'static str>,
+    /// `attestation: never`, opting this reviewer out of attestation replay.
+    attestation_never: bool,
 }
 
 impl Reviewer {
@@ -85,6 +95,7 @@ impl Reviewer {
             model: None,
             effort: None,
             prompt: None,
+            attestation_never: false,
         }
     }
 
@@ -145,6 +156,13 @@ impl Reviewer {
         self
     }
 
+    /// Opt this reviewer out of attestation replay (`attestation: never`): CI must
+    /// execute it fresh on every run regardless of any verified local attestation.
+    pub(crate) fn attestation_never(mut self) -> Self {
+        self.attestation_never = true;
+        self
+    }
+
     fn to_yaml(&self) -> String {
         let mut s = String::new();
         s.push_str(&format!("  - name: {}\n", self.name));
@@ -171,6 +189,9 @@ impl Reviewer {
         }
         if self.network {
             s.push_str("    capabilities:\n      network: true\n");
+        }
+        if self.attestation_never {
+            s.push_str("    attestation: never\n");
         }
         if !self.env.is_empty() {
             s.push_str("    env:\n");
@@ -209,6 +230,18 @@ pub(crate) fn registry_with_defaults(defaults: &[(&str, &str)], reviewers: &[Rev
         yaml.push_str(&format!("  {key}: {value}\n"));
     }
     yaml.push_str("reviewers:\n");
+    for reviewer in reviewers {
+        yaml.push_str(&reviewer.to_yaml());
+    }
+    yaml
+}
+
+/// A registry with the top-level `attestations: true` switch set, so a CI-path
+/// review looks up an attestation note instead of ignoring the feature entirely.
+/// `attestations` is a sibling of `reviewers:`, not a `defaults:` sub-key, so it
+/// needs its own builder.
+pub(crate) fn registry_with_attestations(reviewers: &[Reviewer]) -> String {
+    let mut yaml = String::from("attestations: true\nreviewers:\n");
     for reviewer in reviewers {
         yaml.push_str(&reviewer.to_yaml());
     }
@@ -324,6 +357,13 @@ impl TestRepo {
         git(self.path(), &["commit", "-m", message]);
     }
 
+    /// Create a branch at the current HEAD, as a stable base marker for a
+    /// scenario that commits the dirtied tree and then reviews the committed
+    /// changeset against where it started.
+    pub(crate) fn branch(&self, name: &str) {
+        git(self.path(), &["branch", name]);
+    }
+
     /// Run `bastion <args>` in this repo with the fake agent wired in for both
     /// backends, this repo's private data directory, and any `extra_env` (which
     /// Bastion inherits and propagates to the agent child).
@@ -373,6 +413,44 @@ impl TestRepo {
 
     pub(crate) fn review(&self, fake: &Path) -> ReviewRun {
         self.review_base(fake, "main", &[])
+    }
+
+    /// Run `bastion review --base <base> --repo <repo> --pr <pr> --format jsonl`
+    /// against a GitHub source (the CI path), with any `extra_env` (typically the
+    /// fake GitHub's `GITHUB_API_URL`/`GITHUB_TOKEN`).
+    pub(crate) fn review_ci(
+        &self,
+        fake: &Path,
+        base: &str,
+        repo: &str,
+        pr: &str,
+        extra_env: &[(&str, &str)],
+    ) -> ReviewRun {
+        let output = self.run(
+            fake,
+            &[
+                "review", "--base", base, "--repo", repo, "--pr", pr, "--format", "jsonl",
+            ],
+            extra_env,
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        let events = parse_events(&stdout, &stderr);
+        ReviewRun {
+            code: output.status.code(),
+            events,
+            stderr,
+        }
+    }
+
+    /// Write a garbage (non-bundle) note on HEAD under `refs/notes/bastion`, using
+    /// this repo's own isolated git identity. Used to exercise the CI attestation
+    /// path's refusal of an unreadable note.
+    pub(crate) fn write_garbage_note(&self, text: &str) {
+        git(
+            self.path(),
+            &["notes", "--ref=refs/notes/bastion", "add", "-m", text],
+        );
     }
 
     /// A [`Layout`] over this repo's data directory, for asserting on what was
@@ -490,4 +568,38 @@ impl ReviewRun {
             .filter(|e| matches!(e, RunEvent::ReviewerStarted { .. }))
             .count()
     }
+
+    /// The reason from the stream's `run.attestation-fallback` event, if one was
+    /// emitted.
+    pub(crate) fn attestation_fallback_reason(&self) -> Option<&str> {
+        self.events.iter().find_map(|e| match e {
+            RunEvent::AttestationFallback { reason, .. } => Some(reason.as_str()),
+            _ => None,
+        })
+    }
+}
+
+/// Generate a throwaway ed25519 keypair at `<dir>/id`, returning the private key
+/// path. Used by the attestation scenarios to exercise `bastion attest --key`
+/// without touching a developer's real SSH keys.
+pub(crate) fn generate_ssh_key(dir: &Path) -> std::path::PathBuf {
+    let key_path = dir.join("id");
+    let status = Command::new("ssh-keygen")
+        .args([
+            "-t",
+            "ed25519",
+            "-N",
+            "",
+            "-f",
+            &key_path.to_string_lossy(),
+            "-C",
+            "test@bastion.dev",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("ssh-keygen is installed");
+    assert!(status.success(), "ssh-keygen -t ed25519 failed");
+    key_path
 }

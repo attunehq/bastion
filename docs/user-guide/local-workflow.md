@@ -9,9 +9,9 @@ order: 5
 > Running `bastion review` for real: the loop, the two output formats, exit codes,
 > and inspecting what was saved.
 
-The local CLI is the surface an authoring agent optimizes against before opening a
-PR. It runs the *same* reviewers CI will run, so a green local loop usually means a PR
-that CI confirms. Two things can make a local run differ: CI feeds reviewers the PR's
+The local CLI applies the same reviewers and decisions CI enforces: CI executes them
+fresh or replays an attested local run. So a green local loop usually means a PR that
+CI confirms. Two things can make a local run differ: CI feeds reviewers the PR's
 description and discussion that a default local run lacks, and a local run also merges
 in any personal reviewers from your user-level registry, which CI never sees (see
 [Authoring reviewers](./authoring-reviewers.md#user-level-reviewers)). This chapter
@@ -27,8 +27,13 @@ bastion review --base main
 ```
 
 `bastion review` computes the changeset (working tree vs. `--base`, including
-uncommitted and untracked files), selects the reviewers whose triggers match, runs
-them in parallel with per-reviewer timeouts, and renders progress and verdicts.
+uncommitted and untracked files), selects the reviewers whose triggers match, and
+renders progress and verdicts. A purely local review always executes every matched
+reviewer, in parallel with per-reviewer timeouts. A CI review (`--repo`/`--pr`)
+against a repository with `attestations: true` first checks for a verified
+attestation covering the run: a reviewer the attestation covers replays its recorded
+verdict, with no backend dispatch and no timeout; everything else executes as usual
+(see [Attestation](../developer-guide/attestation.md)).
 
 - `--base <branch>`: the branch to diff against. Defaults to `main`.
 - `--format <human|jsonl>`: output format. Defaults to `human`.
@@ -80,10 +85,12 @@ The event types:
 
 | Event | Meaning |
 | --- | --- |
-| `run.started` | The run began; lists the reviewers that matched and will run. |
-| `reviewer.started` | One reviewer was dispatched. |
-| `reviewer.resolved` | One reviewer finished; carries its `verdict`, `summary`, `findings`, `usage`, and a `has_transcript` flag. |
+| `run.started` | The run began; lists the reviewers that matched. Each either executes or replays from a verified attestation. |
+| `reviewer.started` | One reviewer began: dispatched to its backend, or, for a reviewer covered by a verified attestation, reconstructed from the bundle with no backend dispatched. |
+| `reviewer.resolved` | One reviewer finished; carries its `verdict`, `summary`, `findings`, `usage`, and a `has_transcript` flag. Carries `replayed: true` when the verdict came from a verified attestation instead of a fresh execution. |
 | `run.completed` | The aggregate decision and the gate tally, plus the run's wall-clock `duration_ms` and the usage totals (`tokens_in`, `tokens_out`, `cache_read`, `cost_usd`) summed across reviewers. |
+| `run.attested` | A signed local run was replayed; carries the replayed `reviewers`, the attesting `public_key`, and `attested_at`. |
+| `run.attestation-fallback` | Attestation was attempted but not honored; carries the `reason` (a missing note, an unregistered key, a stale binding, and so on). |
 
 How an agent should consume it:
 
@@ -238,6 +245,63 @@ reaches a containerized one only if you write its literal value into that review
 `env`, and a containerized
 reviewer typically reaches a host service over the container network rather than
 `localhost`.
+
+## Attesting a run for CI
+
+Every reviewer is an agent invocation, so a project running Bastion both locally
+and in CI pays for each review roughly twice: once in your loop, once again when
+CI confirms it. If your repository has set `attestations: true` in its registry
+(see [Continuous integration](./continuous-integration.md#attesting-a-run-so-ci-can-replay-it)),
+you can sign your last green local run so CI reuses it instead of re-running
+every reviewer:
+
+```sh
+git commit -am "final change"   # attest needs a review over committed content
+bastion review --base main      # ends green
+bastion attest                  # signs the run that just finished
+git push origin refs/notes/bastion
+```
+
+`bastion attest [RUN]` takes an optional run id positional; omit it and it signs
+the latest recorded run, which is what you want right after `bastion review`.
+Pass one explicitly (`bastion attest r-0f3a`) to attest an older run instead.
+
+The review has to run over committed content for this to work. To use attestation,
+commit your final change, then run `bastion review`, then `bastion attest`. A review
+over a dirty working tree (uncommitted tracked changes or untracked files) still
+runs and seals, but the seal records that the tree was dirty, and `bastion attest`
+refuses that run outright and tells you to commit the final content, re-run the
+review, and attest that run instead. `bastion attest` also refuses a run recorded
+while any backend or container override was set (`BASTION_CLAUDE_BIN`,
+`BASTION_CODEX_BIN`, `BASTION_PI_BIN`, `BASTION_CONTAINER_ENGINE`): such a run
+exercised a stubbed reviewer, not a real review, so it cannot be attested either.
+Re-run `bastion review` without those variables set, then attest that run.
+
+`bastion attest` also re-checks that your repository has not moved on since a
+clean review (the same tree, the same diff, the same effective reviewer config) and
+refuses to sign if it has, so the note can never claim the reviewers saw
+something they did not. It signs with your SSH key (`git config
+user.signingkey`, or `--key <path>` to name one explicitly), prompting for a
+hardware token or keychain if your key requires it, and prints the exact push
+command. The signed bundle carries the repository reviewers' actual verdicts
+and findings, not just a pass/fail flag, so a repository reviewer that blocked
+locally still blocks in CI when its verdict replays. Your personal user-level
+reviewers are excluded from the bundle (they never gate anyone else's PR), so
+a run blocked only by a personal reviewer still attests, and CI sees only the
+repository reviewers' results.
+
+Push the printed command (or fold it into your normal `git push`) before
+opening the PR, so CI has the note when it runs. CI verifies the signature
+against the SSH signing keys you have registered with GitHub, so this only
+works for a key you have added there; a key freshly generated on the machine
+you are pushing from, with nothing registered, never verifies.
+
+Whether to use a plain key file or a presence-gated one (a hardware token or an
+OS keychain entry that prompts you per signature) is your call to make. A plain
+file key means an agent running on your machine could sign an attestation
+without you noticing, the same trust you already extend to that machine
+through your commit access. See [Attestation](https://github.com/jssblck/bastion/blob/main/docs/developer-guide/attestation.md)
+for the full trust model.
 
 ## The same surface in CI
 

@@ -25,7 +25,7 @@ Bastion runs as a GitHub Actions workflow triggered on pull request events: `ope
 1. Computes the changed file set for the PR.
 2. Routes: selects the reviewers whose `trigger` globs match the changed files.
 3. Gathers the PR's [review context](./design.md#review-context): `bastion review --repo OWNER/NAME --pr N` reads the PR description and discussion over the REST seam ([`src/github/context.rs`](../../src/github/context.rs)) and hands the reviewers that context alongside their prior findings. Best effort: if the API call fails, the review proceeds on the local context (commit messages and prior findings) alone.
-4. Runs each selected reviewer through its backend, in parallel, with per-reviewer timeouts (see the core design's _Aggregation & the merge gate_).
+4. Runs each selected reviewer, in parallel, with per-reviewer timeouts (see the core design's _Aggregation & the merge gate_). A reviewer covered by a verified attestation is reconstructed from the attested bundle without dispatching its backend; every other selected reviewer executes through its backend fresh. See [Verification and replay](#verification-and-replay).
 5. Reports each verdict back to the PR.
 
 Native reviewers run directly on the Actions runner. A reviewer that declares a container `runner` and `capabilities.network: true` runs its backend inside that container on the Actions runner (the engine is already present on GitHub-hosted runners); see [Containers](./containers.md). None of routing or aggregation is GitHub-specific; only the steps that read the PR and write results go through the adapter.
@@ -53,6 +53,31 @@ The sticky comment is the surface the implementing agent is meant to read. A rev
 `bastion github report` reads the run that `bastion review` persisted and renders the recorded outcome: the aggregate `bastion` check carries the recorded `run.completed` verdict (a recorded pass goes green, a recorded block fails, and a run that never completed reads as an incomplete failure). It trusts that recorded run because the runner already decided it: the runner fails a gate closed at write time and clamps advisors to a pass, so the report does not re-derive the merge gate. The one boundary it still checks is gate-verdict consistency. A gate row recorded as a pass that nonetheless carries a blocking finding contradicts itself, so the report fails it closed rather than publishing a green check; the backends already reject such a verdict upstream, so this is a boundary safeguard, not a recomputation of the gate.
 
 The comment also folds in a **skills-freshness advisory** when the checked-out repo's bundled agent skills (`.claude/skills` and `.agents/skills`) are missing or have drifted from the reporting binary's embedded copy. It renders as a GitHub `> [!WARNING]` callout just under the headline, naming each affected file and pointing at `bastion skills install` (or `--force` when a file has drifted). The report computes it by running the same check `bastion skills check` does against the working tree, so it reflects what an agent would actually load. The advisory never touches a check-run conclusion, so a stale skill nudges the maintainer to refresh without failing the gate (advisories fail open). The local surface mirrors it, printing the same notice to stderr so the driving agent sees it, but only when the repository has adopted Bastion (a repo-level reviewer registry is present). `github_report` calls `stale_skills_warning` unconditionally, while the local `warn_on_stale_skills` routes through `local_skills_warning`, which stays silent when no repo registry is found, so a local review running on the author's user-level reviewers alone does not nudge about skills. CI always has a repo registry, so the report path is unaffected.
+
+## Verification and replay
+
+A repository can opt in (`attestations: true` in its registry) to let CI reuse a signed local run instead of re-executing every reviewer; see [Attestation](./attestation.md) for the full design. On the GitHub adapter this happens inside `bastion review` itself, before the runner fans reviewers out, so it is invisible as a separate step, only as which reviewers end up replayed versus executed.
+
+**Dirty-checkout fallback.** Before any note lookup, `bastion review` checks whether the CI working tree is dirty (uncommitted tracked changes or untracked files). A dirty checkout skips note lookup entirely: it records a `run.attestation-fallback` event with the reason and executes every reviewer fresh, since a dirty tree's reviewers see content no attestation's committed bindings name.
+
+**Fetching the note.** Given a clean checkout, `git notes` are not part of an ordinary checkout, so `bastion review` looks for the note under `refs/notes/bastion` on HEAD first, then falls back to the PR's head SHA (from the gathered GitHub context) when HEAD carries none; CI's checkout can be a merge commit, and the note the author actually attested hangs off their own head commit. Both lookups need the notes ref fetched locally first (see [the two workflow requirements](#the-two-workflow-requirements) below).
+
+**Signature verification.** Given a note, the adapter resolves the PR author's login and fetches their registered SSH signing keys (`GET /users/{username}/ssh_signing_keys`, over the same REST seam `client.rs` already provides) and runs `ssh-keygen -Y verify` against them in the `bastion` namespace. A signature by any other key, including one freshly minted on the author's machine, fails verification.
+
+**Seal verification and binding checks.** The adapter verifies the run seal with its own embedded secret (the same secret every binary of that release shares), then re-derives its own bindings from the checkout (HEAD's tree, the merge base's tree, the diff's patch-id, and the effective config hash) and compares them against what the bundle recorded. Any mismatch, or a seal that shows a test seam was active during the local run, falls back to a full run rather than partially trusting the bundle.
+
+**Per-reviewer replay or execute.** Verification and binding checks pass or fail for the bundle as a whole, but replay is decided per routed reviewer. CI replays covered reviewers that have not opted out; missing or opted-out reviewers execute fresh. A replayed verdict carries the same fail-closed policy a fresh one would, so a replayed block still blocks the gate.
+
+**Reporting.** The merged result (replayed and freshly executed reviewers together) flows through the normal report path, with two additions. The sticky comment opens with a `[!NOTE]` callout naming which reviewers replayed, the attesting key, and when it was signed, right alongside the skills-drift `[!WARNING]` block. Each replayed reviewer's check-run summary adds a line stating its verdict was replayed rather than executed. When attestation was attempted but not honored, the comment instead carries a line naming why (a missing note, an unregistered key, a seal mismatch, a stale binding), taken from the run's `run.attestation-fallback` event.
+
+### The two workflow requirements
+
+Honoring an attestation needs two small additions to an ordinary `bastion` workflow, both already present in this repository's own [`bastion.yml`](../../.github/workflows/bastion.yml):
+
+- **Check out the PR head, not the merge commit.** `actions/checkout`'s default `pull_request` behavior checks out a synthetic merge commit, whose tree never matches the head tree an author attested. Set `ref: ${{ github.event.pull_request.head.sha }}` so CI's HEAD is the commit the note is actually attached to.
+- **Fetch the notes ref.** `actions/checkout` does not fetch notes by default, so add `git fetch origin +refs/notes/bastion:refs/notes/bastion`, tolerant of the ref being absent (most PRs will not carry a note; that is the ordinary case, not an error).
+
+If a repository skips either step or has not set `attestations: true`, every reviewer executes fresh.
 
 ### The aggregate check
 
