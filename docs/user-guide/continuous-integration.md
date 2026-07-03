@@ -162,8 +162,11 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         # Non-zero exit on a blocked gate fails the job; that is the merge gate.
         # --repo/--pr feed the reviewers the PR's stated intent and discussion alongside
-        # the diff. Cross-run prior-findings memory needs the run store persisted between
-        # runs (upload and restore .bastion/runs); a fresh runner starts without it.
+        # the diff. Persisting the run store between runs (upload and restore
+        # .bastion/runs) buys two things a fresh runner would lose: cross-run
+        # prior-findings memory, and incremental carry, where an unchanged reviewer
+        # reuses its prior pass instead of re-executing. Keep the backend on PATH with no
+        # BASTION_*_BIN override, so the run seals clean and stays carry-eligible.
         run: |
           bastion review --base "origin/${{ github.base_ref }}" \
             --repo "${{ github.repository }}" \

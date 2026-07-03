@@ -61,15 +61,19 @@ pub struct ReviewOptions {
 /// always-present `bastion` check in CI). Returns the aggregate [`Decision`] so
 /// the caller can map `block` to a non-zero exit status.
 ///
-/// A purely local run also plans *carry* ([`crate::carry`]): a reviewer whose
-/// prior run on this branch passed, and whose trigger-scoped diff digest is
-/// unchanged, folds that pass forward instead of executing, so a fix-and-re-review
-/// loop re-runs only the reviewers whose scoped content actually changed.
-/// `--fresh` disables it; an explicit `--reviewer` selection also executes its
-/// reviewers fresh (asking for a reviewer by name means asking for it to run).
-/// A CI run (a GitHub source present) never carries: its skip mechanism is
-/// signature-verified attestation replay, which an unsigned restored run store
-/// must not be able to bypass.
+/// A run also plans *carry* ([`crate::carry`]): a reviewer whose prior run on this
+/// branch passed, and whose trigger-scoped diff digest is unchanged, folds that
+/// pass forward instead of executing, so a fix-and-re-review loop re-runs only the
+/// reviewers whose scoped content actually changed. This holds on both surfaces. A
+/// CI run carries from its own branch's previous CI run the same way a local run
+/// does: the run seal (verified under this binary's embedded secret) plus the
+/// content-binding digest already prove the carried verdict is a real review of
+/// exactly this content, which is all carry's soundness needs. Carry and
+/// attestation replay are complementary rather than alternatives: replay reuses the
+/// *author's* signed local run (crossing from their machine into CI), carry reuses
+/// CI's *own* prior run. `--fresh` disables carry; an explicit `--reviewer`
+/// selection also executes its reviewers fresh (asking for a reviewer by name means
+/// asking for it to run).
 ///
 /// The runner owns event emission for the per-reviewer and completion events and
 /// persists the full run; this handler renders the `run.started` event and the
@@ -337,12 +341,18 @@ pub async fn review(
         }
     }
 
-    // Carry prior passes forward ([`crate::carry`]): purely local runs only
-    // (CI's skip mechanism is signature-verified attestation replay, which an
-    // unsigned restored run store must not bypass), only for the full triggered
-    // set (an explicit `--reviewer` selection asks for those reviewers to run),
-    // and only unless `--fresh` opted out.
-    let carried = if github.is_none() && !fresh && only.is_empty() {
+    // Carry prior passes forward ([`crate::carry`]): both locally and in CI, a
+    // reviewer whose prior run on this branch passed and whose trigger-scoped
+    // digest is unchanged folds that pass forward instead of executing. A
+    // repository reviewer carries only from a prior run whose seal verifies (under
+    // this binary's embedded secret) and records no test seam, so a restored CI run
+    // store cannot smuggle in a fabricated pass: the seal proves the prior run was a
+    // real review by this release, and the digest binds the content that verdict
+    // judged. A reviewer already replayed from an attestation above is not a carry
+    // candidate (it is no longer in `matched`). Carry runs only for the full
+    // triggered set (an explicit `--reviewer` selection asks for those reviewers to
+    // run) and only unless `--fresh` opted out.
+    let carried = if !fresh && only.is_empty() {
         let candidates: Vec<(&crate::reviewer::Reviewer, String)> = matched
             .iter()
             .filter_map(|r| {

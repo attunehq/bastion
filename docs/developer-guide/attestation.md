@@ -226,9 +226,13 @@ equality is the binary's proof that the carried verdict still describes the
 content now under seal. Attesting a run with carried verdicts is therefore the
 author vouching for the same thing they always vouch for: a chain of
 binary-verified local runs over exactly this content. A user-level reviewer
-needs no such chain (it is never sealed and never gates anyone else's PR), and
-CI itself never carries, so no unsigned run store can reach the replay path
-through carry.
+needs no such chain (it is never sealed and never gates anyone else's PR). CI
+carries as well, from its own prior CI run: a repository reviewer carries only
+from a prior CI run whose seal verifies, and that carried verdict folds into the
+new CI run's seal the same way. This does not weaken attestation, because CI
+never runs `bastion attest`: a carried CI verdict is reused within CI, never
+signed into a bundle, so the only run store that reaches the replay path is still
+the author's own signed one.
 
 ## The `bastion attest` flow
 

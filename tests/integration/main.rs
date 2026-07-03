@@ -348,6 +348,114 @@ fn selecting_every_reviewer_is_full_and_a_selection_never_carries() {
     assert_eq!(gates.total, 2);
 }
 
+/// The incremental loop works in CI too: a second CI review (`--repo`/`--pr`) of the
+/// same branch carries a *repository* reviewer's prior pass forward when its
+/// trigger-scoped diff is unchanged, exactly as a local re-run does, and re-executes
+/// once that content changes. Carry is sound on the CI surface because the prior
+/// run's seal verifies and the digest binds the content, not because of where the run
+/// happened.
+///
+/// This drives the backend as `codex` on `PATH` with no override (the real dogfood
+/// configuration), so the prior run seals seam-free and its repository reviewer is
+/// carry-eligible. The rest of the suite sets the `BASTION_*_BIN` seams, which is
+/// exactly why those runs cannot carry a repository reviewer; here the seam-free seal
+/// is asserted so the carry below cannot silently pass on a technicality.
+#[test]
+fn ci_carries_an_unchanged_repo_pass_from_the_prior_ci_run() {
+    let Some(fake) = tooling() else { return };
+
+    let repo = TestRepo::new(&registry(&[
+        Reviewer::new("ci-gate", "codex", "gate").behavior("pass")
+    ]));
+    let source = ("acme/app", "1");
+
+    // First CI run: the reviewer executes for real, and (backend on PATH, no
+    // override) its run seals seam-free, so the pass is carry-eligible.
+    let github = FakeGitHub::start();
+    let first = repo.review_ci_backend_on_path(
+        fake,
+        "main",
+        source.0,
+        source.1,
+        &[
+            ("GITHUB_API_URL", github.url.as_str()),
+            ("GITHUB_TOKEN", "ghs-fake-token"),
+        ],
+    );
+    github.finish();
+    assert!(first.exited_zero(), "stderr:\n{}", first.stderr);
+    assert!(
+        !first.carried("ci-gate"),
+        "the first run has no prior run to carry from"
+    );
+
+    // The seal really did record seams: false; otherwise the carry below could never
+    // fire, and this test would be asserting nothing.
+    let layout = repo.layout();
+    let run_id = store::list_runs(&layout).unwrap()[0].run.clone();
+    let seal_json = std::fs::read_to_string(layout.seal(&run_id)).expect("the first run sealed");
+    let seal: serde_json::Value = serde_json::from_str(&seal_json).unwrap();
+    assert_eq!(
+        seal["seams"],
+        serde_json::json!(false),
+        "a CI run with the backend on PATH must seal seam-free; seal: {seal_json}"
+    );
+
+    // Second CI run, nothing changed: the repository reviewer carries its pass with no
+    // backend dispatch, still counting in the gate tally.
+    let github = FakeGitHub::start();
+    let second = repo.review_ci_backend_on_path(
+        fake,
+        "main",
+        source.0,
+        source.1,
+        &[
+            ("GITHUB_API_URL", github.url.as_str()),
+            ("GITHUB_TOKEN", "ghs-fake-token"),
+        ],
+    );
+    github.finish();
+    assert!(second.exited_zero(), "stderr:\n{}", second.stderr);
+    assert!(
+        second.carried("ci-gate"),
+        "an unchanged repo reviewer must carry in CI; stderr:\n{}",
+        second.stderr
+    );
+    let (_, _, _, usage) = second.resolved("ci-gate");
+    assert_eq!(usage, None, "a carried verdict spends no tokens");
+    let (aggregate, gates, _cost) = second.completed();
+    assert_eq!(aggregate, Decision::Pass);
+    assert_eq!(gates.total, 1, "a carried gate still counts in the tally");
+    assert!(
+        !second.partial(),
+        "carry is full coverage, not a partial run"
+    );
+
+    // Editing the scoped content invalidates the carry: the reviewer runs fresh.
+    std::fs::write(
+        repo.path().join("src/extra.rs"),
+        "pub fn extra() {}\npub fn more() {}\n",
+    )
+    .unwrap();
+    let github = FakeGitHub::start();
+    let third = repo.review_ci_backend_on_path(
+        fake,
+        "main",
+        source.0,
+        source.1,
+        &[
+            ("GITHUB_API_URL", github.url.as_str()),
+            ("GITHUB_TOKEN", "ghs-fake-token"),
+        ],
+    );
+    github.finish();
+    assert!(third.exited_zero(), "stderr:\n{}", third.stderr);
+    assert!(
+        !third.carried("ci-gate"),
+        "an edited scoped file must re-execute the reviewer in CI"
+    );
+}
+
 /// Model and effort reach each backend's argv end to end, resolved through the real
 /// binary: an explicit per-reviewer value, a value inherited from the registry
 /// `defaults` block, the Claude selectors, the Codex ones, and Pi's

@@ -101,7 +101,7 @@ Following one review top to bottom touches most of the crate:
     that has not opted out replays; everything else executes fresh in the next
     step. Every failure degrades to a full run for the affected reviewers; a
     purely local review skips this step entirely. See [Attestation](./attestation.md).
-5b. **Plan carry** (`carry.rs`, purely local runs only). Every reviewer about to run
+5b. **Plan carry** (`carry.rs`, both surfaces). Every reviewer about to run
     gets, best effort, a trigger-scoped diff digest (a digest that fails to
     compute leaves that reviewer executing fresh and uncarryable): its own effective definition, the merge-base
     commit, the diffs of the changed files its trigger matched against both the
@@ -117,9 +117,11 @@ Following one review top to bottom touches most of the crate:
     identical digest is *carried*: its verdict folds into the run without a
     backend executing. A repository reviewer carries only from a prior run whose
     seal verifies (and records no test seam); `--fresh` disables carry, and an
-    explicit `--reviewer` selection executes its reviewers fresh. A run with a
-    GitHub source never carries: CI's skip mechanism is attestation replay, which is
-    signature-verified. See
+    explicit `--reviewer` selection executes its reviewers fresh. A CI run carries
+    from its own prior CI run the same way, since that seal verifies under the
+    release secret and the digest binds the content; carry and attestation replay
+    stay complementary (replay reuses the author's signed local run, carry reuses
+    CI's own prior run). See
     [the local surface](./local-surface.md#incremental-re-review).
 6. **Run** (`runner.rs`). `execute` spawns every matched reviewer that is neither
    replaying nor carrying onto a `JoinSet`, bounds each by its `timeout` (default

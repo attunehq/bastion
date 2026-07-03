@@ -106,8 +106,8 @@ Bastion runs the matched reviewers in parallel (they have wildly different
 latencies, one might take 90 seconds, another 15 minutes) and **aggregates** their
 verdicts into a single decision. Not every matched reviewer executes every time:
 in CI a reviewer covered by a verified attestation replays its recorded verdict,
-and on a local re-run a reviewer whose prior pass is unchanged carries it forward;
-both still count in the aggregate:
+and on a re-run (local or in CI) a reviewer whose prior pass is unchanged carries it
+forward; both still count in the aggregate:
 
 - **All gates must pass.** The aggregate is `pass` only when every gate returned a
   clean `pass`.
@@ -171,9 +171,9 @@ which is forwarded in alongside the credentials.
    route: select reviewers whose trigger globs match
         |
         v
-   run matched reviewers in parallel; on the CI surface a reviewer may instead
-   replay from a verified attestation, and on a local re-run an unchanged prior
-   pass may carry forward, both with no backend dispatch (each executed reviewer
+   run matched reviewers in parallel; a reviewer may instead replay from a verified
+   attestation (CI), or carry an unchanged prior pass forward from the branch's
+   previous run (local or CI), both with no backend dispatch (each executed reviewer
    is timeout-bounded)
         |
         v

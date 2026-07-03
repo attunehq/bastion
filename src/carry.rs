@@ -17,21 +17,31 @@
 //! files outside its trigger should widen its trigger; that is the same
 //! contract routing itself enforces.
 //!
-//! Carry has two hard limits:
+//! Carry runs on both surfaces, local and CI: a re-review reuses its own prior
+//! run's work instead of paying to re-execute a reviewer whose scoped content did
+//! not move. What keeps that sound is not where the run happened but two guards on
+//! the prior verdict:
 //!
-//! - **Local only.** In CI the run store arrives as a restored artifact, and a
-//!   seal is only tamper *evidence* (the HMAC secret ships inside the public
-//!   binary), not proof of origin. The CI-side skip mechanism is attestation
-//!   replay (`docs/developer-guide/attestation.md`), which demands the author's
-//!   SSH signature; carry never applies to a run with a GitHub source, so it can
-//!   never bypass that. The caller (`commands::review`) enforces this.
 //! - **A repository reviewer only carries from a sealed, verified run.** The
-//!   carried verdict flows into the new run's seal and from there into anything
-//!   the author later attests, so every link in that chain must have been
-//!   binary-verified: an unsealed prior run, a seal that does not verify, or a
-//!   seal recording an active test seam disqualifies carry for every repository
-//!   reviewer. A user-level reviewer (never sealed, never gating anyone else's
-//!   PR) carries on the digest alone.
+//!   carried verdict flows into the new run's seal, and (locally) from there into
+//!   anything the author later attests, so every link must be binary-verified. An
+//!   unsealed prior run, a seal that does not verify under this binary's embedded
+//!   secret, or a seal recording an active test seam disqualifies carry for every
+//!   repository reviewer. A user-level reviewer (never sealed, never gating anyone
+//!   else's PR) carries on the digest alone.
+//! - **The digest binds the content the verdict judged** ([`scope_digest`]), so a
+//!   carried pass provably still describes the tree now under review.
+//!
+//! Those two are exactly the bar the threat model sets: a real review of this
+//! content by this release, not a fabricated one. That is why CI carries from its
+//! own prior CI run just as a developer's loop carries from the last local run. In
+//! CI the store arrives as a restored artifact, but a restored store cannot pass
+//! off a fabricated verdict: the seal is verified before any repository reviewer is
+//! carried, and forging one means extracting the embedded secret, the deliberate
+//! malice the threat model already excludes. Carry and attestation replay stay
+//! complementary: replay imports the *author's* signed local run across the machine
+//! boundary (which is why it needs the SSH signature), while carry reuses a run
+//! that already ran on the same surface.
 //!
 //! Blocks are never carried: a blocked reviewer whose scoped diff is unchanged
 //! still re-runs, because the surrounding context (intent, discussion, prior

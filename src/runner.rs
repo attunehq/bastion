@@ -4,8 +4,8 @@
 //! `timeout`, aggregates the results per the merge gate in `docs/developer-guide/design.md`, and
 //! emits the full [`RunEvent`] stream. Not every matched reviewer dispatches a
 //! backend: a reviewer covered by a verified attestation replays its recorded
-//! verdict, and a local re-run can carry an unchanged prior pass forward; both
-//! fold into the same tally and stream. It owns event emission and persistence so
+//! verdict, and a re-run can carry an unchanged prior pass forward (locally, or in
+//! CI from its own prior CI run); both fold into the same tally and stream. It owns event emission and persistence so
 //! [`crate::commands::review`] only has to render the stream and map the aggregate
 //! verdict to an exit status.
 //!
@@ -139,8 +139,9 @@ pub struct ExecContext {
     /// Reviewers carrying their verdict forward from the branch's previous run
     /// because their trigger-scoped diff is unchanged ([`crate::carry`]), keyed
     /// by name. Like `replayed`, these fold into the tally and the persisted
-    /// stream without being handed to the backend `JoinSet`. Populated only by
-    /// a purely local review; disjoint from both `replayed` and the fresh set.
+    /// stream without being handed to the backend `JoinSet`. Populated on either
+    /// surface (a CI run carries from its own prior CI run just as a local run
+    /// does); disjoint from both `replayed` and the fresh set.
     pub carried: std::collections::BTreeMap<String, crate::carry::Carried>,
     /// The current scope digest for each reviewer executing fresh this run,
     /// keyed by name, stamped onto its `reviewer.resolved` event so a later run
