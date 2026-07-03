@@ -20,7 +20,7 @@
 //! ship both halves in the same artifact and add nothing a shared secret does not
 //! already provide.
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
