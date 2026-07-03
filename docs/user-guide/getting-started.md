@@ -85,8 +85,13 @@ release, downloads the archive built for your platform, verifies its SHA-256
 against the release checksums, and swaps it over the running binary, no shell or
 `curl` needed. It installs the same bits as the install scripts, so a self-update
 and a fresh install converge. `bastion update --check` reports whether a newer
-release exists without installing it, and `bastion update --force` reinstalls the
-latest release even when the running version is already current.
+release exists without installing it: it exits 0 whenever the release lookup
+succeeds (including when an update is available, or when the running binary is a
+development build), and non-zero only when the check itself fails, such as when
+the network is unreachable. So `--check` is a status report, not a pass/fail gate;
+script against its printed output rather than its exit code. `bastion update
+--force` reinstalls the latest release even when the running version is already
+current.
 
 Bastion also prints a notice on stderr when a release build detects that a newer
 version is available: a line naming the available version, followed by the
