@@ -12,7 +12,7 @@ gate. The human sits at the policy layer, authoring and governing reviewers.
 
 **This crate is past the walking-skeleton stage but still partial.** The data and
 routing layers are real and tested; the parallel, timeout-bounded runner
-(`src/runner.rs`) and all three agent backends (Claude Code, Codex, and Pi, under
+(`src/runner/`) and all three agent backends (Claude Code, Codex, and Pi, under
 `src/backend/`) are implemented and execute reviewers for real over an injectable
 subprocess seam. Keep that boundary honest: a backend that cannot produce a valid
 verdict returns an error, never a fabricated pass, and gates fail closed on it.
@@ -26,48 +26,32 @@ safe for CI to trust this?" The authoritative statement is
 working summary:
 
 Bastion is not an adversarial security boundary. It is the agent-era equivalent of
-team code review for aligned contributors. It is built to be robust against
-*inadvertent* gaming and erosion, not against a deliberately malicious actor, and
-the bar is reasonable reduction proportionate to effort: a speed bump and good
-defaults that keep aligned agents on the rails, not a proof that gaming is
-impossible.
-
-The concrete consequence: the run seal (`src/seal.rs`) is an HMAC keyed by a secret
-embedded in a public binary, so it is tamper *evidence*, not proof of origin. An actor who extracts that secret and forges
-a seal produces a record CI cannot distinguish from a real one, and that act is the
-deliberate malice the threat model already excludes. So the bar a reused verdict
+team code review for aligned contributors, built to be robust against *inadvertent*
+gaming and erosion, not a deliberately malicious actor. The bar a reused verdict
 must clear is "a real review of this content by this release, not one the agent
-fabricated," never "prove a human demonstrably signed off." The seal plus a
-content-binding digest meets the first bar, and nothing here needs to meet the
-second.
+fabricated," never "prove a human demonstrably signed off." The seal
+(`src/seal.rs`) is an HMAC keyed by a secret embedded in a public binary, so it is
+tamper *evidence*, not proof of origin; forging one means extracting that secret,
+which is the deliberate malice the threat model already excludes.
 
-What each mechanism's extra machinery is actually for:
-
-- The **seal** catches inadvertent run-store edits, stale-run replay, and reviewer
-  stubbing. That is enough to reuse a prior run *within a surface*, which is why
-  carry (`src/carry.rs`) reuses CI's own prior CI run on the seal alone, with no
-  signature.
-- Attestation's **SSH signature** (`src/attest/`) is needed only because
-  attestation imports a run produced on the *author's own machine* across the
-  local-to-CI boundary. The signature ties that run to a forge account CI already
-  trusts to merge, and adds a presence speed bump against the coding agent silently
-  attesting its own work. It is not evidence that a human attested: keys sit
-  unlocked on dev machines, so it is a speed bump, not a wall. Do not lean on it as
-  more than that.
+That is why the two reuse paths need different machinery. Carry (`src/carry.rs`)
+reuses a run from the *same surface*, so the seal plus a content-binding digest is
+enough (no signature). Attestation (`src/attest/`) imports the *author's* run
+across the local-to-CI boundary, so it adds an SSH signature tying that run to a
+forge account CI already trusts. The signature is a presence speed bump, not
+evidence a human attested: keys sit unlocked on dev machines.
 
 Guidance that follows, so we stop re-deriving it:
 
-- Do not design against deliberate malice (extracting the embedded secret, forging a
-  store, hand-editing a run). It is out of scope, and for the seal it is already
+- Do not design against deliberate malice (extracting the embedded secret, forging
+  a store, hand-editing a run). It is out of scope, and for the seal it is already
   possible, so contorting a design to prevent it buys nothing and costs clarity.
 - Do not promote a proportionate speed bump into a guarantee it does not provide.
   "The agent did not literally fabricate this review" is the standard; "a human was
   demonstrably in the loop" is not, and chasing the latter fights the whole point of
-  Bastion, which is to take the human out of the per-change review loop while keeping
-  proportionate guardrails on agents.
+  Bastion.
 - The one hard line that holds regardless: gates fail closed, advisors fail open. A
-  gate that cannot produce a valid verdict blocks, never a silent pass. None of the
-  above softens that.
+  gate that cannot produce a valid verdict blocks, never a silent pass.
 
 ## Source of truth
 
@@ -126,243 +110,108 @@ bastion update
 bastion update --check
 ```
 
+Targeted checks when relevant:
+
+- Versioning changes: run `bastion --version`.
+- Schema changes: update `.bastion.yaml` and the docs under `docs/`.
+- Public scaffolding changes: keep `README.md`, `CONTRIBUTING.md`, `SECURITY.md`,
+  `NOTICE`, and the GitHub workflows in sync.
+- Rule changes: validate `.nudge.yaml` with `nudge validate`, then confirm
+  `nudge check` is clean. `nudge` enforces the mechanical conventions in
+  `.nudge.yaml` (today: no Unicode dashes in authored text) as a CI gate and an
+  agent-time hook; the `prose-anti-slop` gate in `.bastion.yaml` covers the
+  prose-voice judgment a regex cannot.
+
 ## Architecture map
 
-For the full module map and the life of a `bastion review`, see
-[`docs/developer-guide/architecture.md`](docs/developer-guide/architecture.md); the
-backend boundary is covered in
-[`docs/developer-guide/backends.md`](docs/developer-guide/backends.md). The terse
-version:
+The full module map and the life of a `bastion review` live in
+[`architecture.md`](docs/developer-guide/architecture.md); the backend boundary in
+[`backends.md`](docs/developer-guide/backends.md), the GitHub adapter in
+[`github-adapter.md`](docs/developer-guide/github-adapter.md), and the seal and
+attestation in [`attestation.md`](docs/developer-guide/attestation.md). This is the
+file-to-purpose map at a glance; go to those docs before duplicating their prose
+here.
 
-- `build.rs`: derives `BASTION_VERSION` from `git describe --always --tags
-  --dirty=-dirty`, with a `BASTION_VERSION` env override and a `Cargo.toml`
-  fallback; bakes the rustc target triple as `BASTION_TARGET` (so `bastion
-  update` names the release asset it was built from); also resolves the run-seal
-  secret (`BASTION_SEAL_SECRET` env override, else a generated secret cached
-  under `OUT_DIR`) that `src/seal.rs` embeds at build time.
-- `src/main.rs`: thin binary entrypoint; wires the tokio runtime to
-  `bastion::run`.
-- `src/lib.rs`: library root; installs `color_eyre` + `tracing` and dispatches.
-- `src/version.rs`: exposes the build-derived version string.
-- `src/cli.rs`: clap derive command tree and dispatch.
-- `src/commands.rs`: one handler per subcommand.
-- `src/reviewer.rs` / `src/config.rs`: the declarative reviewer schema and
-  registry loading/discovery. Discovery walks up for a repository `.bastion.yaml`
-  and merges in a user-level one from the platform config dir (`user_config_dir`,
-  overridable with `BASTION_CONFIG_DIR`), so a personal reviewer runs locally even
-  when a repo has not adopted Bastion. The merge is a set keyed by name: an
-  identical reviewer in both files is deduplicated (compared by effective config
-  after each file's `defaults` are applied), and a same-name-different-config
-  collision keeps both with the repo side scoped to `REPO_SCOPE_PREFIX` (`repo:`);
-  the colon is mapped to a portable run-store path component in `paths.rs`.
+- `build.rs`: derives `BASTION_VERSION` (from `git describe`, overridable) and bakes
+  the rustc target triple as `BASTION_TARGET` and the run-seal secret the binary
+  embeds.
+- `src/main.rs` / `src/lib.rs` / `src/version.rs`: binary entrypoint, library root
+  (installs `color_eyre` + `tracing` and dispatches), and the build-derived version.
+- `src/cli.rs`: the clap command tree and dispatch.
+- `src/commands/`: one module per subcommand (`review`, `validate`, `read_back`,
+  `codeowners`, `attest`, `update`, `github_report`, `skills`); `mod.rs` re-exports
+  the CLI surface `cli.rs` calls.
+- `src/reviewer.rs` / `src/config.rs`: the declarative reviewer schema and registry
+  loading. Discovery walks up for a repository `.bastion.yaml` and merges in a
+  user-level one from the platform config dir (overridable with `BASTION_CONFIG_DIR`),
+  so a personal reviewer runs locally even against a repo that has not adopted
+  Bastion. The merge is a set keyed by name; a same-name collision keeps both with the
+  repo side scoped to `REPO_SCOPE_PREFIX` (`repo:`), whose colon `paths.rs` maps to a
+  portable run-store path component.
 - `src/routing.rs`: compiling trigger globs and matching changed files.
-- `src/verdict.rs` / `src/event.rs`: the structured verdict and run-event
-  schemas (the `Money` type carries cents but serializes as dollars).
+- `src/verdict.rs` / `src/event.rs`: the structured verdict and run-event schemas
+  (`Money` carries cents but serializes as dollars).
 - `src/context.rs`: the transport-neutral `ReviewContext` a reviewer sees beyond the
-  diff: the author's stated intent, the surrounding discussion (`ContextComment` with a
-  generic `Standing`), and a reviewer's prior findings (`PriorFinding`, keyed by a
-  content-derived `FindingId` that excludes line numbers so it survives drift). A
-  producer fills it; the backends consume it via `render_for`, which scopes prior
-  findings and routed replies to the owning reviewer. Everything in it is untrusted
-  input: `Standing` lets a reviewer weight a maintainer over an outsider but is read
-  only when rendering the prompt, never in gate logic, so no comment can flip a
-  decision. The local producer is `commands::review` (commit-message intent +
-  `store::prior_findings` recall); the GitHub producer is `src/github/context.rs`.
+  diff (author intent, discussion, prior findings). Everything in it is untrusted and
+  read only when rendering the prompt, never in gate logic. The local producer is
+  `commands::review`; the GitHub producer is `src/github/context.rs`.
 - `src/git.rs`: the git queries the CLI needs (changed files, branch, root,
-  `base..HEAD` commit messages for the local intent).
+  `base..HEAD` commit messages).
 - `src/paths.rs` / `src/store.rs`: the data-directory layout and run history
   (`store::prior_findings` recalls the last run's findings for a branch).
 - `src/render.rs`: human and JSONL output.
-- `src/runner.rs`: the parallel, timeout-bounded runner: fans matched reviewers
-  out over a `JoinSet`, fails closed on error/timeout, streams run events, folds
-  in replayed and carried verdicts, and persists each run, sealing an eligible
-  run on a best-effort basis at persist time (a partial run, one narrowed by
-  `bastion review --reviewer`, is never sealed).
-- `src/carry.rs`: incremental re-review, on both surfaces. Every reviewer
-  resolving to a real verdict is stamped, best effort, with a trigger-scoped
-  diff digest (`scope_digest`: its
-  effective definition, the merge-base commit, the diffs of the changed files its
-  trigger matched against both the merge base and the base tip, and the scoped
-  commit messages; the runner re-derives it post-execution, drops a fresh stamp
-  the tree no longer matches, and fails a carried one closed);
-  on a re-run of the same branch, a prior *pass* with an identical digest is
-  carried forward (`carried: true` on `reviewer.resolved`, no backend dispatch,
-  still counted in the gate tally) while blocks and changed-scope reviewers
-  execute fresh. A repository reviewer carries only from a prior run whose seal
-  verifies and records no test seam; `attestation: never` opts a reviewer out;
-  `--fresh` disables carry. CI carries the same way, from its own branch's
-  previous CI run (when the workflow persists and restores the run store): the
-  seal verifies under the release secret and the digest binds content, which is
-  the bar the threat model sets (see below), so a restored store cannot smuggle in
-  a fabricated pass. Do not re-litigate this as "CI must not carry an unsigned
-  store": carry is not attestation. Attestation replay imports the *author's*
-  signed local run across the machine boundary (hence the SSH signature); carry
-  reuses a run that already executed on the same surface, so the seal (tamper
-  evidence, not origin proof) plus the digest is all it needs, and CI never runs
-  `bastion attest`, so a carried CI verdict is never signed into a bundle. The
-  dogfood workflow keeps the backend on PATH with no `BASTION_*_BIN` override so
-  its runs seal seam-free and stay carry-eligible.
-- `src/seal.rs` / `src/attest/`: signed local-run attestation
-  (`docs/developer-guide/attestation.md`). `seal.rs` is the run seal: an
-  HMAC-SHA256 keyed by a secret embedded in the binary at build time, over a
-  canonical digest of the committed HEAD tree, the merge-base tree, the
-  `base..HEAD` patch-id, the effective config hash, whether a test seam was
-  active, whether the working tree was dirty (uncommitted tracked changes or
-  untracked files), and the sorted `reviewer.resolved` events; the runner
-  seals an eligible run on a best-effort basis and persists the seal to
-  `runs/<id>/seal.json` (the zero-match fast path persists without a seal, and
-  `seal_run` skips when the bindings it needs are absent or no repo reviewer
-  resolved). A dirty review still runs and still seals, but the seal records
-  `dirty: true`; `bastion attest` refuses to attest such a run.
-  `attest/` is split by concern: `mod.rs` is the `bastion attest` flow
-  (verifies the seal, re-derives the repository state, signs a bundle with the
-  author's SSH key, writes it as a git note under `refs/notes/bastion`),
-  `bundle.rs` the bundle and note envelope, `sign.rs` SSH signing and
-  signing-key resolution, and `replay.rs` the CI-side verify-and-replay
-  planner (`plan`, `AttestationOutcome`) plus note lookup, which
-  `commands::review` calls when the registry sets `attestations: true` and the
-  run carries a GitHub source, short-circuiting to a fallback (every reviewer
-  fresh, no note lookup) when the CI checkout is dirty.
-- `src/backend/`: the agent execution boundary. `mod.rs` defines the `Backend`
-  trait, the deterministic `MockBackend`, `dispatch`, and the shared prompt helpers
-  (including the fenced-YAML `SCHEMA_INSTRUCTION`/`extract_verdict` that the Codex
-  and Pi backends share); `command.rs` is the injectable `CommandRunner` subprocess
-  seam; `claude_code.rs`, `codex.rs`, and `pi.rs` are the three real backends, each
-  driven against a fake executable in tests. `container/` is the container runner,
-  split by concern (`plan.rs` resolves the `ExecutionPlan` and builds/resolves the
-  image, `runner.rs` is the `ContainerRunner` decorator and its env-file forwarding,
-  `credentials.rs` the provider-credential passthrough, `teardown.rs` the timeout
-  force-removal guard): `dispatch` resolves an `ExecutionPlan` (the single place an
-  unprovisioned capability tier fails closed), then a reviewer with a `runner` block
-  and `capabilities.network: true` runs its backend inside a built/named image via a
-  `ContainerRunner` decorator over
-  the `CommandRunner` seam (the backend code is untouched; the named container is
-  force-removed on a timeout). `network: true` grants a containerized reviewer general
-  (unscoped) egress; a container with the default `network: false` fails closed because
-  provider-only scoped egress is unbuilt, so a containerized reviewer must opt into
-  `network: true`. `mcp`/`skills` still fail closed. All three backends
-  (`claude-code`, `codex`, `pi`; `any` maps to Claude Code) are wired and execute
-  reviewers for real.
-- `src/github/`: the GitHub adapter (the CI surface). `codeowners.rs` generates
-  the governance block (pure text, no network); `client.rs` is the REST seam,
-  modeled on the backend's `CommandRunner`: a proof-carrying `ApiRequest`, a
-  `GitHubApi` trait, the real `reqwest`-backed `RestClient`, and a recording double
-  for tests; `signing.rs` fetches a user's registered SSH signing keys
-  (`GET /users/{username}/ssh_signing_keys`) over the same seam, for attestation
-  verification; `context.rs` is the GitHub *producer* of the review context (it gathers a
-  PR's body and discussion over the same REST seam, maps `author_association` to the
-  generic `Standing`, filters out Bastion's own marker-tagged comments, and resolves a
-  finding-thread reply back to its `FindingId` when one carries the marker, so the core
-  never sees a GitHub notion). Two caveats matter here: the reply-routing path is wired and
-  resolves a reply whose thread root carries a finding marker, but the reporter posts one
-  sticky comment and check runs (not per-finding threads), so PR comments arrive as general
-  discussion; and prior-findings memory on GitHub needs the workflow to persist and restore
-  the run store across runs (a fresh runner starts empty; `bastion.yml` does this with an
-  upload/download of the `bastion-run` artifact). Intent and discussion are gathered fresh
-  each run and need neither. `report.rs` distills a finished run's event stream into a sticky PR
-  comment and check-run payloads (all pure and unit-tested) and posts them. `bastion
-  github report` reads a persisted run and posts it: the sticky comment (with every
-  finding, optional ones included), a check run per reviewer, and the always-present
-  aggregate `bastion` check. It also folds a skills-freshness advisory into the comment
-  (a `[!WARNING]` callout) when the checked-out repo's bundled skills are missing or
-  drifted from the reporting binary, computed via `skills::assess`; it is advisory only
-  and never touches a check-run conclusion. The local `bastion review` mirrors it to
-  stderr, but only when the repository has adopted Bastion (a repo-level registry is
-  present); a user-level-only local review stays silent (see the `src/skills.rs` entry).
-  When one or more reviewers replayed from a verified attestation, `report.rs` adds a
-  `[!NOTE]` callout naming them, the attesting key, and when it was signed, plus a line
-  on each replayed reviewer's own check-run summary; an attestation that was *offered and
-  refused* (a `run.attestation-fallback` event) surfaces as a `[!WARNING]` block naming why.
-  A commit that offered no note is not a refusal: it resolves to
-  `AttestationOutcome::NotAttested`, records no event, and draws no block, so an un-attested
-  PR is never nagged. Carried reviewers (a prior pass reused because the trigger-scoped diff
-  was unchanged, on either surface) get the parallel treatment: a `[!NOTE]` callout naming
-  them plus a line on each carried reviewer's own check-run summary, mirroring the local
-  CLI's `carried` marker. See `src/seal.rs` / `src/attest/` below and
-  `docs/developer-guide/attestation.md`.
-  Check runs need a GitHub App installation token, so this
-  runs under one (the default Actions `GITHUB_TOKEN` qualifies; a classic PAT does
-  not). API-created check runs carry no check-suite id, so under the shared
-  `github-actions` identity GitHub buckets them into a sibling workflow's suite (they
-  render as `Security / <reviewer>`); posting under a dedicated per-adopter app gives
-  them their own named suite. `.github/workflows/bastion.yml` mints that app token via
-  `actions/create-github-app-token` when the `BASTION_APP_ID`/`BASTION_APP_PRIVATE_KEY`
-  secrets exist and falls back to `GITHUB_TOKEN` otherwise; the hosted walkthrough at
-  `bastion.jessica.black/github-app` (`site/src/pages/github-app.astro`) walks adopters
-  through creating that app by hand in GitHub's UI (GitHub's app-manifest flow is not
-  used: completing it needs a backend to exchange the temporary code for credentials,
-  and Bastion deliberately custodies none). `report` decides whether to nudge toward a
-  dedicated app on its own (no workflow flag): it reads the `app.slug` GitHub stamps
-  on the check runs it creates, and when that is the shared `github-actions` identity
-  it closes the sticky comment with a note linking to that walkthrough. This is why
-  it posts check runs before the comment. See `docs/developer-guide/github-adapter.md`
-  (Check-run grouping).
-- `src/skills.rs` / `skills/`: the agent skills bundled into the binary. Each
-  `skills/<slug>/SKILL.md` is embedded with `include_str!`; `bastion skills
-  install` writes it into a consuming repo's `.claude/skills/` and `.agents/skills/`,
-  `bastion skills check` fails closed when a checked-in copy has drifted from the
-  embedded source (a deterministic, version-independent lint wired into
-  `.github/workflows/ci.yml`), and `bastion skills list` shows what is bundled.
-  `skills::assess` reuses that same check to build an advisory `DriftWarning` (missing
-  and drifted files, with `plain`/`markdown` renderings) that both review surfaces emit
-  when a repo's skills are stale: `bastion review` to stderr, `bastion github report`
-  into the sticky comment. It is advisory and never gates. The local surface is gated
-  on the repository having adopted Bastion: `bastion review` emits it only when a
-  repo-level registry is present (a review running on the author's user-level
-  reviewers alone stays silent, since nudging skills into a project that has not
-  configured Bastion would be misdirected). CI always has a repo registry, so the
-  report path is unaffected.
-  This repo dogfoods the `using-bastion` skill: its agents work *on* Bastion and
-  *with* it. Distinct from it are the repo-local skills that guide agents working
-  on Bastion: the Rust skills and the `stop-slop` prose skill, which are not
-  bundled into the binary and so sit outside `bastion skills install`/`check`. All
-  of these live under both `.agents/skills/` (the agent-neutral convention) and
-  `.claude/skills/` (Claude Code's native path), kept as exact copies so every
-  skill is available through either surface; `tests/skills_mirror.rs` fails the
-  build if the two trees drift.
-- `src/update.rs`: the native self-updater behind `bastion update`. `Updater`
-  resolves the latest release from the `releases/latest` redirect (not
-  `api.github.com`, whose unauthenticated rate limit 403s shared NATs, matching
-  the install scripts), downloads the `bastion-<target>.tar.gz` for
-  `BASTION_TARGET` over the same `reqwest` client the GitHub adapter links,
-  verifies it against `checksums.txt`, extracts the binary (`flate2` + `tar`), and
-  swaps it over the running executable (`self-replace`, which owns the Windows
-  move-aside dance). `status`/`Status` compare the running version to the latest
-  with `semver`, treating a dev build or prerelease as `Development` (always
-  offered the reinstall). The module also drives the passive out-of-date nag
-  (`warn_if_outdated`): `cli::run` calls it on every command except `update` and
-  the hidden `__update-check`, it prints to stderr only for an interactive release
-  build with `BASTION_NO_UPDATE_CHECK` unset, and it refreshes a day-TTL cache
-  (under the platform cache dir) in a detached `bastion __update-check` process so
-  the check never blocks or fails the command that ran. `BASTION_REPO` and
-  `BASTION_BASE_URL` override the source (tests point them at a local server).
-- `tests/integration/`: the end-to-end suite (one `integration` test target).
-  `main.rs` holds the scenarios; the reusable support is split into sibling modules
-  (`fakes.rs` for the `rustc`-compiled fake agent and fake container engine,
-  `fixtures.rs` for the throwaway `git` repo / `Reviewer` / registry / run-event
-  helpers, `github.rs` for the in-process fake GitHub). It drives the *real compiled
-  `bastion` binary* (`CARGO_BIN_EXE_bastion`), each scenario in its own throwaway
-  `git` repo and private `BASTION_DATA_DIR`, against the fake agent wired in via
-  `BASTION_CLAUDE_BIN`/`BASTION_CODEX_BIN`/`BASTION_PI_BIN` (and the fake engine via
-  `BASTION_CONTAINER_ENGINE` for the container scenarios). The fake reads per-reviewer
-  `env` (which Bastion propagates into the child) to stage passes, blocks, malformed
-  output, crashes, and hangs, so the suite exercises the full subprocess path,
-  fail-closed/fail-open aggregation, concurrency, persistence, and the read-back
-  commands at scale. One scenario also drives `bastion github report` against the
-  in-process fake GitHub (the binary's `GITHUB_API_URL` is pointed at it), asserting
-  the real comment and check-run requests with no network. It detect-and-skips when
-  `rustc`/`git` are absent. Sibling structural test targets:
-  `tests/skills_mirror.rs` (the two skill trees stay byte-identical),
-  `tests/script_safety.rs` (installer fail-closed pins), and
-  `tests/user_guide_integrity.rs` (user-guide frontmatter, unique `order`
-  values, and relative-link resolution, the invariants the site build under
-  `site/src/content.config.ts` depends on).
-- `scripts/install.sh` / `scripts/install.ps1`: the public install scripts
-  (`curl | bash` and `irm | iex`). They detect the platform, download the matching
-  release archive plus `checksums.txt`, verify the SHA-256, and place `bastion` on
-  the user's `PATH`. They fail closed on any checksum problem; `tests/script_safety.rs`
-  pins that. `.github/workflows/installers.yml` smoke-tests them against published
-  releases on a schedule (not in PR CI, since it depends on release state).
+- `src/runner/`: the parallel, timeout-bounded runner. `mod.rs` is the orchestration
+  core; `verdicts.rs` folds in replayed and carried verdicts, `seal.rs` seals an
+  eligible run, `persist.rs` writes the artifacts, `tests.rs` the unit tests. Fails
+  closed on error or timeout; a partial run (narrowed by `--reviewer`) is never sealed.
+- `src/carry.rs`: incremental re-review on both surfaces. A reviewer's verdict is
+  stamped with a trigger-scoped `scope_digest`; on a re-run a prior *pass* with an
+  identical digest is carried forward with no backend dispatch, while blocks and
+  changed-scope reviewers execute fresh. Full mechanics in
+  [`local-surface.md`](docs/developer-guide/local-surface.md#incremental-re-review).
+- `src/seal.rs` / `src/attest/`: the run seal (an HMAC over the committed tree, the
+  merge-base tree, the `base..HEAD` patch-id, the config hash, the test-seam and
+  dirty flags, and the sorted resolved events) and signed attestation, split into
+  `attest/{mod,bundle,sign,replay}.rs`. See
+  [`attestation.md`](docs/developer-guide/attestation.md).
+- `src/backend/`: the agent execution boundary. `mod.rs` defines the `Backend` trait,
+  the deterministic `MockBackend`, `dispatch`, and the shared prompt helpers;
+  `command.rs` is the injectable subprocess seam; `claude_code.rs`, `codex.rs`, and
+  `pi.rs` are the real backends; `container/` runs a backend inside a built image,
+  split into `plan`/`runner`/`credentials`/`teardown`. `dispatch` is the single place
+  an unprovisioned capability tier fails closed. See
+  [`backends.md`](docs/developer-guide/backends.md).
+- `src/github/`: the GitHub adapter (the CI surface). `codeowners.rs` generates the
+  governance block; `client.rs` is the `reqwest`-backed REST seam; `signing.rs`
+  fetches a user's SSH signing keys; `context.rs` produces the review context from a
+  PR; `report/` distills a finished run into a sticky comment and check runs, split by
+  concern (`comment`, `callouts`, `checks`, `requests`, `post`). Check runs need a
+  GitHub App installation token. See
+  [`github-adapter.md`](docs/developer-guide/github-adapter.md).
+- `src/skills.rs` / `skills/`: the agent skills bundled into the binary with
+  `include_str!` and installed by `bastion skills install`/`check`/`list`;
+  `skills::assess` builds the advisory drift warning both review surfaces emit.
+  Distinct from the bundled `using-bastion` skill are the repo-local skills that guide
+  agents working *on* Bastion (the Rust skills and `stop-slop`), which are **not**
+  bundled and sit outside `skills install`/`check`. All skills live under both
+  `.agents/skills/` (agent-neutral) and `.claude/skills/` (Claude Code's path) as
+  exact copies; `tests/skills_mirror.rs` fails the build if the two trees drift.
+- `src/update.rs`: the native self-updater behind `bastion update` (resolves the
+  latest release, verifies it against `checksums.txt`, swaps the running binary with
+  `self-replace`) and the passive out-of-date nag. `BASTION_REPO` and
+  `BASTION_BASE_URL` override the release source (tests point them at a local server).
+- `tests/integration/`: the end-to-end suite driving the *real compiled binary*
+  against a `rustc`-compiled fake agent, each scenario in its own throwaway `git` repo
+  and private `BASTION_DATA_DIR`, with the fake wired in via
+  `BASTION_CLAUDE_BIN`/`BASTION_CODEX_BIN`/`BASTION_PI_BIN` (and a fake engine via
+  `BASTION_CONTAINER_ENGINE`). Scenarios are grouped into per-theme files
+  (`aggregation`, `carry`, `container`, `accounting`, `persistence`, `cli_surface`,
+  `github_report`, `attestation`) over shared `fakes`/`fixtures`/`github` support.
+  Sibling structural targets: `tests/skills_mirror.rs`, `tests/script_safety.rs`, and
+  `tests/user_guide_integrity.rs`.
+- `scripts/install.sh` / `scripts/install.ps1`: the public install scripts. They
+  detect the platform, download the matching archive plus `checksums.txt`, verify the
+  SHA-256, and fail closed on any checksum problem; `tests/script_safety.rs` pins that.
 
 ## Development rules
 
@@ -415,50 +264,10 @@ version:
 
 ## Releases
 
-Bastion ships as a binary on GitHub Releases. It is not published to crates.io, so
-a release is just a tag, never a crates.io publish.
-
-- To cut a release, push a tag in the shape `vX.Y.Z` to the remote (for example
-  `git tag v0.2.0 && git push origin v0.2.0`). The
-  [release workflow](.github/workflows/release.yml) fires on `v*` tags, generates
-  one per-release run-seal secret and threads it through `BASTION_SEAL_SECRET`
-  into every platform build (so the release's binaries verify each other's run
-  seals), builds the platform matrix, and publishes a GitHub Release (created as
-  a draft so its notes and assets are complete, then flipped to published in a
-  final step).
-- Do not bump the crate version in `Cargo.toml`. Leave `version = "0.0.0"` as it is:
-  it is a deliberate placeholder, not a real version. The released binary's
-  `--version` comes from the git tag (CI passes the tag through `BASTION_VERSION`;
-  locally `build.rs` runs `git describe`). The `Cargo.toml` version is only a
-  build-time fallback, not the source of truth, and is never published.
-- A tag with a pre-release suffix (`v0.2.0-rc.1`) ships as a prerelease.
-
-The full release runbook (the build matrix and version derivation) lives in
-`CONTRIBUTING.md`. There is no self-review pin to bump: the
-`.github/workflows/bastion.yml` gate always runs the latest published release, so it
-adopts a new engine automatically once the release is published.
-
-## Verification expectations
-
-Run the core checks for ordinary changes:
-
-```sh
-cargo fmt --check
-cargo test
-cargo clippy --all-targets -- -D warnings
-nudge check
-```
-
-`nudge check` enforces the mechanical conventions in `.nudge.yaml` (today: no
-Unicode dashes in authored text). It runs in CI and as an agent-time hook, and
-gates the same way locally; the `prose-anti-slop` gate in
-`.bastion.yaml` covers the prose-voice judgment a regex cannot.
-
-Also run targeted checks when relevant:
-
-- Versioning changes: run `bastion --version`.
-- Schema changes: update `.bastion.yaml` and the docs under `docs/`.
-- Public scaffolding changes: keep `README.md`, `CONTRIBUTING.md`, `SECURITY.md`,
-  `NOTICE`, and the GitHub workflows in sync.
-- Rule changes: validate `.nudge.yaml` with `nudge validate` and confirm
-  `nudge check` is clean.
+Bastion ships as a binary on GitHub Releases (never a crates.io publish). To cut
+one, push a `vX.Y.Z` tag; a `-rc.N` suffix ships as a prerelease. Do not bump the
+`Cargo.toml` version: `0.0.0` is a deliberate placeholder, and the released binary's
+`--version` comes from the tag. There is no self-review pin to bump; the
+`.github/workflows/bastion.yml` gate always runs the latest published release. The
+full runbook (the seal-secret-per-release flow, the build matrix, version
+derivation) is in `CONTRIBUTING.md`.
