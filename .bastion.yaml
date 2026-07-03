@@ -104,8 +104,8 @@ reviewers:
     prompt: |
       This repo follows parse-don't-validate: data crossing a boundary (config
       files, CLI arguments, git output, subprocess output, agent responses) should
-      be parsed once into a precise type -- a newtype or enum that makes invalid
-      states unrepresentable -- rather than carried around stringly-typed and
+      be parsed once into a precise type (a newtype or enum that makes invalid
+      states unrepresentable) rather than carried around stringly-typed and
       re-checked at each use. As an advisor, report as optional findings any new
       boundary that validates-then-passes-through raw strings or integers where a
       parsed type would remove a class of bugs, or any code that re-validates data
@@ -142,8 +142,8 @@ reviewers:
     mode: gate
     backend: codex
     prompt: |
-      Review changes to the public install and release path -- the install
-      scripts and the release/installer workflows -- for robustness. Block the PR
+      Review changes to the public install and release path for robustness: the
+      install scripts and the release/installer workflows. Block the PR
       if any of the following hold; otherwise approve it.
 
       - An installer downloads a release artifact without verifying its SHA-256
@@ -152,7 +152,7 @@ reviewers:
         never warn and continue.
       - Resolving the latest release (or any release metadata) depends on a
         rate-limited, unauthenticated endpoint that fails from shared IPs and CI
-        runners -- notably api.github.com, which 403s at 60 requests/hour/IP --
+        runners (notably api.github.com, which 403s at 60 requests/hour/IP)
         when a non-rate-limited path exists (the github.com /releases/latest
         redirect resolves the tag without the API).
       - The bash installer (scripts/install.sh) and the PowerShell installer
@@ -166,8 +166,8 @@ reviewers:
     mode: advisor
     backend: codex
     prompt: |
-      As an advisor, review shell and PowerShell code -- standalone scripts under
-      scripts/ and inline `run:` steps in workflows -- for portability footguns
+      As an advisor, review shell and PowerShell code (standalone scripts under
+      scripts/ and inline `run:` steps in workflows) for portability footguns
       that tend to fail silently or only in CI. Report these as optional findings;
       do not block.
 
@@ -252,7 +252,7 @@ reviewers:
     backend: codex
     prompt: |
       The user guide under docs/user-guide is the end-user documentation for
-      Bastion: it describes the CLI a user runs and the policy they author --
+      Bastion: it describes the CLI a user runs and the policy they author:
       commands and subcommands, their flags and defaults, exit-code semantics,
       the reviewer/registry schema, configuration, and example JSONL event/verdict
       output. It must stay truthful about how the shipped tool behaves. You are
@@ -272,9 +272,9 @@ reviewers:
         field a user would invoke or observe) and the user guide was not updated
         to document it.
 
-      Judge only the USER-visible surface. A purely internal change -- refactoring,
+      Judge only the USER-visible surface. A purely internal change (refactoring,
       renaming private items, performance work, anything a user cannot observe from
-      the CLI, its output, or the files they author -- does not require a
+      the CLI, its output, or the files they author) does not require a
       user-guide update, so approve it. When the change is user-visible and the
       matching docs were updated (or already cover it), approve. When you block,
       name the exact command, flag, or field and the chapter that must change.
@@ -285,9 +285,9 @@ reviewers:
     mode: gate
     backend: codex
     prompt: |
-      The contributor documentation -- docs/developer-guide/ (architecture, the
-      backend boundary, conventions, and the design references), AGENTS.md, and
-      CONTRIBUTING.md -- describes how Bastion is built for people working ON it:
+      The contributor documentation, meaning docs/developer-guide/ (architecture,
+      the backend boundary, conventions, and the design references), AGENTS.md,
+      and CONTRIBUTING.md, describes how Bastion is built for people working ON it:
       the module map and the life of a review, the Backend trait and the
       subprocess seam, the data/store layout, the verdict/event schema, version
       derivation and the build flow, and the release runbook. It must stay
@@ -299,9 +299,9 @@ reviewers:
       approve it.
 
       - CONTRADICTION: this change alters something the contributor docs describe
-        -- the module/architecture map, the backend boundary or dispatch, the
+        (the module/architecture map, the backend boundary or dispatch, the
         runner, the data-directory/store layout, the verdict/event schema, the
-        version-derivation or build flow, or a stated convention -- in a way that
+        version-derivation or build flow, or a stated convention) in a way that
         makes an existing statement in docs/developer-guide, AGENTS.md, or
         CONTRIBUTING.md now wrong, and that documentation was not updated to match.
       - OMISSION: this change adds a new architectural element those docs are
@@ -311,8 +311,8 @@ reviewers:
         describe it.
 
       Judge against what the contributor docs actually claim. A change that does
-      not touch anything they describe -- an internal edit fully contained within
-      an already-documented module, a test-only change, a typo fix -- does not
+      not touch anything they describe (an internal edit fully contained within
+      an already-documented module, a test-only change, a typo fix) does not
       require a docs update, so approve it. When the relevant docs were updated
       (or already cover the change), approve. When you block, name the exact code
       element and the doc section that must change.

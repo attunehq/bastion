@@ -123,8 +123,9 @@ version:
   in replayed and carried verdicts, and persists each run, sealing an eligible
   run on a best-effort basis at persist time (a partial run, one narrowed by
   `bastion review --reviewer`, is never sealed).
-- `src/carry.rs`: incremental re-review for purely local runs. Every resolved
-  reviewer is stamped with a trigger-scoped diff digest (`scope_digest`: its
+- `src/carry.rs`: incremental re-review for purely local runs. Every reviewer
+  resolving to a real verdict is stamped, best effort, with a trigger-scoped
+  diff digest (`scope_digest`: its
   effective definition, the merge-base commit, the diffs of the changed files its
   trigger matched against both the merge base and the base tip, and the scoped
   commit messages; the runner re-derives it post-execution, drops a fresh stamp

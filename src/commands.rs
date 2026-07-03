@@ -330,7 +330,6 @@ pub async fn review(
             digest_probe = Some(runner::DigestProbe {
                 base: base.to_string(),
                 merge_base,
-                changed: changed.clone(),
             });
         }
         Err(err) => {

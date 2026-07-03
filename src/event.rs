@@ -44,7 +44,8 @@ pub struct ReviewerRef {
 /// The gate tally carried by [`RunEvent::RunCompleted`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Gates {
-    /// Total number of gates triggered.
+    /// Total number of gates in the run's plan (the full triggered set, or
+    /// only the selected subset on a partial run).
     pub total: u32,
     /// Gates that passed.
     pub passed: u32,
@@ -61,8 +62,9 @@ pub struct Gates {
 #[serde(tag = "type")]
 #[non_exhaustive]
 pub enum RunEvent {
-    /// The set of reviewers a run will execute: the locally-rendered equivalent
-    /// of a PR's pending checks appearing.
+    /// The run's plan: the locally-rendered equivalent of a PR's pending
+    /// checks appearing. Each listed reviewer executes, replays from a
+    /// verified attestation, or carries its unchanged prior pass forward.
     #[serde(rename = "run.started")]
     RunStarted {
         /// The run id.
@@ -73,7 +75,7 @@ pub enum RunEvent {
         base: String,
         /// Number of changed files.
         changed: u32,
-        /// The reviewers that matched and will run.
+        /// The reviewers in the plan (executing, replaying, or carrying).
         reviewers: Vec<ReviewerRef>,
         /// Whether this run was deliberately narrowed to a subset of the
         /// triggered reviewers (`bastion review --reviewer`). A partial run's
@@ -85,7 +87,9 @@ pub enum RunEvent {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         partial: bool,
     },
-    /// A reviewer began executing (its spinner).
+    /// A reviewer began resolving (its spinner). Usually that is backend
+    /// execution; for a replayed or carried reviewer the event still appears,
+    /// so the plan reads the same, but no backend dispatches.
     #[serde(rename = "reviewer.started")]
     ReviewerStarted {
         /// The run id.
@@ -94,7 +98,8 @@ pub enum RunEvent {
         reviewer: String,
         /// Its mode.
         mode: Mode,
-        /// The backend it is running on.
+        /// The backend it runs on when it executes (nominal for a replayed or
+        /// carried reviewer).
         backend: Backend,
     },
     /// A reviewer reached its conclusion, carrying the verdict and findings but

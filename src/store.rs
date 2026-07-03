@@ -27,7 +27,8 @@ pub struct RunSummary {
     pub base: Option<String>,
     /// The aggregate decision, if the run completed.
     pub verdict: Option<Decision>,
-    /// Number of reviewers the run triggered.
+    /// Number of reviewers in the run's recorded plan (the triggered set,
+    /// or only the selected subset on a partial run).
     pub reviewers: u32,
     /// Whether the run was narrowed to a subset of the triggered reviewers
     /// (`bastion review --reviewer`), so its verdict speaks only for those.

@@ -29,9 +29,8 @@ bastion review --base main
 `bastion review` computes the changeset (working tree vs. `--base`, including
 uncommitted and untracked files), selects the reviewers whose triggers match, and
 renders progress and verdicts. Matched reviewers run in parallel with per-reviewer
-timeouts, and a local re-run is incremental (next section): a reviewer that already
-passed and whose triggered files are unchanged carries its pass forward instead of
-executing again. A CI review (`--repo`/`--pr`)
+timeouts, and a local re-run is incremental (next section): a reviewer that
+already passed may carry its verdict forward instead of executing again. A CI review (`--repo`/`--pr`)
 against a repository with `attestations: true` first checks for a verified
 attestation covering the run: a reviewer the attestation covers replays its recorded
 verdict, with no backend dispatch and no timeout; everything else executes as usual
@@ -49,14 +48,19 @@ verdict, with no backend dispatch and no timeout; everything else executes as us
 
 The loop's dominant cost would otherwise be re-executing reviewers that already
 passed. So on a re-run of the same branch, a reviewer whose previous verdict was a
-pass, and whose triggered files are unchanged since that run, is *carried*: its
+pass, and whose *scope digest* is unchanged since that run, is *carried*: its
 prior verdict counts in the gate tally, the stream marks it `"carried": true`, and
-no agent runs and no tokens are spent on it. Reviewers whose triggered files your fix
-touched, which always includes the ones that blocked, execute fresh. Blocks are
-never carried. The boundary is the reviewer's `trigger`: it already declares which
-files the concern depends on, and carry keys the verdict to exactly that. A
-reviewer with `attestation: never` in the registry is never carried, and `--fresh`
-re-runs everything.
+no agent runs and no tokens are spent on it. The digest covers everything the
+verdict was keyed to: the reviewer's own definition, the diff of the changed
+files its `trigger` matched (against both the merge base and the base branch's
+current tip), the commit messages that touched those files, and the content of
+untracked matched files. So an edit to a triggered file, a reworded commit that
+touched one, an edited reviewer, or a base branch that moved on covered files all
+re-run the reviewer; the ones that blocked always re-run, since your fix touched
+the files they flagged. Blocks are never carried. The boundary is the reviewer's
+`trigger`: it already declares which files the concern depends on, and carry keys
+the verdict to exactly that. A reviewer with `attestation: never` in the registry
+is never carried, and `--fresh` re-runs everything.
 
 One extra condition applies to the repository's own reviewers (not personal
 user-level ones): they carry only from a prior run the binary sealed and can still
@@ -72,9 +76,11 @@ never reuses an unsigned prior run.
 
 `--reviewer <name>` narrows the run to reviewers you name, for iterating on one
 stubborn gate without waiting on the rest. The named reviewers always execute
-fresh, and the run is marked **partial** everywhere it is recorded: the
-`run.started`/`run.completed` events carry `"partial": true`, the human output and
-`bastion runs` say so, and the run cannot be attested. A partial green speaks only
+fresh. When the selection excludes at least one triggered reviewer, the run is
+marked **partial** everywhere it is recorded: the `run.started`/`run.completed`
+events carry `"partial": true`, the human output and `bastion runs` say so, and
+the run cannot be attested. (Naming every triggered reviewer is a full run: the
+selection reduced nothing, so nothing is marked.) A partial green speaks only
 for the reviewers that ran. Finish with a plain `bastion review`; thanks to carry,
 that final full run re-executes only what actually changed.
 
@@ -124,7 +130,7 @@ The event types:
 | --- | --- |
 | `run.started` | The run began; lists the reviewers in the plan: each executes, replays from a verified attestation, or (locally) carries from the branch's previous run. Under `--reviewer` the list holds only the selected reviewers, and the event carries `partial: true`. |
 | `reviewer.started` | One reviewer began: dispatched to its backend, reconstructed from a verified attestation bundle, or carried from the branch's previous local run; the latter two dispatch no backend. |
-| `reviewer.resolved` | One reviewer finished; carries its `verdict`, `summary`, `findings`, `usage`, and a `has_transcript` flag. Carries `replayed: true` when the verdict came from a verified attestation, and `carried: true` when it was carried forward from the branch's previous local run, instead of a fresh execution. A local run also stamps `scope_digest`, the trigger-scoped content hash a later run compares to decide whether this verdict can carry. |
+| `reviewer.resolved` | One reviewer finished; carries its `verdict`, `summary`, `findings`, `usage`, and a `has_transcript` flag. Carries `replayed: true` when the verdict came from a verified attestation, and `carried: true` when it was carried forward from the branch's previous local run, instead of a fresh execution. A local run also stamps `scope_digest`, a hash of everything the verdict was keyed to (the reviewer's definition plus its trigger-scoped diffs, commit messages, and untracked content); a later run carries this verdict only when its own digest is identical. |
 | `run.completed` | The aggregate decision and the gate tally, plus the run's wall-clock `duration_ms` and the usage totals (`tokens_in`, `tokens_out`, `cache_read`, `cost_usd`) summed across reviewers. Carries `partial: true` (as does `run.started`) when `--reviewer` narrowed the run. |
 | `run.attested` | A signed local run was replayed; carries the replayed `reviewers`, the attesting `public_key`, and `attested_at`. |
 | `run.attestation-fallback` | Attestation was attempted but not honored; carries the `reason` (a missing note, an unregistered key, a stale binding, and so on). |

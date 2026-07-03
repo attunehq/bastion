@@ -78,7 +78,9 @@ committed content reaches CI as an attestation.
   either. A local run's user-level reviewer events are simply absent from the
   bundle.
 - **Coverage.** The set of repository reviewers the local run routed and
-  executed. CI routes its own diff; a reviewer CI routes that the bundle does
+  resolved, whether each executed a backend or carried its verdict forward
+  from a sealed, verified earlier run (the seal covers carried events exactly
+  like fresh ones). CI routes its own diff; a reviewer CI routes that the bundle does
   not cover runs fresh. On a coverage mismatch, CI replays the attested
   reviewers and executes the rest.
 - **The engine.** Implicit in the run seal rather than checked as a field: each

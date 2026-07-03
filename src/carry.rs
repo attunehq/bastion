@@ -629,6 +629,36 @@ mod tests {
     }
 
     #[test]
+    fn digest_changes_when_the_base_tip_advances_on_a_matched_file() {
+        let tmp = repo();
+        let dir = tmp.path();
+        // An "advanced" base: the same starting point plus a commit touching
+        // the matched file, standing in for `main` moving under the branch.
+        git(dir, &["checkout", "-b", "advanced", "base"]);
+        std::fs::write(dir.join("src/a.rs"), "fn a() { /* upstream */ }\n").unwrap();
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-m", "upstream change"]);
+        git(dir, &["checkout", "main"]);
+
+        std::fs::write(dir.join("src/a.rs"), "fn a() { /* local edit */ }\n").unwrap();
+        let merge_base = git::merge_base(dir, "base").unwrap();
+        assert_eq!(
+            merge_base,
+            git::merge_base(dir, "advanced").unwrap(),
+            "both bases share the starting point, so only the tip differs"
+        );
+        let changed = git::changed_files(dir, "base").unwrap();
+        let src = reviewer("src-only", &["src/**"]);
+
+        let against_base = scope_digest(dir, "base", &merge_base, &src, &changed).unwrap();
+        let against_advanced = scope_digest(dir, "advanced", &merge_base, &src, &changed).unwrap();
+        assert_ne!(
+            against_base, against_advanced,
+            "a base that advances on a covered file must invalidate the carry"
+        );
+    }
+
+    #[test]
     fn digest_changes_when_only_the_merge_base_moves() {
         // Two comparison points with byte-identical trees produce identical
         // scoped diffs; the digest must still differ, because a new merge base
@@ -641,6 +671,7 @@ mod tests {
         // An empty commit on top of `base`: same tree, different commit id.
         let other = String::from_utf8(
             std::process::Command::new("git")
+                .args(["-c", "user.email=t@bastion.dev", "-c", "user.name=T"])
                 .args(["commit-tree", &format!("{merge_base}^{{tree}}")])
                 .args(["-p", &merge_base, "-m", "empty"])
                 .current_dir(dir)
@@ -651,6 +682,7 @@ mod tests {
         .unwrap()
         .trim()
         .to_string();
+        assert!(!other.is_empty(), "commit-tree must produce a commit id");
         let changed = git::changed_files(dir, "base").unwrap();
         let src = reviewer("src-only", &["src/**"]);
 

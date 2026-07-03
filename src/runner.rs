@@ -1,8 +1,11 @@
 //! The parallel, timeout-bounded runner.
 //!
-//! [`execute`] runs every matched reviewer concurrently, bounds each by its
+//! [`execute`] runs the matched reviewers concurrently, bounds each by its
 //! `timeout`, aggregates the results per the merge gate in `docs/developer-guide/design.md`, and
-//! emits the full [`RunEvent`] stream. It owns event emission and persistence so
+//! emits the full [`RunEvent`] stream. Not every matched reviewer dispatches a
+//! backend: a reviewer covered by a verified attestation replays its recorded
+//! verdict, and a local re-run can carry an unchanged prior pass forward; both
+//! fold into the same tally and stream. It owns event emission and persistence so
 //! [`crate::commands::review`] only has to render the stream and map the aggregate
 //! verdict to an exit status.
 //!
@@ -94,10 +97,11 @@ pub struct ExecContext {
     pub base: String,
     /// Number of changed files (for the persisted `run.started`).
     pub changed: u32,
-    /// The reviewers that matched and will run (for the persisted `run.started`).
-    /// Includes both the reviewers that execute fresh and any that replay
-    /// (`replayed`): a replayed reviewer still matched CI's routing, so it
-    /// belongs in the plan the way a pending check does.
+    /// The reviewers in the run's plan (for the persisted `run.started`).
+    /// Includes the reviewers that execute fresh and any that replay
+    /// (`replayed`) or carry (`carried`): a replayed or carried reviewer still
+    /// matched routing, so it belongs in the plan the way a pending check
+    /// does, even though no backend dispatches for it.
     pub reviewers: Vec<ReviewerRef>,
     /// The review context handed to every reviewer this run: the author's stated
     /// intent, the surrounding discussion, and each reviewer's prior findings. Empty
@@ -169,11 +173,11 @@ pub struct ExecContext {
 #[derive(Debug, Clone)]
 pub struct DigestProbe {
     /// The base branch the run reviewed against (the diff the prompt names).
+    /// The post-run check re-scans the changed-file set against this itself,
+    /// so a file created mid-run reaches the recomputed digest.
     pub base: String,
     /// The merge-base commit the run's diffs are taken against.
     pub merge_base: String,
-    /// The full changed-file set the run routed on.
-    pub changed: Vec<String>,
 }
 
 /// One reviewer's replayed verdict, carried into [`ExecContext`] so the runner
@@ -240,7 +244,9 @@ struct Resolved {
 ///
 /// Runs them concurrently with per-reviewer timeouts, emits the full event stream
 /// via `emit`, persists the run and per-reviewer artifacts under `layout`, and
-/// returns the aggregate [`Decision`]. A `block` aggregate maps to a non-zero exit
+/// returns the aggregate [`Decision`]. Reviewers supplied through
+/// [`ExecContext::replayed`] or [`ExecContext::carried`] dispatch no backend;
+/// their recorded verdicts are folded into the same stream and tally. A `block` aggregate maps to a non-zero exit
 /// in the caller.
 ///
 /// # Errors
@@ -393,16 +399,29 @@ pub async fn execute_with(
     // The verdict itself is untrustworthy, so it fails closed (gate) or is
     // skipped (advisor), same as any reviewer that could not produce one.
     if let Some(probe) = &ctx.digest_probe {
+        // Re-scan the changed-file set too: a file created mid-run that a
+        // trigger matches must reach the recomputed digest, or an addition
+        // would be invisible to this check. A failed re-scan recomputes
+        // nothing, so every stamped digest mismatches and the check degrades
+        // in the fail-safe direction.
+        let changed_now = crate::git::changed_files(&ctx.repo_root, &probe.base)
+            .map_err(|err| {
+                tracing::warn!(error = %err, "could not re-scan changed files post-run");
+                err
+            })
+            .ok();
         for item in &mut resolved {
             if let Some(pre) = item.scope_digest.take() {
-                let now = crate::carry::scope_digest(
-                    &ctx.repo_root,
-                    &probe.base,
-                    &probe.merge_base,
-                    &item.reviewer,
-                    &probe.changed,
-                )
-                .ok();
+                let now = changed_now.as_ref().and_then(|changed| {
+                    crate::carry::scope_digest(
+                        &ctx.repo_root,
+                        &probe.base,
+                        &probe.merge_base,
+                        &item.reviewer,
+                        changed,
+                    )
+                    .ok()
+                });
                 if now.as_deref() == Some(pre.as_str()) {
                     item.scope_digest = Some(pre);
                 } else if item.carried {
@@ -1627,7 +1646,7 @@ mod tests {
         // content changes while the run executes, the carried pass no longer
         // describes the tree this run reports on, so it must not tally as a
         // pass. The stale stamp here stands in for that mid-run change.
-        let (tmp, merge_base, changed) = probe_repo();
+        let (tmp, merge_base, _changed) = probe_repo();
         let g1 = reviewer("g1", Mode::Gate);
         let reviewers = [&g1];
         let mut ctx = ctx(&reviewers);
@@ -1639,7 +1658,6 @@ mod tests {
         ctx.digest_probe = Some(DigestProbe {
             base: "base".into(),
             merge_base,
-            changed,
         });
 
         let (decision, events, _layout) = run_scenario_with_ctx(
@@ -1865,7 +1883,6 @@ mod tests {
         ctx.digest_probe = Some(DigestProbe {
             base: "base".into(),
             merge_base,
-            changed,
         });
 
         let (_decision, events, _layout) = run_scenario_with_ctx(
@@ -1891,7 +1908,7 @@ mod tests {
         // stamp standing in for a tree that changed while the reviewer ran)
         // must not survive onto the resolved event, or a later run could
         // carry a verdict about content the reviewer never judged.
-        let (tmp, merge_base, changed) = probe_repo();
+        let (tmp, merge_base, _changed) = probe_repo();
         let g1 = reviewer("g1", Mode::Gate);
 
         let reviewers = [&g1];
@@ -1902,7 +1919,6 @@ mod tests {
         ctx.digest_probe = Some(DigestProbe {
             base: "base".into(),
             merge_base,
-            changed,
         });
 
         let (_decision, events, _layout) = run_scenario_with_ctx(
