@@ -84,7 +84,6 @@ pub(super) fn comment_body(
 /// token usage, and cost.
 pub(super) fn status_line(digest: &RunDigest) -> String {
     let reviewers = digest.rows.len();
-    let (passed, total) = digest.gates.map_or((0, 0), |g| (g.passed, g.total));
     let timing = digest
         .duration_ms
         .map(|ms| format!(", {}s", ms / 1000))
@@ -105,21 +104,20 @@ pub(super) fn status_line(digest: &RunDigest) -> String {
         .map(|c| format!(", {c}"))
         .unwrap_or_default();
 
-    let headline = match digest.aggregate {
-        Some(Decision::Pass) if any_gate_blocks(digest) => {
+    let headline = match AggregateOutcome::classify(digest) {
+        AggregateOutcome::BlockedInconsistent => {
             "**Blocked.** A gate verdict is internally inconsistent (a pass carrying a \
              blocking finding); failing closed."
                 .to_string()
         }
-        Some(Decision::Pass) => {
-            if total == 0 {
-                "**Passed.** No gates were triggered.".to_string()
-            } else {
-                format!("**Passed.** All {total} gate(s) passed.")
-            }
+        AggregateOutcome::PassedNoGates => "**Passed.** No gates were triggered.".to_string(),
+        AggregateOutcome::Passed { total, .. } => {
+            format!("**Passed.** All {total} gate(s) passed.")
         }
-        Some(Decision::Block) => format!("**Blocked.** {passed} of {total} gate(s) passed."),
-        None => "**Incomplete.** The run did not finish.".to_string(),
+        AggregateOutcome::Blocked { passed, total } => {
+            format!("**Blocked.** {passed} of {total} gate(s) passed.")
+        }
+        AggregateOutcome::Incomplete => "**Incomplete.** The run did not finish.".to_string(),
     };
     // A filtered run's verdict speaks only for the reviewers that ran.
     let partial = if digest.partial {

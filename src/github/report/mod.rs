@@ -324,18 +324,38 @@ fn aggregate_conclusion(digest: &RunDigest) -> Conclusion {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Sticky PR comment
-// ---------------------------------------------------------------------------
+/// The distinguishable outcomes of a run's aggregate, the classification both the
+/// check-run title ([`aggregate_check`]) and the sticky-comment headline
+/// ([`status_line`]) branch on. Sharing one taxonomy keeps the two renderings
+/// from drifting in what they call a blocked run versus a clean pass; each still
+/// renders its own wording from the same shape.
+enum AggregateOutcome {
+    /// The aggregate is recorded as a pass, but a gate row contradicts itself (a
+    /// pass carrying a blocking finding), so the run fails closed.
+    BlockedInconsistent,
+    /// A clean pass with no gates triggered.
+    PassedNoGates,
+    /// A clean pass: `passed` of `total` gates passed (with a clean aggregate,
+    /// `passed == total`).
+    Passed { passed: u32, total: u32 },
+    /// Blocked: `passed` of `total` gates passed.
+    Blocked { passed: u32, total: u32 },
+    /// The run never completed, so there is no verdict to report.
+    Incomplete,
+}
 
-// ---------------------------------------------------------------------------
-// Check runs
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Request construction
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Orchestration
-// ---------------------------------------------------------------------------
+impl AggregateOutcome {
+    /// Classify a digest's aggregate. Mirrors [`aggregate_conclusion`]: a recorded
+    /// pass is clean unless a gate row contradicts itself, in which case it fails
+    /// closed as [`AggregateOutcome::BlockedInconsistent`].
+    fn classify(digest: &RunDigest) -> Self {
+        let (passed, total) = digest.gates.map_or((0, 0), |g| (g.passed, g.total));
+        match digest.aggregate {
+            Some(Decision::Pass) if any_gate_blocks(digest) => Self::BlockedInconsistent,
+            Some(Decision::Pass) if total == 0 => Self::PassedNoGates,
+            Some(Decision::Pass) => Self::Passed { passed, total },
+            Some(Decision::Block) => Self::Blocked { passed, total },
+            None => Self::Incomplete,
+        }
+    }
+}

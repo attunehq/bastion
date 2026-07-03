@@ -83,20 +83,16 @@ pub(super) fn reviewer_check(ctx: &PrContext, row: &ReviewerRow) -> CheckRun {
 /// recorded it.
 pub(super) fn aggregate_check(ctx: &PrContext, digest: &RunDigest) -> CheckRun {
     let conclusion = aggregate_conclusion(digest);
-    let (passed, total) = digest.gates.map_or((0, 0), |g| (g.passed, g.total));
-    let title = match digest.aggregate {
-        Some(Decision::Pass) if any_gate_blocks(digest) => {
+    let title = match AggregateOutcome::classify(digest) {
+        AggregateOutcome::BlockedInconsistent => {
             "Blocked: a gate verdict is internally inconsistent".to_string()
         }
-        Some(Decision::Pass) => {
-            if total == 0 {
-                "No gates triggered".to_string()
-            } else {
-                format!("{passed}/{total} gates passed")
-            }
+        AggregateOutcome::PassedNoGates => "No gates triggered".to_string(),
+        AggregateOutcome::Passed { passed, total } => format!("{passed}/{total} gates passed"),
+        AggregateOutcome::Blocked { passed, total } => {
+            format!("Blocked: {passed}/{total} gates passed")
         }
-        Some(Decision::Block) => format!("Blocked: {passed}/{total} gates passed"),
-        None => "Incomplete run".to_string(),
+        AggregateOutcome::Incomplete => "Incomplete run".to_string(),
     };
 
     let mut summary = String::new();
