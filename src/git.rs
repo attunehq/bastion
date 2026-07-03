@@ -111,15 +111,50 @@ pub fn changed_files(cwd: &Path, base: &str) -> Result<Vec<String>> {
             .filter(|l| !l.is_empty()),
     );
 
-    let untracked = run_git(cwd, &["ls-files", "--others", "--exclude-standard"])?;
-    files.extend(
-        untracked
-            .lines()
-            .map(str::to_string)
-            .filter(|l| !l.is_empty()),
-    );
+    files.extend(untracked_files(cwd)?);
 
     Ok(files.into_iter().collect())
+}
+
+/// The untracked, non-ignored files in `cwd`'s working tree, repository-relative.
+///
+/// Split out of [`changed_files`] because the incremental-review digest
+/// ([`crate::carry`]) needs to know which changed files `git diff` cannot see
+/// (an untracked file has no blob to diff against), so their content is hashed
+/// directly instead.
+///
+/// # Errors
+///
+/// Returns an error if `git` fails.
+pub fn untracked_files(cwd: &Path) -> Result<Vec<String>> {
+    let untracked = run_git(cwd, &["ls-files", "--others", "--exclude-standard"])?;
+    Ok(untracked
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+/// The diff of the working tree against `base_commit`, restricted to `paths`:
+/// `git diff <base_commit> -- <paths...>`.
+///
+/// This is the slice of the changeset a trigger-scoped reviewer's verdict is
+/// keyed to (`crate::carry`): the working tree (not HEAD) on the left of the
+/// comparison's right side, because `bastion review` reviews the working tree.
+/// Untracked files never appear in this output; the caller hashes their content
+/// separately. An empty `paths` yields an empty diff without invoking git,
+/// since `git diff <rev> --` with no pathspec would diff *everything*.
+///
+/// # Errors
+///
+/// Returns an error if `base_commit` does not resolve or `git` fails.
+pub fn scoped_diff(cwd: &Path, base_commit: &str, paths: &[&str]) -> Result<String> {
+    if paths.is_empty() {
+        return Ok(String::new());
+    }
+    let mut args = vec!["diff", base_commit, "--"];
+    args.extend_from_slice(paths);
+    run_git(cwd, &args)
 }
 
 /// Whether `cwd`'s working tree carries uncommitted changes: a modified tracked
@@ -155,6 +190,30 @@ pub fn commit_messages(cwd: &Path, base: &str) -> Option<String> {
         .ok()
         .map(|messages| messages.trim().to_string())
         .filter(|messages| !messages.is_empty())
+}
+
+/// The commit messages on `base_commit..HEAD` that touched any of `paths`,
+/// oldest first: `git log --reverse --format=%B <base_commit>..HEAD -- <paths...>`.
+///
+/// This is the trigger-scoped slice of the intent that [`commit_messages`]
+/// gathers for the prompt, used by the carry digest (`crate::carry`): a
+/// reviewer's verdict is keyed to the stated intent for the files its trigger
+/// covers, so rewording a commit that touched them re-runs the reviewer while
+/// a commit that touched only unrelated files does not. An empty `paths`
+/// yields an empty string without invoking git, since `git log -- ` with no
+/// pathspec would cover every commit.
+///
+/// # Errors
+///
+/// Returns an error if `base_commit` does not resolve or `git` fails.
+pub fn scoped_commit_messages(cwd: &Path, base_commit: &str, paths: &[&str]) -> Result<String> {
+    if paths.is_empty() {
+        return Ok(String::new());
+    }
+    let range = format!("{base_commit}..HEAD");
+    let mut args = vec!["log", "--reverse", "--format=%B", &range, "--"];
+    args.extend_from_slice(paths);
+    run_git(cwd, &args)
 }
 
 /// The short commit hash of `HEAD`, or `None` when git cannot supply one (for

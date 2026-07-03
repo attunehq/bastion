@@ -80,6 +80,30 @@ cargo build --release
 `bastion --version` reports a release tag when one is reachable, otherwise the
 short commit SHA, with a `-dirty` suffix when the tree has uncommitted changes.
 
+Once installed, `bastion update` upgrades in place: it resolves the latest
+release, downloads the archive built for your platform, verifies its SHA-256
+against the release checksums, and swaps it over the running binary, no shell or
+`curl` needed. It installs the same bits as the install scripts, so a self-update
+and a fresh install converge. `bastion update --check` reports whether a newer
+release exists without installing it: it exits 0 whenever the release lookup
+succeeds (including when an update is available, or when the running binary is a
+development build), and non-zero only when the check itself fails, such as when
+the network is unreachable. So `--check` is a status report, not a pass/fail gate;
+script against its printed output rather than its exit code. `bastion update
+--force` reinstalls the latest release even when the running version is already
+current.
+
+Bastion also prints a notice on stderr when a release build detects that a newer
+version is available: a line naming the available version, followed by the
+`bastion update` command to run. It shows only on an interactive terminal, never
+in CI or a pipe; set `BASTION_NO_UPDATE_CHECK=1` to silence it entirely.
+
+Two environment variables retarget where updates come from, for a fork or a
+private mirror of the releases: `BASTION_REPO` overrides the `owner/name`
+repository (default `jssblck/bastion`), and `BASTION_BASE_URL` overrides the base
+URL the release archive and `checksums.txt` are fetched from. Leave both unset for
+the normal case.
+
 ## 2. Make sure the backend is ready
 
 Bastion does not run its own agent loop. It shells out to an existing coding-agent
@@ -170,7 +194,10 @@ bastion review --base main
 ```
 
 Bastion computes the files that differ from `main`, selects the reviewers whose
-triggers match, runs them in parallel, and renders progress and verdicts. A blocked
+triggers match, runs them in parallel, and renders progress and verdicts. (A
+re-run of the same branch may carry an already-passed reviewer's verdict
+forward instead of executing it again; the exact conditions are in
+[the local workflow](./local-workflow.md#re-runs-are-incremental).) A blocked
 review exits non-zero; a clean one exits zero. That exit code is what lets an agent
 (or a shell loop) know whether to keep working:
 
@@ -256,10 +283,14 @@ bastion --data-dir /tmp/bastion-scratch review --base main
 
 The same override is available as the `BASTION_DATA_DIR` environment variable.
 
-Note that `bastion review` always runs your reviewers on a real backend: there is
-no built-in mode that fabricates verdicts without an agent, so a review still costs
-a model call. To keep cost down while iterating, start with one cheap, fast
-reviewer and a tight `timeout`.
+Note that `bastion review` never fabricates a verdict: a reviewer that executes
+runs on a real backend and costs a model call. What a re-run *can* do is skip
+execution entirely for a reviewer that already passed and whose inputs are
+unchanged, carrying the prior verdict forward at zero token cost (see
+[the local workflow](./local-workflow.md#re-runs-are-incremental)), so the loop's
+cost concentrates on first runs and on the reviewers your fixes touch. To keep
+cost down while iterating, start with one cheap, fast reviewer and a tight
+`timeout`.
 
 ## When something goes wrong
 

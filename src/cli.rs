@@ -61,6 +61,17 @@ pub enum Command {
         /// number is positive, so `--pr 0` is rejected at parse time.
         #[arg(long, value_name = "N")]
         pr: Option<NonZeroU64>,
+        /// Run only this triggered reviewer (repeatable). Names must belong to
+        /// reviewers the changeset triggered; an unknown or untriggered name is an
+        /// error. Excluding a triggered reviewer makes the run partial: it is
+        /// marked as such in the output and the stored run, and cannot be attested.
+        #[arg(long = "reviewer", visible_alias = "only", value_name = "NAME")]
+        reviewers: Vec<String>,
+        /// Execute every triggered reviewer even when its trigger-scoped diff is
+        /// unchanged since this branch's previous run (disable carrying prior
+        /// passes forward).
+        #[arg(long)]
+        fresh: bool,
     },
     /// Parse the reviewer registry and report any problems, without running a
     /// reviewer or spending a model call.
@@ -125,6 +136,26 @@ pub enum Command {
         #[arg(long, value_name = "PATH")]
         key: Option<PathBuf>,
     },
+    /// Update Bastion to the latest GitHub release, replacing the running binary.
+    ///
+    /// Resolves the latest published release, downloads the archive built for this
+    /// platform, verifies it against the release SHA-256 checksums, and swaps it
+    /// over the running binary in place (no shell or curl). It installs the same
+    /// bits as `scripts/install.sh`, so a self-update and a fresh install converge.
+    Update {
+        /// Report whether an update is available without installing it.
+        #[arg(long)]
+        check: bool,
+        /// Reinstall the latest release even when already up to date.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Internal: refresh the cached latest-release lookup, then exit.
+    ///
+    /// Spawned detached by the startup update check (see [`crate::update`]); not
+    /// part of the user-facing command set, so it is hidden from help.
+    #[command(name = "__update-check", hide = true)]
+    UpdateCheck,
 }
 
 /// Skills adapter subcommands. They install the skills bundled into this binary
@@ -194,6 +225,7 @@ pub enum GithubCommand {
 /// parse error or `--help`/`--version`.
 pub async fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
+    maybe_nag_about_update(&cli.command);
     let layout = match cli.data_dir {
         Some(root) => Layout::with_root(root),
         None => Layout::resolve()?,
@@ -209,6 +241,8 @@ pub async fn run() -> Result<ExitCode> {
             format,
             repo,
             pr,
+            reviewers,
+            fresh,
         } => {
             let cwd = std::env::current_dir().wrap_err("determining the current directory")?;
             // Parse the `--repo`/`--pr` pair into a GitHub source at the boundary so an
@@ -234,9 +268,14 @@ pub async fn run() -> Result<ExitCode> {
             } else {
                 user_config_dir.as_deref()
             };
-            let decision =
-                crate::commands::review(&layout, &cwd, &base, format, github, review_user_dir)
-                    .await?;
+            let options = crate::commands::ReviewOptions {
+                base,
+                format,
+                github,
+                only: reviewers,
+                fresh,
+            };
+            let decision = crate::commands::review(&layout, &cwd, options, review_user_dir).await?;
             // A blocked review is an expected, non-error outcome that must still
             // signal failure to the caller: map `block` to a non-zero exit.
             Ok(match decision {
@@ -299,7 +338,26 @@ pub async fn run() -> Result<ExitCode> {
             crate::commands::attest(&layout, run.as_deref(), key.as_deref())
                 .map(|()| ExitCode::SUCCESS)
         }
+        Command::Update { check, force } => crate::commands::update(check, force)
+            .await
+            .map(|()| ExitCode::SUCCESS),
+        Command::UpdateCheck => crate::commands::update_check_worker()
+            .await
+            .map(|()| ExitCode::SUCCESS),
     }
+}
+
+/// Emit the startup out-of-date nag for a normal command.
+///
+/// Skips the updater itself (it reports status directly) and the internal refresh
+/// worker (which must not recurse into another check). Everything else defers to
+/// [`crate::update::warn_if_outdated`], which applies the remaining gates (release
+/// build, interactive stderr, opt-out env) and spawns the background refresh.
+fn maybe_nag_about_update(command: &Command) {
+    if matches!(command, Command::Update { .. } | Command::UpdateCheck) {
+        return;
+    }
+    crate::update::warn_if_outdated(crate::version::VERSION);
 }
 
 /// clap value parser for human-friendly durations.
@@ -338,6 +396,51 @@ mod tests {
             Command::Review { repo, pr, .. } => {
                 assert_eq!(repo.as_deref(), Some("acme/app"));
                 assert_eq!(pr, NonZeroU64::new(42));
+            }
+            other => panic!("expected review, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn review_collects_repeatable_reviewer_selections_and_fresh() {
+        let cli = Cli::parse_from([
+            "bastion",
+            "review",
+            "--reviewer",
+            "tenant-isolation",
+            "--reviewer",
+            "perf",
+            "--fresh",
+        ]);
+        match cli.command {
+            Command::Review {
+                reviewers, fresh, ..
+            } => {
+                assert_eq!(reviewers, ["tenant-isolation", "perf"]);
+                assert!(fresh);
+            }
+            other => panic!("expected review, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn review_accepts_only_as_an_alias_for_reviewer() {
+        let cli = Cli::parse_from(["bastion", "review", "--only", "perf"]);
+        match cli.command {
+            Command::Review { reviewers, .. } => assert_eq!(reviewers, ["perf"]),
+            other => panic!("expected review, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn review_defaults_to_the_full_set_with_carry_enabled() {
+        let cli = Cli::parse_from(["bastion", "review"]);
+        match cli.command {
+            Command::Review {
+                reviewers, fresh, ..
+            } => {
+                assert!(reviewers.is_empty());
+                assert!(!fresh);
             }
             other => panic!("expected review, got {other:?}"),
         }

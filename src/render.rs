@@ -46,10 +46,16 @@ fn write_event_human<W: Write>(out: &mut W, event: &RunEvent) -> io::Result<()> 
             base,
             changed,
             reviewers,
+            partial,
         } => writeln!(
             out,
-            "run {run}: {branch} vs {base}, {changed} file(s) changed, {} reviewer(s) triggered",
-            reviewers.len()
+            "run {run}: {branch} vs {base}, {changed} file(s) changed, {} reviewer(s) {}",
+            reviewers.len(),
+            if *partial {
+                "selected (partial run)"
+            } else {
+                "triggered"
+            },
         ),
         RunEvent::ReviewerStarted {
             reviewer,
@@ -71,14 +77,16 @@ fn write_event_human<W: Write>(out: &mut W, event: &RunEvent) -> io::Result<()> 
             findings,
             duration_ms,
             replayed,
+            carried,
             ..
         } => {
             writeln!(
                 out,
-                "  {} {reviewer}: {summary} ({}s{})",
+                "  {} {reviewer}: {summary} ({}s{}{})",
                 marker(*verdict),
                 duration_ms / 1000,
                 if *replayed { ", replayed" } else { "" },
+                if *carried { ", carried" } else { "" },
             )?;
             for finding in findings {
                 write_finding(out, finding)?;
@@ -106,11 +114,19 @@ fn write_event_human<W: Write>(out: &mut W, event: &RunEvent) -> io::Result<()> 
             tokens_out,
             cache_read,
             cost_usd,
+            partial,
             ..
         } => writeln!(
             out,
-            "{} run complete: {}/{} gates passed ({}s{}, {cost_usd})",
+            "{} run complete{}: {}/{} gates passed ({}s{}, {cost_usd})",
             marker(*verdict),
+            // A filtered green speaks only for the reviewers that ran; say so on
+            // the one line a person actually reads.
+            if *partial {
+                " (partial: only the selected reviewers ran)"
+            } else {
+                ""
+            },
             gates.passed,
             gates.total,
             duration_ms / 1000,
@@ -157,8 +173,10 @@ pub fn write_runs<W: Write>(out: &mut W, format: Format, runs: &[RunSummary]) ->
                 let branch = run.branch.as_deref().unwrap_or("(unknown)");
                 writeln!(
                     out,
-                    "{}  {verdict:<5}  {branch}  {} reviewer(s)",
-                    run.run, run.reviewers
+                    "{}  {verdict:<5}  {branch}  {} reviewer(s){}",
+                    run.run,
+                    run.reviewers,
+                    if run.partial { "  (partial)" } else { "" },
                 )?;
             }
             Ok(())
@@ -192,6 +210,8 @@ mod tests {
 
     fn resolved() -> RunEvent {
         RunEvent::ReviewerResolved {
+            carried: false,
+            scope_digest: None,
             run: RunId("r-1".into()),
             reviewer: "tenant-isolation".into(),
             verdict: Decision::Block,
@@ -221,6 +241,7 @@ mod tests {
 
     fn completed(tokens_in: u64, tokens_out: u64, cache_read: u64) -> RunEvent {
         RunEvent::RunCompleted {
+            partial: false,
             run: RunId("r-1".into()),
             verdict: Decision::Pass,
             gates: crate::event::Gates {
@@ -310,6 +331,71 @@ mod tests {
     }
 
     #[test]
+    fn a_carried_resolved_event_carries_the_carried_suffix() {
+        let mut event = resolved();
+        let RunEvent::ReviewerResolved { carried, .. } = &mut event else {
+            unreachable!()
+        };
+        *carried = true;
+
+        let mut buf = Vec::new();
+        write_event(&mut buf, Format::Human, &event).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(
+            text.contains("(4s, carried)"),
+            "expected the carried suffix right after the elapsed time, got: {text}"
+        );
+    }
+
+    #[test]
+    fn a_partial_run_is_labelled_on_both_ends() {
+        let started = RunEvent::RunStarted {
+            run: RunId("r-1".into()),
+            branch: "feat".into(),
+            base: "main".into(),
+            changed: 3,
+            reviewers: vec![],
+            partial: true,
+        };
+        let mut buf = Vec::new();
+        write_event(&mut buf, Format::Human, &started).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(
+            text.contains("selected (partial run)"),
+            "the opening line must say the set was narrowed, got: {text}"
+        );
+
+        let mut event = completed(0, 0, 0);
+        let RunEvent::RunCompleted { partial, .. } = &mut event else {
+            unreachable!()
+        };
+        *partial = true;
+        let mut buf = Vec::new();
+        write_event(&mut buf, Format::Human, &event).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(
+            text.contains("run complete (partial: only the selected reviewers ran)"),
+            "the verdict line must not read as a full green, got: {text}"
+        );
+    }
+
+    #[test]
+    fn a_partial_run_summary_is_labelled_in_the_runs_listing() {
+        let run = RunSummary {
+            run: RunId("r-1".into()),
+            branch: Some("feat".into()),
+            base: Some("main".into()),
+            verdict: Some(Decision::Pass),
+            reviewers: 2,
+            partial: true,
+        };
+        let mut buf = Vec::new();
+        write_runs(&mut buf, Format::Human, &[run]).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(text.contains("(partial)"), "got: {text}");
+    }
+
+    #[test]
     fn run_attested_line_names_the_key_count_and_timestamp() {
         let event = RunEvent::AttestationReplayed {
             run: RunId("r-1".into()),
@@ -331,13 +417,19 @@ mod tests {
 
     #[test]
     fn run_attestation_fallback_line_states_the_reason() {
+        // A fallback event is only recorded for a refused attestation (a missing
+        // note is silent), so the sample reason is a genuine rejection.
         let event = RunEvent::AttestationFallback {
             run: RunId("r-1".into()),
-            reason: "no attestation note found on HEAD".into(),
+            reason: "the attested patch id does not match CI's diff".into(),
         };
         let mut buf = Vec::new();
         write_event(&mut buf, Format::Human, &event).unwrap();
         let text = String::from_utf8(buf).unwrap();
-        assert!(text.contains("attestation not honored: no attestation note found on HEAD"));
+        assert!(
+            text.contains(
+                "attestation not honored: the attested patch id does not match CI's diff"
+            )
+        );
     }
 }

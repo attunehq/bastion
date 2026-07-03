@@ -229,7 +229,7 @@ Every reviewer returns a structured judgment, captured via each backend's native
 **structured-output mechanism**, with a stable schema that Bastion can parse and aggregate. (In the current build that is a JSON schema for Claude Code and a requested fenced verdict block for Codex.) The schema is:
 
 ```yaml
-verdict: pass | block   # Ignored for "advisor" style reviewers, which always functionally "pass" with reported findings.
+verdict: pass | block   # Ignored for "advisor" style reviewers, which always functionally "pass" with their findings recorded as optional.
 summary: "..."          # Human-friendly review summary.
 findings:               # Allow the reviewer to point to specific files and lines with blocking or optional comments.
 - kind: "blocking"
@@ -245,6 +245,8 @@ findings:               # Allow the reviewer to point to specific files and line
 ```
 
 The top-level `verdict` is the authoritative gate decision; `findings` explain it. A `block` should carry at least one `blocking` finding (the reason it blocked), while a `pass` may still include `optional` findings as non-blocking suggestions. A finding's `kind` affects how a comment is surfaced, not the gate outcome; only `verdict` decides that.
+
+This is a universal invariant: a `pass` never carries a `blocking` finding (the two contradict each other, and trusting the authoritative `pass` would then fail open). Because an advisor is always resolved to a `pass`, the runner records its findings as `optional` regardless of what the reviewer emitted: an advisor's findings are advice, never a merge blocker. That keeps the invariant free of a per-mode exemption, so every path that reuses a persisted verdict (attestation replay and incremental carry) checks consistency the same way for gates and advisors.
 
 A reviewer enumerates every finding it can identify for the changeset in one pass, one per distinct instance, rather than stopping at the first. The author can then fix the whole set from a single run instead of paying a fresh review cycle per issue. This is a property of how each backend asks for findings (a shared exhaustive-findings instruction appended to the prompt), not of the gate logic, so a clean changeset still returns `pass` with no findings. The verdict schema itself caps nothing: `findings` is an unbounded list.
 

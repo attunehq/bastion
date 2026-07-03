@@ -62,7 +62,9 @@ A **gate** is a hard requirement: it must produce a clean `pass` for the merge t
 proceed. If it crashes, times out, or cannot produce a valid verdict, it resolves
 to a block, never a silent pass. An **advisor** comments but never holds up the
 merge; even a clean `block` verdict from an advisor is treated as a pass for
-aggregation (its findings still surface). A failed advisor is dropped.
+aggregation, and its findings are recorded as `optional` (an advisor's findings
+are advice, never a merge blocker) so they still surface as suggestions. A failed
+advisor is dropped.
 
 Use a gate for properties that must hold (tenant isolation, fail-closed error
 handling). Use an advisor for guidance you want surfaced but not enforced (test
@@ -88,7 +90,10 @@ findings:                # specific, located comments
 The top-level `verdict` is the decision; `findings` explain it. A `block` should
 carry at least one `blocking` finding (the reason), and a `pass` may still carry
 `optional` findings as non-blocking suggestions. A finding's `kind` changes how it
-is *surfaced*, not whether the merge proceeds; only `verdict` decides that.
+is *surfaced*, not whether the merge proceeds; only `verdict` decides that. A
+`pass` never carries a `blocking` finding: the two would contradict each other.
+Because an advisor is always resolved to a `pass`, its findings are recorded as
+`optional` regardless of what the reviewer emitted.
 
 **Findings are the actionable surface.** An agent fixing a PR gets everything it
 needs from the findings: a file, a line range, and what to change. It should never
@@ -102,9 +107,12 @@ does not need to ask for it.
 
 ## The merge gate
 
-Bastion runs all matched reviewers in parallel (they have wildly different
+Bastion runs the matched reviewers in parallel (they have wildly different
 latencies, one might take 90 seconds, another 15 minutes) and **aggregates** their
-verdicts into a single decision:
+verdicts into a single decision. Not every matched reviewer executes every time:
+in CI a reviewer covered by a verified attestation replays its recorded verdict,
+and on a re-run (local or in CI) a reviewer whose prior pass is unchanged carries it
+forward; both still count in the aggregate:
 
 - **All gates must pass.** The aggregate is `pass` only when every gate returned a
   clean `pass`.
@@ -168,8 +176,10 @@ which is forwarded in alongside the credentials.
    route: select reviewers whose trigger globs match
         |
         v
-   run matched reviewers in parallel, or on the CI surface replay from a verified
-   attestation with no backend dispatch (each executed reviewer is timeout-bounded)
+   run matched reviewers in parallel; a reviewer may instead replay from a verified
+   attestation (CI), or carry an unchanged prior pass forward from the branch's
+   previous run (local or CI), both with no backend dispatch (each executed reviewer
+   is timeout-bounded)
         |
         v
    each returns a verdict (pass/block + summary + findings)

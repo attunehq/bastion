@@ -71,6 +71,26 @@ pub fn attest(
     out: &mut impl std::io::Write,
 ) -> Result<()> {
     let run_id = store::resolve_run(layout, run)?;
+    let events = store::read_run(layout, &run_id)?;
+
+    // Checked before the seal: a partial run is never sealed, but "re-run
+    // `bastion review` with this binary" would be misleading advice when the
+    // actual problem is that the run covered only a hand-picked subset of the
+    // triggered reviewers.
+    if events.iter().any(|event| {
+        matches!(
+            event,
+            RunEvent::RunStarted { partial: true, .. }
+                | RunEvent::RunCompleted { partial: true, .. }
+        )
+    }) {
+        bail!(
+            "run '{run_id}' was partial (`bastion review --reviewer` ran a subset of the \
+             triggered reviewers); its verdict speaks only for those reviewers and cannot be \
+             attested. Run a full `bastion review` and attest that run instead"
+        );
+    }
+
     let seal = store::read_seal(layout, &run_id)?
         .ok_or_else(|| eyre!("run '{run_id}' was not sealed; re-run `bastion review` with this binary before attesting"))?;
 
@@ -85,7 +105,6 @@ pub fn attest(
         );
     }
 
-    let events = store::read_run(layout, &run_id)?;
     let sealed_reviewer_names: std::collections::BTreeSet<&str> =
         seal.reviewers.iter().map(String::as_str).collect();
     let mut sealed_events: Vec<(&str, &RunEvent)> = events
@@ -344,6 +363,7 @@ mod tests {
 
         let resolved_events = vec![
             RunEvent::RunStarted {
+                partial: false,
                 run: run_id.clone(),
                 branch: "feature".into(),
                 base: "base".into(),
@@ -360,6 +380,8 @@ mod tests {
                 ],
             },
             RunEvent::ReviewerResolved {
+                carried: false,
+                scope_digest: None,
                 run: run_id.clone(),
                 reviewer: "r1".into(),
                 verdict: Decision::Pass,
@@ -371,6 +393,8 @@ mod tests {
                 replayed: false,
             },
             RunEvent::ReviewerResolved {
+                carried: false,
+                scope_digest: None,
                 run: run_id.clone(),
                 reviewer: "r2".into(),
                 verdict: Decision::Pass,
@@ -382,6 +406,7 @@ mod tests {
                 replayed: false,
             },
             RunEvent::RunCompleted {
+                partial: false,
                 run: run_id.clone(),
                 verdict: Decision::Pass,
                 gates: Gates {
@@ -500,6 +525,7 @@ mod tests {
             &layout,
             &run_id,
             &[RunEvent::RunStarted {
+                partial: false,
                 run: run_id.clone(),
                 branch: "feature".into(),
                 base: "main".into(),
@@ -512,6 +538,49 @@ mod tests {
         let mut out = Vec::new();
         let err = attest(&repo, &layout, None, None, b"secret", &mut out).unwrap_err();
         assert!(err.to_string().contains("was not sealed"));
+    }
+
+    #[test]
+    fn attest_refuses_a_partial_run() {
+        // A filtered run (`bastion review --reviewer`) is never sealed, but the
+        // refusal must say *why* attesting it is wrong, not suggest re-running
+        // "with this binary" as the unsealed-run message does.
+        if !git_available() {
+            eprintln!("skipping: git not available");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init"]);
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        git(&repo, &["add", "a.txt"]);
+        git(&repo, &["commit", "-m", "base"]);
+
+        let layout = Layout::with_root(tmp.path().join("data"));
+        let run_id = RunId("r-partial".into());
+        store::write_run(
+            &layout,
+            &run_id,
+            &[RunEvent::RunStarted {
+                run: run_id.clone(),
+                branch: "feature".into(),
+                base: "main".into(),
+                changed: 1,
+                reviewers: vec![ReviewerRef {
+                    name: "r1".into(),
+                    mode: Mode::Gate,
+                }],
+                partial: true,
+            }],
+        )
+        .unwrap();
+
+        let mut out = Vec::new();
+        let err = attest(&repo, &layout, None, None, b"secret", &mut out).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("was partial"), "got: {message}");
+        assert!(message.contains("cannot be attested"), "got: {message}");
     }
 
     #[test]

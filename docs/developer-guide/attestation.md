@@ -57,9 +57,9 @@ contributors are not disabling lints." Three rules define what is trusted and wh
 
 The bundle binds to the committed HEAD tree, the merge-base tree, the
 `base..HEAD` patch-id, the effective config hash, the resolved reviewer events,
-and the seam and dirty flags. CI verifies every binding and falls back to a
-full run on any mismatch. `bastion attest` refuses dirty runs, so only
-committed content reaches CI as an attestation.
+and the seam and dirty flags. CI verifies every binding, and any mismatch skips
+replay so the reviewers resolve the ordinary way. `bastion attest` refuses dirty
+runs, so only committed content reaches CI as an attestation.
 
 - **The changeset, not the commit.** The merge-base tree and the head tree (with
   a patch-id over the diff). CI recomputes its own merge base against the PR's
@@ -70,17 +70,20 @@ committed content reaches CI as an attestation.
   the commit id). The note itself is still looked up by commit id, on HEAD or
   the PR's head SHA (see [Storage](#storage-a-git-note)), so a squash or rebase
   that changes the commit id leaves the note behind on the old, now-orphaned
-  commit; CI does not find it there and falls back to a full run. Re-running
-  `bastion attest` after a rewrite re-attaches the note to the new HEAD.
+  commit; CI does not find it there, so those reviewers resolve without replay.
+  Re-running `bastion attest` after a rewrite re-attaches the note to the new HEAD.
 - **The effective reviewer config.** A hash of the repository registry after
   each file's `defaults` are applied. The user-level registry is excluded:
   personal reviewers never gate anyone else's PR, so they cannot attest anything
   either. A local run's user-level reviewer events are simply absent from the
   bundle.
 - **Coverage.** The set of repository reviewers the local run routed and
-  executed. CI routes its own diff; a reviewer CI routes that the bundle does
-  not cover runs fresh. On a coverage mismatch, CI replays the attested
-  reviewers and executes the rest.
+  resolved, whether each executed a backend or carried its verdict forward
+  from a sealed, verified earlier run (the seal covers carried events exactly
+  like fresh ones). CI routes its own diff; a reviewer CI routes that the bundle
+  does not cover continues to carry planning, then carries an eligible prior pass
+  or executes fresh. On a coverage mismatch, CI replays the attested reviewers and
+  sends the rest through that same carry-or-execute path.
 - **The engine.** Implicit in the run seal rather than checked as a field: each
   release embeds its own sealing secret, so a bundle verifies only under the
   same release that produced it, and a new release (meaning new reviewer
@@ -168,9 +171,9 @@ id it hangs off, but the lookup itself is still by commit: CI looks for the
 note on HEAD, then the PR's head SHA (see
 [Verification and replay in CI](#verification-and-replay-in-ci)). A squash or
 rebase that changes the commit id leaves the note behind on the old, now
-orphaned commit; CI does not find it there and falls back to a full run.
-Re-running `bastion attest` after the rewrite re-attaches the note to the new
-HEAD.
+orphaned commit; CI does not find it there, so the reviewers resolve without
+replay. Re-running `bastion attest` after the rewrite re-attaches the note to the
+new HEAD.
 
 ## Signing
 
@@ -187,7 +190,8 @@ already uses), assembles them into an ephemeral `allowed_signers` input, and
 runs `ssh-keygen -Y verify` against it. Enrolling a signing key with GitHub is
 something the coding agent cannot do without the user's own GitHub
 credentials, so a signature by any other key, including one freshly minted on
-the author's machine, fails verification and falls back to a full run.
+the author's machine, fails verification, and CI resolves the reviewers without
+replay.
 
 Registry config is a single switch: `attestations: true` enables the feature
 (default off; CI ignores notes entirely without it), and a reviewer can opt out
@@ -203,10 +207,34 @@ run and a run whose patch-id genuinely failed to compute are never confused.
 The seal persists alongside a run's other files, at `runs/<id>/seal.json`
 under the data directory (see [Local surface](./local-surface.md#the-data-directory)).
 `bastion attest` reads it to build a bundle. A run has no `seal.json`, and so
-cannot be attested, when it was a zero-match run, when its bindings could not
-be derived, when it resolved no repository-reviewer event, or when it predates
-sealing. Sealing failure never fails the review itself, so the run is
-otherwise complete, just unattestable.
+cannot be attested, when it was a zero-match run, when it was partial
+(`bastion review --reviewer` ran a subset of the triggered reviewers, and its
+aggregate must not become attestable as a full verdict; `bastion attest` also
+refuses such a run explicitly, with the partial reason rather than the generic
+unsealed one), when its bindings could not be derived, when it resolved no
+repository-reviewer event, or when it predates sealing. Sealing failure never
+fails the review itself, so the run is otherwise complete, just unattestable.
+
+### Carried verdicts and the seal chain
+
+A local re-run carries a prior pass forward when the reviewer's trigger-scoped
+diff is unchanged (see
+[the local surface](./local-surface.md#incremental-re-review)). A carried
+verdict participates in the new run's seal exactly like a fresh one, and that
+is sound because the chain never has an unverified link: a repository reviewer
+carries only from a prior run whose own seal verifies (and records no test
+seam), and the digest binds the actual content the reviewer judged, so digest
+equality is the binary's proof that the carried verdict still describes the
+content now under seal. Attesting a run with carried verdicts is therefore the
+author vouching for the same thing they always vouch for: a chain of
+binary-verified local runs over exactly this content. A user-level reviewer
+needs no such chain (it is never sealed and never gates anyone else's PR). CI
+carries as well, from its own prior CI run: a repository reviewer carries only
+from a prior CI run whose seal verifies, and that carried verdict folds into the
+new CI run's seal the same way. This does not weaken attestation, because CI
+never runs `bastion attest`: a carried CI verdict is reused within CI, never
+signed into a bundle, so the only run store that reaches the replay path is still
+the author's own signed one.
 
 ## The `bastion attest` flow
 
@@ -236,19 +264,25 @@ otherwise complete, just unattestable.
 purely local review never attempts it. It first checks whether the CI
 checkout is dirty (uncommitted tracked changes or untracked files). A dirty
 checkout never reaches note lookup: `commands::review` records a
-`run.attestation-fallback` event with the reason and executes every reviewer
-fresh, since a dirty working tree's reviewers see content no attestation's
-committed bindings name. Given a clean checkout, it looks up the note on HEAD
+`run.attestation-fallback` event with the reason, and its reviewers then resolve
+the ordinary way through carry or fresh execution, since a dirty working tree's
+reviewers see content no attestation's committed bindings name. Given a clean checkout, it looks up the note on HEAD
 first, falling back to the PR's head SHA when HEAD carries none (CI's
 checkout can be a merge commit, so the note the author actually attested may
-hang off the PR's own head commit instead). Given a note, it verifies the
+hang off the PR's own head commit instead). When *neither* carries a note, no
+attestation was offered: this is not a refusal, so the run resolves to
+`AttestationOutcome::NotAttested`, continues through ordinary carry planning (an
+unchanged prior pass may still carry, the rest execute), records no
+`run.attestation-fallback` event, and says nothing about attestation on any
+surface (an un-attested PR is the ordinary case and must not be nagged). Given a note, it verifies the
 author's signature against the PR author's GitHub-registered signing keys
 (`GET /users/{username}/ssh_signing_keys`), verifies the run seal with its own
 embedded secret, and checks every binding (head tree, merge-base tree,
 patch-id, config hash) against its own re-derived values. Then, per routed
 reviewer: one covered by the bundle and not opted out (`attestation: never`)
 replays; everything else, including a reviewer the bundle does not cover,
-executes fresh. Coverage mismatch degrades rather than invalidating the whole
+continues to carry planning and then carries an eligible prior pass or executes
+fresh. Coverage mismatch degrades rather than invalidating the whole
 plan.
 
 The merged result flows into the normal report path, so `bastion github report`
@@ -266,16 +300,21 @@ does for the drift advisory. Anyone reading the PR can see that the gate was
 satisfied by an attested local run, who attested it, and which note on the head
 commit backs it.
 
-Every failure is fail-closed to a full run, never to a silent pass: a dirty CI
-checkout (checked before note lookup even runs), a missing or unverifiable
-note, a key the author has not registered with GitHub, a seal that does not
-verify (tampered, produced by a different release, or carrying an active test
-seam), a binding mismatch, or a stale base all mean the reviewers simply
-execute. The run records why as a `run.attestation-fallback`
-event, and the sticky comment surfaces the same reason as a line under the
-headline. Replay itself is recorded as a single `run.attested` event covering
-every replayed reviewer, and each replayed reviewer's own `reviewer.resolved`
-event carries `replayed: true`.
+Every failure is fail-closed to ordinary reviewer resolution, never to a silent
+pass: a dirty CI checkout (checked before note lookup even runs), an unreadable or
+unverifiable note, a key the author has not registered with GitHub, a seal that
+does not verify (tampered, produced by a different release, or carrying an active
+test seam), a binding mismatch, or a stale base all skip replay. The affected
+reviewers then resolve the ordinary way: an eligible unchanged prior pass may
+still carry, and the rest execute. Each of these is an attestation that was
+*offered and refused*: the run records why as a `run.attestation-fallback` event,
+and the sticky comment surfaces the reason in a `[!WARNING]` block (the same alert
+mechanism as the skills-drift warning) so a rejected attestation reads as the
+notable event it is. A commit that simply carries no note is *not* on this list:
+it offered nothing to refuse, so it is silent (see above), and only a refusal
+draws the warning. Replay itself is recorded as a single `run.attested` event
+covering every replayed reviewer, and each replayed reviewer's own
+`reviewer.resolved` event carries `replayed: true`.
 
 ### The adopter's two workflow requirements
 

@@ -173,10 +173,14 @@ jobs:
 
       - name: Restore prior run history
         # Best effort: bring the most recent prior run of this PR branch into the data
-        # directory so reviewers recall the findings they raised on the last push (a fresh
-        # Actions runner starts with an empty store, so without this the GitHub
-        # prior-findings memory would never see anything). A first push, or an expired
-        # artifact, simply restores nothing and reviews with no prior findings.
+        # directory. A fresh Actions runner starts with an empty store, so without this
+        # neither reuse mechanism would ever see anything: reviewers recall the findings
+        # they raised on the last push, and an unchanged reviewer carries its prior pass
+        # forward instead of re-executing (docs/developer-guide/local-surface.md,
+        # "Incremental carry") when the restored run's seal verifies. The uploaded
+        # artifact already carries each run's seal.json alongside run.jsonl, so carry has
+        # what it needs. A first push, or an expired artifact, simply restores nothing:
+        # the review runs every reviewer fresh with no prior findings.
         env:
           GH_TOKEN: ${{ github.token }}
           # Pass workflow context through the environment instead of interpolating it
@@ -207,8 +211,13 @@ jobs:
           # Keep run history inside the workspace so it can be uploaded as an
           # artifact instead of landing in the runner's per-user data directory.
           BASTION_DATA_DIR: ${{ github.workspace }}/.bastion
-          # Resolve the `codex` binary npm just put on PATH.
-          BASTION_CODEX_BIN: codex
+          # We deliberately do NOT set BASTION_CODEX_BIN. The Codex CLI is already on
+          # PATH (npm installed it globally), so the codex backend resolves it by name
+          # with no override. A backend-path override marks the run's seal with a test
+          # seam, and a seam-tainted seal is disqualified from being carried forward on
+          # the next push (and from attestation). Resolving `codex` on PATH seals clean,
+          # so an unchanged reviewer carries its pass on the next run instead of paying
+          # to re-execute (docs/developer-guide/local-surface.md, "Incremental carry").
           # Lets the review gather the PR's description and discussion as reviewer
           # context (read-only; best effort, so a failure here never fails the review).
           GITHUB_TOKEN: ${{ github.token }}

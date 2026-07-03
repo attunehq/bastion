@@ -33,7 +33,7 @@ Each line carries a `type`:
 
 | Event | What to do with it |
 | --- | --- |
-| `run.started` | Lists the reviewers that matched your changes and will run. |
+| `run.started` | Lists the reviewers that matched your changes. Each executes, or has an unchanged prior pass carried forward. |
 | `reviewer.started` | One reviewer began. Nothing to do. |
 | `reviewer.resolved` | One reviewer finished. If its `verdict` is `block`, act on its `findings`. |
 | `run.completed` | The aggregate `verdict` (`pass` or `block`) and the gate tally. |
@@ -52,6 +52,26 @@ need to open anything else.
 5. Then open your PR.
 
 Do not open transcripts to do this. The findings already say what to change.
+
+## Re-runs are incremental by default
+
+A re-run on the same branch does not re-execute every reviewer. A reviewer whose
+previous run passed, and whose triggered files are unchanged since then, has its
+pass carried forward: the stream marks it `"carried": true`, it spends no tokens,
+and it still counts in the gate tally. Reviewers whose triggered files your fix
+touched (which always includes the ones that blocked, since you just changed the
+code they flagged) execute fresh. So the loop above is already the cheap loop;
+let it work.
+
+- Pass `--fresh` to re-execute everything (say, after changing something a
+  reviewer's trigger does not cover but you believe it should judge).
+- Pass `--reviewer <name>` (repeatable; alias `--only`) to run a hand-picked
+  subset of the triggered reviewers. The run is then marked **partial**
+  (`"partial": true` on `run.started` and `run.completed`): its green speaks
+  only for the reviewers that ran, it cannot be attested, and it does not
+  replace a full green. Use it to iterate on one stubborn reviewer, then finish
+  with a normal `bastion review` (the unchanged passes carry, so the final full
+  run is still cheap). An unknown or untriggered name is an error, not a no-op.
 
 ## Attesting a green run, if the registry opts in
 
@@ -72,14 +92,18 @@ Signing uses your SSH key (`git config user.signingkey`, or `--key <path>`) and
 may prompt for presence (a hardware token or keychain confirmation). That
 prompt is expected, not a hang; wait for it.
 
-`bastion attest` refuses runs it cannot verify: a run through a test seam, a
-run store edited after the fact, or a repository that has moved on (a new
-commit, a changed registry) since the review. Do not work around a refusal.
+`bastion attest` refuses runs it cannot verify: a partial run (`--reviewer`), a
+run through a test seam, a run store edited after the fact, or a repository
+that has moved on (a new commit, a changed registry) since the review. Do not
+work around a refusal.
 Re-run `bastion review` and attest that fresh run instead.
 
 Attesting is optional even when the registry allows it. If you skip these two
-commands, CI runs every reviewer fresh and the PR report says why the
-attestation was not honored. See
+commands, CI resolves reviewers the ordinary way (an unchanged prior pass still
+carries, the rest execute) and says nothing about attestation: an un-attested PR
+is the ordinary case, not a problem to flag. The report warns only when an
+attestation was offered and refused, for example a note that no longer matches
+CI's checkout. See
 [Attesting a run for CI](https://github.com/jssblck/bastion/blob/main/docs/user-guide/local-workflow.md#attesting-a-run-for-ci)
 for the full mechanics and trust model.
 
