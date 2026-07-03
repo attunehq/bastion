@@ -168,32 +168,8 @@ pub async fn review(
         return Ok(Decision::Pass);
     }
 
-    // Assemble the review context: the author's stated intent (the PR body, or this
-    // branch's commit messages locally), this branch's prior findings recalled from the
-    // run store, and the surrounding discussion (GitHub only). Empty when nothing
-    // applies, which leaves every reviewer's prompt exactly as it was.
-    let mut context = ReviewContext {
-        intent: git::commit_messages(&repo_root, base),
-        comments: Vec::new(),
-        prior_findings: store::prior_findings(layout, &branch),
-    };
-    let mut gathered_github: Option<crate::github::context::GatheredContext> = None;
-    if let Some(source) = github.as_ref() {
-        match gather_github_context(source).await {
-            Ok(gathered) => {
-                // A PR body is a better statement of intent than the commit messages,
-                // so it wins when present; the discussion is GitHub-only.
-                if gathered.intent.is_some() {
-                    context.intent = gathered.intent.clone();
-                }
-                context.comments = gathered.comments.clone();
-                gathered_github = Some(gathered);
-            }
-            Err(err) => {
-                eprintln!("bastion review: continuing without GitHub context ({err:#})");
-            }
-        }
-    }
+    let (context, gathered_github) =
+        assemble_context(&repo_root, base, &branch, layout, github.as_ref()).await;
 
     let seal = derive_seal_bindings(&repo_root, base, &repo_attestation);
     // A dirty working tree is a first-class seal input, not merely a caveat: a
@@ -232,117 +208,25 @@ pub async fn review(
         _ => None,
     };
 
-    let (replayed, attestation, attestation_fallback, matched): (
-        std::collections::BTreeMap<String, runner::ReplayedReviewer>,
-        Option<runner::AttestationAudit>,
-        Option<RunEvent>,
-        Vec<&crate::reviewer::Reviewer>,
-    ) = match attested {
-        Some(crate::attest::AttestationOutcome::Replay(plan)) => {
-            let bundle_public_key = plan.bundle.public_key.clone();
-            let bundle_attested_at = plan.bundle.attested_at.clone();
-            let mut replayed = std::collections::BTreeMap::new();
-            for reviewer in &matched {
-                if let Some(event) = plan.replay.get(&reviewer.name) {
-                    replayed.insert(
-                        reviewer.name.clone(),
-                        runner::ReplayedReviewer {
-                            reviewer: (*reviewer).clone(),
-                            event: event.clone(),
-                        },
-                    );
-                }
-            }
-            let fresh: Vec<&crate::reviewer::Reviewer> = matched
-                .iter()
-                .copied()
-                .filter(|r| !replayed.contains_key(&r.name))
-                .collect();
-            if replayed.is_empty() {
-                (replayed, None, None, fresh)
-            } else {
-                let callout = format!(
-                    "bastion review: {} reviewer(s) replayed from a signed local attestation (key {}, attested {}): {}",
-                    replayed.len(),
-                    bundle_public_key,
-                    bundle_attested_at,
-                    replayed.keys().cloned().collect::<Vec<_>>().join(", "),
-                );
-                // Fallible on purpose: a closed stderr must not panic the gate
-                // out of an otherwise valid review.
-                let _ = writeln!(io::stderr(), "{callout}");
-                (
-                    replayed,
-                    Some(runner::AttestationAudit {
-                        public_key: bundle_public_key,
-                        attested_at: bundle_attested_at,
-                    }),
-                    None,
-                    fresh,
-                )
-            }
-        }
-        Some(crate::attest::AttestationOutcome::Fallback { reason }) => {
-            // Fallible on purpose: the fallback must still render and the
-            // fresh reviewers must still run if stderr is closed.
-            let _ = writeln!(
-                io::stderr(),
-                "bastion review: attestation not honored: {reason}"
-            );
-            let fallback = RunEvent::AttestationFallback {
-                run: run.clone(),
-                reason,
-            };
-            render::write_event(&mut out, format, &fallback)?;
-            (
-                std::collections::BTreeMap::new(),
-                None,
-                Some(fallback),
-                matched,
-            )
-        }
-        // No note was offered (`NotAttested`), or attestation was never attempted
-        // (`None`): either way there is nothing to tell the author, so run every
-        // matched reviewer fresh with no event and no stderr line. Surfacing a
-        // "no attestation note found" notice here would nag every un-attested PR.
-        Some(crate::attest::AttestationOutcome::NotAttested) | None => {
-            (std::collections::BTreeMap::new(), None, None, matched)
-        }
-    };
+    let AttestationResolution {
+        replayed,
+        attestation,
+        fallback: attestation_fallback,
+        fresh: matched,
+    } = resolve_attestation(attested, matched, &run);
+    // Render the fallback (an offered attestation that was refused) to the live
+    // stream before any reviewer resolves, so the plan reads the reason up front.
+    // It is also carried into `ExecContext` so persistence keeps it.
+    if let Some(fallback) = &attestation_fallback {
+        render::write_event(&mut out, format, fallback)?;
+    }
 
     // Trigger-scoped digests for everything about to run, stamped onto each
-    // resolved event so the *next* run can decide whether to carry it. Best
-    // effort: a digest that fails to compute only leaves that reviewer
-    // executing fresh and uncarryable, never fails the review.
-    let mut scope_digests: std::collections::BTreeMap<String, String> = Default::default();
-    let mut digest_probe: Option<runner::DigestProbe> = None;
-    match git::merge_base(&repo_root, base) {
-        Ok(merge_base) => {
-            for reviewer in &matched {
-                match crate::carry::scope_digest(&repo_root, base, &merge_base, reviewer, &changed)
-                {
-                    Ok(digest) => {
-                        scope_digests.insert(reviewer.name.clone(), digest);
-                    }
-                    Err(err) => tracing::warn!(
-                        reviewer = %reviewer.name,
-                        error = %err,
-                        "could not compute a scope digest; the reviewer executes fresh and cannot be carried from"
-                    ),
-                }
-            }
-            // The runner re-derives every stamped digest after the reviewers
-            // finish, so a tree that changed mid-run cannot leave a stale
-            // digest behind for a later run to carry from.
-            digest_probe = Some(runner::DigestProbe {
-                base: base.to_string(),
-                merge_base,
-            });
-        }
-        Err(err) => {
-            tracing::warn!(error = %err, "could not resolve a merge base; no scope digests this run");
-        }
-    }
+    // resolved event so the *next* run can decide whether to carry it. The runner
+    // re-derives every stamped digest after the reviewers finish (through the
+    // probe), so a tree that changed mid-run cannot leave a stale digest behind
+    // for a later run to carry from.
+    let (scope_digests, digest_probe) = plan_scope_digests(&repo_root, base, &matched, &changed);
 
     // Carry prior passes forward ([`crate::carry`]): both locally and in CI, a
     // reviewer whose prior run on this branch passed and whose trigger-scoped
@@ -355,25 +239,15 @@ pub async fn review(
     // candidate (it is no longer in `matched`). Carry runs only for the full
     // triggered set (an explicit `--reviewer` selection asks for those reviewers to
     // run) and only unless `--fresh` opted out.
-    let carried = if !fresh && only.is_empty() {
-        let candidates: Vec<(&crate::reviewer::Reviewer, String)> = matched
-            .iter()
-            .filter_map(|r| {
-                scope_digests
-                    .get(&r.name)
-                    .map(|digest| (*r, digest.clone()))
-            })
-            .collect();
-        crate::carry::plan(
-            layout,
-            &branch,
-            &candidates,
-            &repo_attestation.reviewers,
-            crate::seal::embedded_secret(),
-        )
-    } else {
-        Default::default()
-    };
+    let carried = plan_carry(
+        layout,
+        &branch,
+        &matched,
+        &scope_digests,
+        &repo_attestation.reviewers,
+        fresh,
+        &only,
+    );
     let matched: Vec<&crate::reviewer::Reviewer> = matched
         .into_iter()
         .filter(|r| !carried.contains_key(&r.name))
@@ -497,6 +371,236 @@ fn select_reviewers<'a>(
         .copied()
         .filter(|r| requested.contains(r.name.as_str()))
         .collect())
+}
+
+/// Assemble the review context every reviewer sees beyond the diff: the author's
+/// stated intent (the PR body when reviewing one, otherwise this branch's commit
+/// messages), this branch's prior findings recalled from the run store, and the
+/// surrounding discussion (GitHub only).
+///
+/// GitHub gathering is best effort: a failure to reach it is logged and the
+/// review proceeds on the local context alone. The returned
+/// [`GatheredContext`](crate::github::context::GatheredContext), when present, is
+/// also what attestation replay reads the PR author and head SHA from. Empty
+/// context leaves every reviewer's prompt exactly as it was.
+async fn assemble_context(
+    repo_root: &Path,
+    base: &str,
+    branch: &str,
+    layout: &Layout,
+    github: Option<&GithubSource>,
+) -> (
+    ReviewContext,
+    Option<crate::github::context::GatheredContext>,
+) {
+    let mut context = ReviewContext {
+        intent: git::commit_messages(repo_root, base),
+        comments: Vec::new(),
+        prior_findings: store::prior_findings(layout, branch),
+    };
+    let Some(source) = github else {
+        return (context, None);
+    };
+    match gather_github_context(source).await {
+        Ok(gathered) => {
+            // A PR body is a better statement of intent than the commit messages,
+            // so it wins when present; the discussion is GitHub-only.
+            if gathered.intent.is_some() {
+                context.intent = gathered.intent.clone();
+            }
+            context.comments = gathered.comments.clone();
+            (context, Some(gathered))
+        }
+        Err(err) => {
+            eprintln!("bastion review: continuing without GitHub context ({err:#})");
+            (context, None)
+        }
+    }
+}
+
+/// What resolving a run's attestation plan settled: which reviewers replay, the
+/// audit trail, an optional fallback event, and the reviewers still to execute.
+struct AttestationResolution<'a> {
+    /// Reviewers replaying a verified attestation instead of executing, keyed by
+    /// name. Empty for any local review and for any CI run without a verified
+    /// bundle.
+    replayed: std::collections::BTreeMap<String, runner::ReplayedReviewer>,
+    /// The attestation audit trail, present only when something replayed.
+    attestation: Option<runner::AttestationAudit>,
+    /// The `run.attestation-fallback` event to render and persist, present only
+    /// when an offered attestation was refused. A genuinely absent note is not a
+    /// refusal and produces no event.
+    fallback: Option<RunEvent>,
+    /// The reviewers that still execute fresh this run: everything not replayed.
+    fresh: Vec<&'a crate::reviewer::Reviewer>,
+}
+
+/// Resolve a computed [`AttestationOutcome`](crate::attest::AttestationOutcome)
+/// into the run's replay set, audit trail, optional fallback event, and the
+/// reviewers still to execute fresh.
+///
+/// Renders no `run.jsonl` event itself: the caller renders the returned
+/// `fallback` so the ordering (before any reviewer resolves) stays visible at the
+/// call site. The stderr callouts it does write are advisory and deliberately
+/// fallible, since a closed stderr must never panic the gate out of an otherwise
+/// valid review. A genuinely absent note (`NotAttested`) or an attestation never
+/// attempted (`None`) runs every reviewer fresh with no event and no stderr line,
+/// so an un-attested PR is never nagged.
+fn resolve_attestation<'a>(
+    attested: Option<crate::attest::AttestationOutcome>,
+    matched: Vec<&'a crate::reviewer::Reviewer>,
+    run: &RunId,
+) -> AttestationResolution<'a> {
+    let plan = match attested {
+        Some(crate::attest::AttestationOutcome::Replay(plan)) => plan,
+        Some(crate::attest::AttestationOutcome::Fallback { reason }) => {
+            let _ = writeln!(
+                io::stderr(),
+                "bastion review: attestation not honored: {reason}"
+            );
+            return AttestationResolution {
+                replayed: std::collections::BTreeMap::new(),
+                attestation: None,
+                fallback: Some(RunEvent::AttestationFallback {
+                    run: run.clone(),
+                    reason,
+                }),
+                fresh: matched,
+            };
+        }
+        Some(crate::attest::AttestationOutcome::NotAttested) | None => {
+            return AttestationResolution {
+                replayed: std::collections::BTreeMap::new(),
+                attestation: None,
+                fallback: None,
+                fresh: matched,
+            };
+        }
+    };
+
+    let bundle_public_key = plan.bundle.public_key.clone();
+    let bundle_attested_at = plan.bundle.attested_at.clone();
+    let mut replayed = std::collections::BTreeMap::new();
+    for reviewer in &matched {
+        if let Some(event) = plan.replay.get(&reviewer.name) {
+            replayed.insert(
+                reviewer.name.clone(),
+                runner::ReplayedReviewer {
+                    reviewer: (*reviewer).clone(),
+                    event: event.clone(),
+                },
+            );
+        }
+    }
+    let fresh: Vec<&crate::reviewer::Reviewer> = matched
+        .iter()
+        .copied()
+        .filter(|r| !replayed.contains_key(&r.name))
+        .collect();
+    if replayed.is_empty() {
+        return AttestationResolution {
+            replayed,
+            attestation: None,
+            fallback: None,
+            fresh,
+        };
+    }
+
+    let callout = format!(
+        "bastion review: {} reviewer(s) replayed from a signed local attestation (key {}, attested {}): {}",
+        replayed.len(),
+        bundle_public_key,
+        bundle_attested_at,
+        replayed.keys().cloned().collect::<Vec<_>>().join(", "),
+    );
+    // Fallible on purpose: a closed stderr must not panic the gate.
+    let _ = writeln!(io::stderr(), "{callout}");
+    AttestationResolution {
+        replayed,
+        attestation: Some(runner::AttestationAudit {
+            public_key: bundle_public_key,
+            attested_at: bundle_attested_at,
+        }),
+        fallback: None,
+        fresh,
+    }
+}
+
+/// Compute the trigger-scoped digest for each reviewer about to run, plus the
+/// probe the runner needs to re-derive them after execution.
+///
+/// Best effort: a reviewer whose digest fails to compute is left out of the map
+/// (it executes fresh and cannot be carried from), and a run with no resolvable
+/// merge base gets no digests and no probe at all. Neither ever fails the review.
+fn plan_scope_digests(
+    repo_root: &Path,
+    base: &str,
+    matched: &[&crate::reviewer::Reviewer],
+    changed: &[String],
+) -> (
+    std::collections::BTreeMap<String, String>,
+    Option<runner::DigestProbe>,
+) {
+    let mut scope_digests = std::collections::BTreeMap::new();
+    let merge_base = match git::merge_base(repo_root, base) {
+        Ok(merge_base) => merge_base,
+        Err(err) => {
+            tracing::warn!(error = %err, "could not resolve a merge base; no scope digests this run");
+            return (scope_digests, None);
+        }
+    };
+    for reviewer in matched {
+        match crate::carry::scope_digest(repo_root, base, &merge_base, reviewer, changed) {
+            Ok(digest) => {
+                scope_digests.insert(reviewer.name.clone(), digest);
+            }
+            Err(err) => tracing::warn!(
+                reviewer = %reviewer.name,
+                error = %err,
+                "could not compute a scope digest; the reviewer executes fresh and cannot be carried from"
+            ),
+        }
+    }
+    let probe = runner::DigestProbe {
+        base: base.to_string(),
+        merge_base,
+    };
+    (scope_digests, Some(probe))
+}
+
+/// Plan which prior passes carry forward this run ([`crate::carry`]).
+///
+/// Carry runs only for the full triggered set and only when the author did not
+/// opt out: `--fresh` disables it, and an explicit `--reviewer` selection asks
+/// for those reviewers to run, so a non-empty `only` disables it too. A reviewer
+/// with no computed scope digest is not a carry candidate.
+fn plan_carry(
+    layout: &Layout,
+    branch: &str,
+    matched: &[&crate::reviewer::Reviewer],
+    scope_digests: &std::collections::BTreeMap<String, String>,
+    repo_reviewers: &std::collections::BTreeSet<String>,
+    fresh: bool,
+    only: &[String],
+) -> std::collections::BTreeMap<String, crate::carry::Carried> {
+    if fresh || !only.is_empty() {
+        return Default::default();
+    }
+    let candidates: Vec<(&crate::reviewer::Reviewer, String)> = matched
+        .iter()
+        .filter_map(|r| {
+            scope_digests
+                .get(&r.name)
+                .map(|digest| (*r, digest.clone()))
+        })
+        .collect();
+    crate::carry::plan(
+        layout,
+        branch,
+        &candidates,
+        repo_reviewers,
+        crate::seal::embedded_secret(),
+    )
 }
 
 /// Attempt to verify and plan an attestation replay for a CI run.
