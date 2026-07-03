@@ -136,12 +136,13 @@ deliberate malice the
 [threat model](./design.md#threat-model--trust-boundary) already excludes. The
 seal stops inadvertent run-store edits, stale-run replay, and reviewer stubbing.
 
-The seal binds the reviewed content, not commit metadata. It names the content
-reviewed, the base it was diffed against, the policy that ran, the engine that
-ran it, and what was concluded. The seal also records whether the working tree
-was dirty at review time, and `bastion attest` refuses a run sealed dirty. So
-an attestable review has to run over committed content: review, commit
-nothing further, then attest.
+The seal binds committed content, not commit metadata. It names the committed
+HEAD tree the run reviewed, the base it was diffed against, the policy that
+ran, the engine that ran it, and what was concluded. A review over a dirty
+working tree saw content those trees do not capture, so the seal records the
+dirty flag and `bastion attest` refuses such a run. An attestable review
+therefore runs over committed content: review, commit nothing further, then
+attest.
 
 The seal says nothing about what any commit message said or whether a commit
 was signed, because none of that affects what the reviewers saw: commit
