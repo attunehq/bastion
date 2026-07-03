@@ -155,7 +155,9 @@ version:
   (a `[!WARNING]` callout) when the checked-out repo's bundled skills are missing or
   drifted from the reporting binary, computed via `skills::assess`; it is advisory only
   and never touches a check-run conclusion. The local `bastion review` mirrors it to
-  stderr. Check runs need a GitHub App installation token, so this
+  stderr, but only when the repository has adopted Bastion (a repo-level registry is
+  present); a user-level-only local review stays silent (see the `src/skills.rs` entry).
+  Check runs need a GitHub App installation token, so this
   runs under one (the default Actions `GITHUB_TOKEN` qualifies; a classic PAT does
   not). API-created check runs carry no check-suite id, so under the shared
   `github-actions` identity GitHub buckets them into a sibling workflow's suite (they
