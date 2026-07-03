@@ -35,8 +35,10 @@ passed may carry its verdict forward instead of executing again, locally and in 
 A CI review (`--repo`/`--pr`)
 against a repository with `attestations: true` first checks for a verified
 attestation covering the run: a reviewer the attestation covers replays its recorded
-verdict, with no backend dispatch and no timeout; everything else executes as usual
-(see [Attestation](../developer-guide/attestation.md)).
+verdict, with no backend dispatch and no timeout; every other reviewer then resolves
+the ordinary way, carrying its prior pass if its scoped content is unchanged and
+otherwise executing fresh (see
+[Attestation](../developer-guide/attestation.md)).
 
 - `--base <branch>`: the branch to diff against. Defaults to `main`.
 - `--format <human|jsonl>`: output format. Defaults to `human`.
@@ -138,7 +140,7 @@ The event types:
 | --- | --- |
 | `run.started` | The run began; lists the reviewers in the plan: each executes, replays from a verified attestation, or carries from the branch's previous run (locally or in CI). Under `--reviewer` the list holds only the selected reviewers, and the event carries `partial: true` when that selection excludes at least one triggered reviewer. |
 | `reviewer.started` | One reviewer began: dispatched to its backend, reconstructed from a verified attestation bundle, or carried from the branch's previous run; the latter two dispatch no backend. |
-| `reviewer.resolved` | One reviewer finished; carries its `verdict`, `summary`, `findings`, `usage`, and a `has_transcript` flag. Carries `replayed: true` when the verdict came from a verified attestation, and `carried: true` when it was carried forward from the branch's previous run (local or CI) instead of a fresh execution. The run also stamps `scope_digest` on each reviewer that executed or carried (a replayed one carries none), a hash of everything the verdict was keyed to (the reviewer's definition plus its trigger-scoped diffs, commit messages, and untracked content); a later run carries this verdict only when its own digest is identical. |
+| `reviewer.resolved` | One reviewer finished; carries its `verdict`, `summary`, `findings`, `usage`, and a `has_transcript` flag. Carries `replayed: true` when the verdict came from a verified attestation, and `carried: true` when it was carried forward from the branch's previous run (local or CI) instead of a fresh execution. A reviewer that produced a real verdict this run (a fresh execution or a carried pass) is also stamped with `scope_digest`, a hash of everything the verdict was keyed to (the reviewer's definition plus its trigger-scoped diffs, commit messages, and untracked content); a later run carries a prior pass only when its own digest is identical. The field is absent when a reviewer failed to produce a verdict (a crash, a timeout, or malformed output) and when its scoped content changed while the run was in flight, since neither leaves a verdict a later run may carry; a replayed reviewer carries no digest of its own. |
 | `run.completed` | The aggregate decision and the gate tally, plus the run's wall-clock `duration_ms` and the usage totals (`tokens_in`, `tokens_out`, `cache_read`, `cost_usd`) summed across reviewers. Carries `partial: true` (as does `run.started`) when `--reviewer` narrowed the run. |
 | `run.attested` | A signed local run was replayed; carries the replayed `reviewers`, the attesting `public_key`, and `attested_at`. |
 | `run.attestation-fallback` | Attestation was attempted but not honored; carries the `reason` (a missing note, an unregistered key, a stale binding, and so on). |
