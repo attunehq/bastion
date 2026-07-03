@@ -149,13 +149,15 @@ The note itself does not push automatically; run the printed command (or fold it
 
 For the repository's reviewers, the local and GitHub surfaces carry the same data; only the transport differs. How the events map to the GitHub surfaces:
 
-| GitHub                                                          | Local                                 |
-| --------------------------------------------------------------- | ------------------------------------- |
-| A per-reviewer check run reaching its conclusion                | `reviewer.resolved` event             |
-| Findings in the sticky PR comment and as check-run annotations  | `findings` in `reviewer.resolved`     |
-| Tokens and cost in the check output                             | `usage` in `reviewer.resolved`        |
-| The aggregate `bastion` check and the sticky PR comment         | `run.completed` event                 |
-| Transcript in the uploaded run artifact                         | saved on disk, `bastion transcript`   |
+| GitHub                                                            | Local                                             |
+| ----------------------------------------------------------------- | ------------------------------------------------- |
+| A per-reviewer check run reaching its conclusion                  | `reviewer.resolved` event                         |
+| Findings in the sticky PR comment and as check-run annotations    | `findings` in `reviewer.resolved`                 |
+| Tokens and cost in the check output                               | `usage` in `reviewer.resolved`                    |
+| The aggregate `bastion` check and the sticky PR comment           | `run.completed` event                             |
+| Transcript in the uploaded run artifact                           | saved on disk, `bastion transcript`               |
+| The `[!NOTE]` replay callout and replayed check-run summary lines | `run.attested`; `replayed` on `reviewer.resolved` |
+| A sticky-comment line naming why attestation was not honored      | `run.attestation-fallback` event                  |
 
 `bastion github report` runs after `bastion review` finishes, so the per-reviewer checks are created already completed, and the aggregate check and the sticky comment are written once. The local stream additionally carries `run.started` and `reviewer.started` for an agent reacting as the run goes; those have no separate GitHub surface. For the repository's reviewers the data each surface carries is the same; only the local stream is finer-grained than the post-hoc GitHub rendering.
 

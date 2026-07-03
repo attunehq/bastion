@@ -27,8 +27,13 @@ bastion review --base main
 ```
 
 `bastion review` computes the changeset (working tree vs. `--base`, including
-uncommitted and untracked files), selects the reviewers whose triggers match, runs
-them in parallel with per-reviewer timeouts, and renders progress and verdicts.
+uncommitted and untracked files), selects the reviewers whose triggers match, and
+renders progress and verdicts. A purely local review always executes every matched
+reviewer, in parallel with per-reviewer timeouts. A CI review (`--repo`/`--pr`)
+against a repository with `attestations: true` first checks for a verified
+attestation covering the run: a reviewer the attestation covers replays its recorded
+verdict, with no backend dispatch and no timeout; everything else executes as usual
+(see [Attestation](../developer-guide/attestation.md)).
 
 - `--base <branch>`: the branch to diff against. Defaults to `main`.
 - `--format <human|jsonl>`: output format. Defaults to `human`.

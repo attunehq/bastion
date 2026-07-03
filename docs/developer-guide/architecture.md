@@ -20,7 +20,7 @@ through it.
 | [`src/version.rs`](../../src/version.rs) | Exposes the build-derived version string. |
 | [`src/cli.rs`](../../src/cli.rs) | The clap derive command tree and dispatch; maps a `block` aggregate to a non-zero exit. |
 | [`src/commands.rs`](../../src/commands.rs) | One handler per subcommand. |
-| [`src/reviewer.rs`](../../src/reviewer.rs) | The declarative reviewer schema (`Reviewer`, `Mode`, `Backend`, `Capabilities`, `RunnerSpec`). |
+| [`src/reviewer.rs`](../../src/reviewer.rs) | The declarative reviewer schema (`Reviewer`, `Mode`, `Backend`, `Capabilities`, `RunnerSpec`, `AttestationPolicy`). |
 | [`src/config.rs`](../../src/config.rs) | Registry loading, discovery, and merge. Walks up for a repository `.bastion.yaml` or `.bastion.yml` (with a deprecated `bastion/reviewers.yaml` fallback that warns) and, via `discover_merged`, layers in a user-level registry from the platform config dir (`user_config_dir`, override `BASTION_CONFIG_DIR`). The merge is a set keyed by name: an identical reviewer in both files is deduplicated, and a same-name-different-config collision keeps both with the repo side scoped to `REPO_SCOPE_PREFIX` (`repo:`). Validates name uniqueness and run-store path-component uniqueness over the merged set. |
 | [`src/routing.rs`](../../src/routing.rs) | Compiling trigger globs and matching them against changed files. |
 | [`src/verdict.rs`](../../src/verdict.rs) | The structured verdict (`Decision`, `Verdict`, `Finding`, `Usage`, and `Money`, which carries cents but serializes as dollars). |
