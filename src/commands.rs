@@ -161,8 +161,16 @@ pub async fn review(
     // review (no GithubSource) never attempts it. When the repository has
     // opted in, look up the note, verify it against the author's registered
     // signing keys, and replay whatever checks out; every failure is a
-    // fallback to full fresh execution, never a silent skip.
+    // fallback to full fresh execution, never a silent skip. A dirty checkout
+    // never replays: `changed_files` includes uncommitted and untracked files,
+    // so this run's reviewers see content no attestation's committed bindings
+    // name, and a replayed verdict would vouch for a changeset it never saw.
     let attested = match (&github, repo_attestation.attestations_enabled) {
+        (Some(_), true) if dirty => Some(crate::attest::AttestationOutcome::Fallback {
+            reason: "the CI working tree has uncommitted or untracked files, which the \
+                     reviewers see but no attestation binds; executing every reviewer fresh"
+                .to_string(),
+        }),
         (Some(_), true) => {
             plan_attestation_replay(
                 &repo_root,
@@ -212,7 +220,9 @@ pub async fn review(
                     bundle_attested_at,
                     replayed.keys().cloned().collect::<Vec<_>>().join(", "),
                 );
-                eprintln!("{callout}");
+                // Fallible on purpose: a closed stderr must not panic the gate
+                // out of an otherwise valid review.
+                let _ = writeln!(io::stderr(), "{callout}");
                 (
                     replayed,
                     Some(runner::AttestationAudit {
@@ -225,7 +235,12 @@ pub async fn review(
             }
         }
         Some(crate::attest::AttestationOutcome::Fallback { reason }) => {
-            eprintln!("bastion review: attestation not honored: {reason}");
+            // Fallible on purpose: the fallback must still render and the
+            // fresh reviewers must still run if stderr is closed.
+            let _ = writeln!(
+                io::stderr(),
+                "bastion review: attestation not honored: {reason}"
+            );
             let fallback = RunEvent::AttestationFallback {
                 run: run.clone(),
                 reason,

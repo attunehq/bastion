@@ -91,6 +91,4 @@ To cut a release:
 
 Run the workflow via `workflow_dispatch` with `dry_run: true` to build and package
 the whole matrix without creating a release. A tag with a pre-release suffix
-(`v0.2.0-rc.1`) is published as a prerelease. macOS binaries currently ship
-unsigned; code signing and notarization are a future addition that needs an Apple
-Developer account.
+(`v0.2.0-rc.1`) is published as a prerelease. macOS binaries are unsigned.

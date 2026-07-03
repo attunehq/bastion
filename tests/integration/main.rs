@@ -2121,11 +2121,17 @@ fn ci_review_without_a_note_falls_back_and_says_why() {
         "ci-gate", "codex", "gate",
     )
     .behavior("pass")]));
+    // Commit the fixture's dirty tree: a dirty CI checkout falls back before any
+    // note lookup, and this scenario pins the missing-note reason specifically.
+    // The branch marks where the changeset started, since committing on main
+    // would otherwise leave nothing to diff against.
+    repo.branch("basemark");
+    repo.commit_all("head");
 
     let github = FakeGitHub::start();
     let run = repo.review_ci(
         fake,
-        "main",
+        "basemark",
         "acme/app",
         "1",
         &[
@@ -2201,6 +2207,43 @@ fn ci_review_with_attestations_disabled_never_mentions_attestation() {
     );
 }
 
+/// A dirty CI checkout never replays, regardless of what note exists: the
+/// reviewers see uncommitted content no attestation's committed bindings name, so
+/// the run falls back before any note lookup and the reason says why.
+#[test]
+fn ci_review_with_a_dirty_checkout_falls_back_without_note_lookup() {
+    let Some(fake) = tooling() else { return };
+
+    // TestRepo::new leaves the tree dirty by design; that is the scenario here.
+    let repo = TestRepo::new(&registry_with_attestations(&[Reviewer::new(
+        "ci-gate", "codex", "gate",
+    )
+    .behavior("pass")]));
+
+    let github = FakeGitHub::start();
+    let run = repo.review_ci(
+        fake,
+        "main",
+        "acme/app",
+        "1",
+        &[
+            ("GITHUB_API_URL", github.url.as_str()),
+            ("GITHUB_TOKEN", "ghs-fake-token"),
+        ],
+    );
+    github.finish();
+
+    assert!(run.exited_zero(), "stderr:\n{}", run.stderr);
+    assert_eq!(run.resolved("ci-gate").0, Decision::Pass);
+    let reason = run
+        .attestation_fallback_reason()
+        .expect("a run.attestation-fallback event in the jsonl stream");
+    assert!(
+        reason.contains("uncommitted or untracked"),
+        "expected the reason to name the dirty checkout; reason: {reason}"
+    );
+}
+
 /// A garbage (non-bundle) note on HEAD is a read failure, not a crash: the CI path
 /// falls back to a full run and the fallback reason reflects that the note could
 /// not be understood.
@@ -2212,12 +2255,17 @@ fn ci_review_with_a_garbage_note_falls_back() {
         "ci-gate", "codex", "gate",
     )
     .behavior("pass")]));
+    // Commit first: a dirty checkout falls back before the note is even read, and
+    // this scenario pins the unreadable-note reason specifically. The branch
+    // marks where the changeset started.
+    repo.branch("basemark");
+    repo.commit_all("head");
     repo.write_garbage_note("not a bastion attestation bundle");
 
     let github = FakeGitHub::start();
     let run = repo.review_ci(
         fake,
-        "main",
+        "basemark",
         "acme/app",
         "1",
         &[

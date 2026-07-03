@@ -357,6 +357,13 @@ impl TestRepo {
         git(self.path(), &["commit", "-m", message]);
     }
 
+    /// Create a branch at the current HEAD, as a stable base marker for a
+    /// scenario that commits the dirtied tree and then reviews the committed
+    /// changeset against where it started.
+    pub(crate) fn branch(&self, name: &str) {
+        git(self.path(), &["branch", name]);
+    }
+
     /// Run `bastion <args>` in this repo with the fake agent wired in for both
     /// backends, this repo's private data directory, and any `extra_env` (which
     /// Bastion inherits and propagates to the agent child).
