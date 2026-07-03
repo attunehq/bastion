@@ -63,6 +63,16 @@ jobs:
           # Full history so the base branch resolves for the changeset diff and so
           # the Codex reviewer can run `git diff <base>` over the working tree.
           fetch-depth: 0
+          # The PR head, not the default merge commit: the review diffs the PR head
+          # against the base, mirroring what the author's local `bastion review` saw.
+          # Attestation replay needs this too, since it binds to the head tree the
+          # author attested; the merge-commit view would never match it.
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      # actions/checkout does not fetch notes by default. Tolerant of the ref being
+      # absent: attestation is optional, so most PRs will not carry a note.
+      - name: Fetch the attestation notes ref
+        run: git fetch origin +refs/notes/bastion:refs/notes/bastion || true
 
       - name: Install the bastion release
         env:

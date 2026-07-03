@@ -39,6 +39,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
       prerelease: ${{ steps.version.outputs.prerelease }}
+      seal_secret: ${{ steps.seal.outputs.secret }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -75,6 +76,19 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "Releasing ${TAG} (version ${VERSION}, prerelease ${PRERELEASE})"
 
+      # One sealing secret per release, shared by the whole platform matrix below, so
+      # every binary of this release verifies every other's run seals and a new
+      # release invalidates old bundles automatically (see build.rs and
+      # docs/developer-guide/attestation.md, "The run seal"). Masking is best effort,
+      # not secrecy: the value ships embedded in the public binaries and exists for
+      # tamper evidence, not confidentiality; masking only keeps it out of this log.
+      - name: Generate the sealing secret
+        id: seal
+        run: |
+          secret="$(openssl rand -hex 32)"
+          echo "::add-mask::$secret"
+          echo "secret=${secret}" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build ${{ matrix.target }}
     needs: prepare
@@ -85,6 +99,10 @@ jobs:
       # the build directly on the runner (no container), so this env is inherited
       # by every target without extra plumbing.
       BASTION_VERSION: ${{ needs.prepare.outputs.tag }}
+      # Share one sealing secret across the whole matrix so every platform binary of
+      # this release seals and verifies run attestations identically. build.rs
+      # honors this override; see docs/developer-guide/attestation.md.
+      BASTION_SEAL_SECRET: ${{ needs.prepare.outputs.seal_secret }}
     strategy:
       fail-fast: false
       matrix:

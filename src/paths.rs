@@ -8,6 +8,7 @@
 //!   runs/
 //!     r-0f3a/
 //!       run.jsonl                 # the full event stream
+//!       seal.json                 # the run seal, when the run was sealed
 //!       reviewers/
 //!         tenant-isolation/
 //!           transcript.jsonl      # the full agent session
@@ -81,6 +82,13 @@ impl Layout {
     #[must_use]
     pub fn run_jsonl(&self, id: &RunId) -> PathBuf {
         self.run_dir(id).join("run.jsonl")
+    }
+
+    /// A run's seal (`.../seal.json`), when the run was sealed. See
+    /// [`crate::seal`] and `docs/developer-guide/attestation.md`.
+    #[must_use]
+    pub fn seal(&self, id: &RunId) -> PathBuf {
+        self.run_dir(id).join("seal.json")
     }
 
     /// A single reviewer's directory within a run.
@@ -173,6 +181,7 @@ mod tests {
                 .ends_with("runs/r-0f3a/reviewers/tenant-isolation/transcript.jsonl")
         );
         assert!(layout.latest_pointer().ends_with("runs/latest"));
+        assert!(layout.seal(&id).ends_with("runs/r-0f3a/seal.json"));
     }
 
     #[test]

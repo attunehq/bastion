@@ -67,6 +67,33 @@ impl Backend {
     }
 }
 
+/// A reviewer's opt-out of attestation replay.
+///
+/// Absent (the default) means the reviewer is replayable: a CI run may honor a
+/// verified local attestation instead of executing it fresh
+/// (`docs/developer-guide/attestation.md`). `Never` means CI must execute this
+/// reviewer itself on every run regardless of any attestation, for a gate a team
+/// wants continuously re-verified (a security-sensitive check, say, where the
+/// team wants CI's own execution environment in the loop every time).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum AttestationPolicy {
+    /// This reviewer is never replayed from an attestation; CI always executes
+    /// it fresh.
+    Never,
+}
+
+impl AttestationPolicy {
+    /// The lowercase wire form (`"never"`).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AttestationPolicy::Never => "never",
+        }
+    }
+}
+
 /// A backend-specific model identifier, forwarded verbatim to the backend's model
 /// selector (`--model` for Claude Code, `-m`/`--model` for Codex).
 ///
@@ -214,6 +241,11 @@ pub struct Reviewer {
     /// Variables interpolated into the prompt before handing off to the agent.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub inputs: BTreeMap<String, String>,
+    /// Opts out of attestation replay when set to [`AttestationPolicy::Never`].
+    /// Absent means replayable: CI may honor a verified local attestation
+    /// instead of executing this reviewer fresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation: Option<AttestationPolicy>,
     /// The review instruction handed to the agent.
     pub prompt: String,
 }
@@ -371,5 +403,34 @@ prompt: p
         );
         assert_eq!(Backend::Pi.as_str(), "pi");
         assert_eq!(Backend::default(), Backend::Any);
+    }
+
+    #[test]
+    fn attestation_policy_is_absent_by_default() {
+        let yaml = r"
+name: bare
+trigger: [src/**]
+mode: gate
+prompt: p
+";
+        let reviewer: Reviewer = serde_yaml_ng::from_str(yaml).expect("valid reviewer");
+        assert!(reviewer.attestation.is_none());
+    }
+
+    #[test]
+    fn parses_an_attestation_never_opt_out() {
+        let yaml = r"
+name: always-fresh
+trigger: [src/**]
+mode: gate
+attestation: never
+prompt: p
+";
+        let reviewer: Reviewer = serde_yaml_ng::from_str(yaml).expect("valid reviewer");
+        assert_eq!(reviewer.attestation, Some(AttestationPolicy::Never));
+        assert_eq!(
+            reviewer.attestation.map(AttestationPolicy::as_str),
+            Some("never")
+        );
     }
 }

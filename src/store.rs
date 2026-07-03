@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::context::PriorFinding;
 use crate::event::{RunEvent, RunId};
 use crate::paths::Layout;
+use crate::seal::Seal;
 use crate::verdict::Decision;
 
 /// A one-line description of a persisted run, for `bastion runs`.
@@ -71,6 +72,50 @@ pub fn read_run(layout: &Layout, id: &RunId) -> Result<Vec<RunEvent>> {
         events.push(event);
     }
     Ok(events)
+}
+
+/// Persist a run's seal.
+///
+/// Sealing is best-effort at the call site (see [`crate::runner::execute_with`]):
+/// a run with no [`crate::seal::SealBindings`], or one whose git derivation
+/// failed, simply never calls this, and the run persists unsealed. This
+/// function itself always writes when called.
+///
+/// # Errors
+///
+/// Returns an error if the run directory cannot be created or the seal cannot
+/// be written.
+pub fn write_seal(layout: &Layout, id: &RunId, seal: &Seal) -> Result<()> {
+    let dir = layout.run_dir(id);
+    std::fs::create_dir_all(&dir)
+        .wrap_err_with(|| format!("creating run directory {}", dir.display()))?;
+    let path = layout.seal(id);
+    let body = serde_json::to_string_pretty(seal).wrap_err("serializing seal")?;
+    std::fs::write(&path, body).wrap_err_with(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
+/// Read a run's seal, if it has one.
+///
+/// Returns `Ok(None)` when the run predates sealing, or was left unsealed
+/// because sealing failed at persist time: an absent seal means "this run
+/// cannot be attested," not an error.
+///
+/// # Errors
+///
+/// Returns an error if the seal file exists but cannot be read or is malformed
+/// JSON.
+pub fn read_seal(layout: &Layout, id: &RunId) -> Result<Option<Seal>> {
+    let path = layout.seal(id);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => {
+            let seal = serde_json::from_str(&text)
+                .wrap_err_with(|| format!("{}: malformed seal", path.display()))?;
+            Ok(Some(seal))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).wrap_err_with(|| format!("reading {}", path.display())),
+    }
 }
 
 /// Resolve an optional run id to a concrete one, defaulting to the latest run.
@@ -283,6 +328,45 @@ mod tests {
         ]
     }
 
+    fn sample_seal() -> Seal {
+        crate::seal::seal(
+            b"test-secret",
+            "0.1.0",
+            &crate::seal::SealBindings {
+                head_tree: "head".into(),
+                base_tree: "base".into(),
+                patch_id: "patch".into(),
+                config_hash: "hash".into(),
+                repo_reviewers: ["r1".to_string()].into_iter().collect(),
+            },
+            false,
+            vec!["r1".into()],
+            &[],
+        )
+    }
+
+    #[test]
+    fn write_seal_then_read_seal_round_trips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = Layout::with_root(tmp.path().to_path_buf());
+        let id = RunId("r-sealed".into());
+
+        assert_eq!(read_seal(&layout, &id).unwrap(), None);
+
+        let seal = sample_seal();
+        write_seal(&layout, &id, &seal).unwrap();
+        assert_eq!(read_seal(&layout, &id).unwrap(), Some(seal));
+    }
+
+    #[test]
+    fn read_seal_is_none_for_a_run_that_was_never_sealed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = Layout::with_root(tmp.path().to_path_buf());
+        let id = RunId("r-unsealed".into());
+        write_run(&layout, &id, &sample_events("r-unsealed")).unwrap();
+        assert_eq!(read_seal(&layout, &id).unwrap(), None);
+    }
+
     #[test]
     fn writes_reads_and_summarizes_a_run() {
         let tmp = tempfile::tempdir().unwrap();
@@ -360,6 +444,7 @@ mod tests {
                 usage: None,
                 duration_ms: 1,
                 has_transcript: false,
+                replayed: false,
             },
             RunEvent::RunCompleted {
                 run: RunId(id.into()),

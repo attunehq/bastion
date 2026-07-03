@@ -24,6 +24,7 @@ use crate::render::{self, Format};
 use crate::reviewer::{Mode, ModelId};
 use crate::routing::Router;
 use crate::runner::{self, ExecContext};
+use crate::seal::SealBindings;
 use crate::skills;
 use crate::store;
 use crate::verdict::{Decision, Money};
@@ -69,7 +70,8 @@ pub async fn review(
     let repo_root = git::repo_root(cwd)?;
     warn_on_stale_skills(&repo_root);
     let branch = git::current_branch(&repo_root)?;
-    let config = Config::discover_merged(&repo_root, user_dir)?;
+    let (_sources, repo_attestation, config) =
+        Config::discover_merged_attested(&repo_root, user_dir)?;
     let changed = git::changed_files(&repo_root, base)?;
 
     let router = Router::compile(&config.reviewers)?;
@@ -127,21 +129,109 @@ pub async fn review(
         comments: Vec::new(),
         prior_findings: store::prior_findings(layout, &branch),
     };
+    let mut gathered_github: Option<crate::github::context::GatheredContext> = None;
     if let Some(source) = github.as_ref() {
         match gather_github_context(source).await {
             Ok(gathered) => {
                 // A PR body is a better statement of intent than the commit messages,
                 // so it wins when present; the discussion is GitHub-only.
                 if gathered.intent.is_some() {
-                    context.intent = gathered.intent;
+                    context.intent = gathered.intent.clone();
                 }
-                context.comments = gathered.comments;
+                context.comments = gathered.comments.clone();
+                gathered_github = Some(gathered);
             }
             Err(err) => {
                 eprintln!("bastion review: continuing without GitHub context ({err:#})");
             }
         }
     }
+
+    let seal = derive_seal_bindings(&repo_root, base, &repo_attestation);
+
+    // Attestation verify-and-replay is the CI surface only: a purely local
+    // review (no GithubSource) never attempts it. When the repository has
+    // opted in, look up the note, verify it against the author's registered
+    // signing keys, and replay whatever checks out; every failure is a
+    // fallback to full fresh execution, never a silent skip.
+    let attested = match (&github, repo_attestation.attestations_enabled) {
+        (Some(_), true) => {
+            plan_attestation_replay(
+                &repo_root,
+                base,
+                &repo_attestation,
+                gathered_github.as_ref(),
+                &matched,
+            )
+            .await
+        }
+        _ => None,
+    };
+
+    let (replayed, attestation, attestation_fallback, matched): (
+        std::collections::BTreeMap<String, runner::ReplayedReviewer>,
+        Option<runner::AttestationAudit>,
+        Option<RunEvent>,
+        Vec<&crate::reviewer::Reviewer>,
+    ) = match attested {
+        Some(crate::attest::AttestationOutcome::Replay(plan)) => {
+            let bundle_public_key = plan.bundle.public_key.clone();
+            let bundle_attested_at = plan.bundle.attested_at.clone();
+            let mut replayed = std::collections::BTreeMap::new();
+            for reviewer in &matched {
+                if let Some(event) = plan.replay.get(&reviewer.name) {
+                    replayed.insert(
+                        reviewer.name.clone(),
+                        runner::ReplayedReviewer {
+                            reviewer: (*reviewer).clone(),
+                            event: event.clone(),
+                        },
+                    );
+                }
+            }
+            let fresh: Vec<&crate::reviewer::Reviewer> = matched
+                .iter()
+                .copied()
+                .filter(|r| !replayed.contains_key(&r.name))
+                .collect();
+            if replayed.is_empty() {
+                (replayed, None, None, fresh)
+            } else {
+                let callout = format!(
+                    "bastion review: {} reviewer(s) replayed from a signed local attestation (key {}, attested {}): {}",
+                    replayed.len(),
+                    bundle_public_key,
+                    bundle_attested_at,
+                    replayed.keys().cloned().collect::<Vec<_>>().join(", "),
+                );
+                eprintln!("{callout}");
+                (
+                    replayed,
+                    Some(runner::AttestationAudit {
+                        public_key: bundle_public_key,
+                        attested_at: bundle_attested_at,
+                    }),
+                    None,
+                    fresh,
+                )
+            }
+        }
+        Some(crate::attest::AttestationOutcome::Fallback { reason }) => {
+            eprintln!("bastion review: attestation not honored: {reason}");
+            let fallback = RunEvent::AttestationFallback {
+                run: run.clone(),
+                reason,
+            };
+            render::write_event(&mut out, format, &fallback)?;
+            (
+                std::collections::BTreeMap::new(),
+                None,
+                Some(fallback),
+                matched,
+            )
+        }
+        None => (std::collections::BTreeMap::new(), None, None, matched),
+    };
 
     let ctx = ExecContext {
         run,
@@ -151,6 +241,10 @@ pub async fn review(
         changed: changed_count,
         reviewers: reviewer_refs,
         context,
+        seal,
+        replayed,
+        attestation,
+        attestation_fallback,
     };
 
     // The runner streams the per-reviewer and completion events; render each as it
@@ -172,6 +266,88 @@ pub async fn review(
     }
 
     Ok(aggregate)
+}
+
+/// Attempt to verify and plan an attestation replay for a CI run.
+///
+/// Best effort in the same sense [`gather_github_context`] is: any failure to
+/// gather the inputs a verification needs (the author's login, their
+/// registered signing keys, or a note to verify) degrades to `None`, which the
+/// caller treats as "no attestation available" and falls through to the
+/// planner's own fallback reporting only when a note *was* found but failed to
+/// verify. A genuinely absent note (the ordinary case for most commits) is
+/// reported as a fallback too, since attestations are enabled for this repo
+/// and the author is simply expected to know why none applied.
+///
+/// `routed` is the reviewers CI's own diff matched, the same set `review`
+/// already computed.
+async fn plan_attestation_replay(
+    repo_root: &Path,
+    base: &str,
+    repo_attestation: &crate::config::RepoAttestation,
+    gathered: Option<&crate::github::context::GatheredContext>,
+    routed: &[&crate::reviewer::Reviewer],
+) -> Option<crate::attest::AttestationOutcome> {
+    let ci = match crate::attest::derive_ci_bindings(repo_root, base, &repo_attestation.config_hash)
+    {
+        Ok(ci) => ci,
+        Err(err) => {
+            eprintln!(
+                "bastion review: attestation not honored: could not re-derive CI bindings ({err:#})"
+            );
+            return None;
+        }
+    };
+
+    let head_sha = gathered.and_then(|g| g.head_sha.as_deref());
+    let note = match crate::attest::note_for_review(repo_root, "HEAD", head_sha) {
+        Ok(Some(note)) => note,
+        Ok(None) => {
+            return Some(crate::attest::AttestationOutcome::Fallback {
+                reason: "no attestation note found on HEAD".to_string(),
+            });
+        }
+        Err(err) => {
+            return Some(crate::attest::AttestationOutcome::Fallback {
+                reason: format!("could not look up the attestation note: {err:#}"),
+            });
+        }
+    };
+
+    let Some(author) = gathered.and_then(|g| g.author_login.as_deref()) else {
+        return Some(crate::attest::AttestationOutcome::Fallback {
+            reason: "could not determine the pull request author to verify the attestation signature against".to_string(),
+        });
+    };
+
+    let client = match crate::github::client::RestClient::from_env() {
+        Ok(client) => client,
+        Err(err) => {
+            return Some(crate::attest::AttestationOutcome::Fallback {
+                reason: format!("could not build a GitHub client to fetch signing keys: {err:#}"),
+            });
+        }
+    };
+    let keys = match crate::github::context::ssh_signing_keys(&client, author).await {
+        Ok(keys) => keys,
+        Err(err) => {
+            return Some(crate::attest::AttestationOutcome::Fallback {
+                reason: format!("could not fetch {author}'s registered SSH signing keys: {err:#}"),
+            });
+        }
+    };
+
+    let routed_map: std::collections::BTreeMap<&str, &crate::reviewer::Reviewer> =
+        routed.iter().map(|r| (r.name.as_str(), *r)).collect();
+
+    Some(crate::attest::plan(
+        &note,
+        author,
+        &keys,
+        &ci,
+        &routed_map,
+        crate::seal::embedded_secret(),
+    ))
 }
 
 /// The pull request a review is running against, so its description and discussion can
@@ -388,6 +564,35 @@ pub fn codeowners(owners: &[String]) -> Result<()> {
         .write_all(crate::github::codeowners::block(owners).as_bytes())
         .wrap_err("writing CODEOWNERS block")?;
     Ok(())
+}
+
+/// `bastion attest`: sign the latest sealed run (or `run`, when given) as an
+/// attestation note on HEAD.
+///
+/// Resolves the repository root from the current directory and hands off to
+/// [`crate::attest::attest`] with the build's embedded sealing secret; the real
+/// verification and signing logic lives there so it stays testable without a
+/// CLI harness.
+///
+/// # Errors
+///
+/// Returns an error under any of the refusals documented on
+/// [`crate::attest::attest`] (an unsealed run, a seam-tainted seal, a
+/// tampered run store, repository drift since the run, or no resolvable
+/// signing key), or if writing to stdout fails.
+pub fn attest(layout: &Layout, run: Option<&str>, key: Option<&Path>) -> Result<()> {
+    let cwd = std::env::current_dir().wrap_err("determining the current directory")?;
+    let root = git::repo_root(&cwd)?;
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    crate::attest::attest(
+        &root,
+        layout,
+        run,
+        key,
+        crate::seal::embedded_secret(),
+        &mut out,
+    )
 }
 
 /// `bastion github report`: post a finished run's results to its pull request.
@@ -645,6 +850,57 @@ fn local_run_id(repo_root: &Path) -> RunId {
         Some(sha) => RunId(format!("r-{sha}")),
         None => RunId("r-local".to_string()),
     }
+}
+
+/// Derive the [`crate::seal::SealBindings`] a local review should seal its run
+/// with, or `None` when any git derivation fails.
+///
+/// Sealing is opportunistic: a detached-HEAD edge case, a base that shares no
+/// history with HEAD, or any other git failure here must never fail the review
+/// itself, only leave the run unattestable. Each failure is logged at `warn`
+/// with enough context to diagnose, then this returns `None` and the runner
+/// proceeds unsealed.
+fn derive_seal_bindings(
+    repo_root: &Path,
+    base: &str,
+    repo_attestation: &crate::config::RepoAttestation,
+) -> Option<SealBindings> {
+    let merge_base_commit = match git::merge_base(repo_root, base) {
+        Ok(commit) => commit,
+        Err(err) => {
+            tracing::warn!(error = %err, "could not derive a merge base; run will be unsealed");
+            return None;
+        }
+    };
+    let head_tree = match git::tree_hash(repo_root, "HEAD") {
+        Ok(tree) => tree,
+        Err(err) => {
+            tracing::warn!(error = %err, "could not resolve HEAD's tree; run will be unsealed");
+            return None;
+        }
+    };
+    let base_tree = match git::tree_hash(repo_root, &merge_base_commit) {
+        Ok(tree) => tree,
+        Err(err) => {
+            tracing::warn!(error = %err, "could not resolve the merge base's tree; run will be unsealed");
+            return None;
+        }
+    };
+    let patch_id = match git::patch_id(repo_root, &merge_base_commit) {
+        Ok(id) => id,
+        Err(err) => {
+            tracing::warn!(error = %err, "could not compute a patch id; run will be unsealed");
+            return None;
+        }
+    };
+
+    Some(SealBindings {
+        head_tree,
+        base_tree,
+        patch_id,
+        config_hash: repo_attestation.config_hash.clone(),
+        repo_reviewers: repo_attestation.reviewers.clone(),
+    })
 }
 
 #[cfg(test)]

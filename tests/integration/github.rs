@@ -121,7 +121,7 @@ fn serve_one(mut stream: std::net::TcpStream) -> Option<CapturedRequest> {
     let body = String::from_utf8_lossy(&buf[body_start..]).into_owned();
 
     let (status, json) = if method == "GET" {
-        (200, "[]".to_string())
+        (200, get_response(&path))
     } else if path.ends_with("/check-runs") {
         // GitHub stamps the creating app on every check run. With the default
         // GITHUB_TOKEN that app is `github-actions`, which the report reads back to
@@ -141,6 +141,35 @@ fn serve_one(mut stream: std::net::TcpStream) -> Option<CapturedRequest> {
     stream.flush().ok();
 
     Some(CapturedRequest { method, path, body })
+}
+
+/// The canned JSON body for a `GET` request, branched on its path.
+///
+/// The review CI path (`bastion review --repo --pr`, with `attestations: true`)
+/// issues GETs beyond the report path's comment listing: the pull request itself
+/// (for its body, author login, and head SHA -- see `src/github/context.rs`
+/// `gather`) and the PR author's registered SSH signing keys. Both need a shaped
+/// body rather than the generic empty-list default so the attestation lookup has
+/// something to parse; every other GET (the comment listings) still gets `[]`,
+/// which `gather` and the reporter both tolerate as "nothing there".
+///
+/// The PR response deliberately omits `head.sha`: the note lookup tries `HEAD`
+/// first and only falls back to the PR's head SHA when `HEAD` carries no note at
+/// all, so a fake, unresolvable SHA there would turn "no note" into a git error
+/// instead. Omitting it exercises the same "no note found" path without needing a
+/// real second commit for the fallback ref to resolve to.
+fn get_response(path: &str) -> String {
+    if path.contains("/ssh_signing_keys") {
+        // No keys registered: the CI attestation path treats this the same as any
+        // other verification failure and falls back to a full run.
+        "[]".to_string()
+    } else if path.contains("/pulls/") && !path.contains("/comments") {
+        // A minimal pull request: a login (the attestation signature's principal),
+        // no body (so the local commit-message intent stands), no head SHA.
+        r#"{"body":null,"user":{"login":"ada"}}"#.to_string()
+    } else {
+        "[]".to_string()
+    }
 }
 
 /// First index of `needle` within `haystack`.

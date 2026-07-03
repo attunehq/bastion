@@ -140,6 +140,10 @@ immediately. On a clean return the guard is defused, since `--rm` has already re
 the container. That gives a containerized reviewer the same fail-closed teardown the
 native path gets from `kill_on_drop`.
 
+The `BASTION_CONTAINER_ENGINE` override is likewise recorded in the run seal as an
+active test seam; a run sealed with it active cannot be attested (see
+[Attestation](./attestation.md)).
+
 ## Testing
 
 The `container/` submodules unit-test the pure parts against a recording

@@ -108,6 +108,11 @@ was given and returns canned stdout. This is what lets `claude_code.rs` and
 cost, while still exercising the real argument-building, env-injection, output
 parsing, and retry logic.
 
+The `BASTION_CLAUDE_BIN`/`BASTION_CODEX_BIN`/`BASTION_PI_BIN` overrides that point a
+backend at a fake executable are recorded in the run seal as an active test seam
+(`src/seal.rs`); a run sealed with one active cannot be attested (see
+[Attestation](./attestation.md)).
+
 `ContainerRunner`'s drop guard is the one exception to this seam. `ContainerGuard`
 runs the container teardown (`docker rm -f`) with a direct `std::process::Command` in
 `Drop`. The seam is async and a `Drop` is not, so the cancellation teardown cannot

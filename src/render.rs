@@ -70,18 +70,33 @@ fn write_event_human<W: Write>(out: &mut W, event: &RunEvent) -> io::Result<()> 
             summary,
             findings,
             duration_ms,
+            replayed,
             ..
         } => {
             writeln!(
                 out,
-                "  {} {reviewer}: {summary} ({}s)",
+                "  {} {reviewer}: {summary} ({}s{})",
                 marker(*verdict),
-                duration_ms / 1000
+                duration_ms / 1000,
+                if *replayed { ", replayed" } else { "" },
             )?;
             for finding in findings {
                 write_finding(out, finding)?;
             }
             Ok(())
+        }
+        RunEvent::AttestationReplayed {
+            reviewers,
+            public_key,
+            attested_at,
+            ..
+        } => writeln!(
+            out,
+            "  attested: {} reviewer(s) replayed from a signed local run (key {public_key}, attested {attested_at})",
+            reviewers.len()
+        ),
+        RunEvent::AttestationFallback { reason, .. } => {
+            writeln!(out, "  attestation not honored: {reason}")
         }
         RunEvent::RunCompleted {
             verdict,
@@ -191,6 +206,7 @@ mod tests {
             usage: None,
             duration_ms: 4200,
             has_transcript: true,
+            replayed: false,
         }
     }
 

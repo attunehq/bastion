@@ -629,6 +629,40 @@ fn git_available() -> bool {
     })
 }
 
+/// Whether `ssh-keygen` is on `PATH` (attestation scenarios sign with it).
+fn ssh_keygen_available() -> bool {
+    static OK: OnceLock<bool> = OnceLock::new();
+    *OK.get_or_init(|| {
+        Command::new("ssh-keygen")
+            .arg("-h")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            // `ssh-keygen -h` prints usage and exits non-zero on most
+            // implementations, so its mere ability to launch is the signal, not a
+            // clean exit status.
+            .is_ok()
+    })
+}
+
+/// The tooling an attestation scenario needs: the ordinary [`tooling`] set, plus
+/// `ssh-keygen` for signing. `None` means skip this run, following the same
+/// detect-and-skip idiom (fail closed in CI, skip locally).
+pub(crate) fn ssh_tooling() -> Option<&'static Path> {
+    let fake = tooling()?;
+    let in_ci = std::env::var_os("CI").is_some();
+    if !ssh_keygen_available() {
+        assert!(
+            !in_ci,
+            "ssh-keygen must be available to run the attestation integration suite in CI"
+        );
+        eprintln!("skipping integration scenario: ssh-keygen is not available");
+        return None;
+    }
+    Some(fake)
+}
+
 /// The set of tools a scenario needs; `None` means skip this run.
 ///
 /// In CI (where `CI` is set) the tools must be present: a silently-skipped suite

@@ -83,6 +83,7 @@ Each run gets a directory keyed by its run id, holding the full event stream and
   runs/
     r-0f3a/
       run.jsonl                  # the full event stream, always JSONL regardless of display format
+      seal.json                  # the run seal, when the run was sealed
       reviewers/
         tenant-isolation/
           transcript.jsonl       # the full agent session
@@ -90,6 +91,14 @@ Each run gets a directory keyed by its run id, holding the full event stream and
           meta.json              # backend, timing, usage, matched trigger
     latest                       # a plain file holding the most recent run id
 ```
+
+The runner seals a run as it finishes persisting: a canonical digest of the
+reviewed trees, the diff, the effective config hash, whether a test seam was
+active, and the sorted `reviewer.resolved` events, MAC'd with a secret embedded
+in the binary at build time. `bastion attest` reads `seal.json` to build an
+attestation; a run with none (an older run, or one whose sealing failed, which
+is non-fatal and never fails the review) cannot be attested. See
+[Attestation](./attestation.md) for the full design.
 
 The run is always persisted as JSONL regardless of the `--format` used on screen, so `run.jsonl` holds the same events whether a human or an agent triggered it; a run can be replayed or inspected after the fact without re-running it, and the per-reviewer files hold what was deliberately kept off the stream. Runs accumulate; `bastion review` does not prune, so history grows until you run `bastion clean` (which keeps the most recent 20 when given no arguments).
 
@@ -107,6 +116,24 @@ The commands that read saved data back are the local equivalent of clicking "Det
 `show` and `runs` accept `--format human|jsonl`; `transcript` is raw text by default, since a transcript is already a document.
 
 Separate from these run-inspection commands, `bastion validate [FILE]` parses the reviewer registry through the same `Config` load path `review` uses, and reports any load-time error (malformed YAML, an unknown field, a duplicate name, a model under `backend: any`) without running a reviewer or spending a model call. With no `FILE` it validates the merged set `review` would run (the discovered repository registry plus the user-level one), naming each source it merged; an explicit `FILE` is validated on its own. A valid registry prints a summary and exits zero; an invalid one prints the error and exits non-zero, so it serves as a cheap pre-commit or CI lint. It has no GitHub mirror: in CI the same validation happens implicitly when `review` loads the registry.
+
+`bastion attest [<run>] [--key <path>]` signs a sealed local run as an attestation note on HEAD, so CI can verify and replay it instead of re-executing the reviewers (see [Attestation](./attestation.md) for the full design). It defaults to the latest recorded run; `--key` picks the SSH signing key, falling back to `git config user.signingkey` when omitted. It refuses to sign when:
+
+- the run was never sealed (an older run, or one whose sealing failed);
+- the seal recorded that a test seam (a `BASTION_*_BIN` backend override, or the container-engine override) was active, since a run against a stubbed reviewer is not a real review;
+- the run store no longer matches its own seal, meaning it was edited after the run finished, or sealed by a different build of Bastion;
+- the repository has moved on since the run: HEAD's tree, the merge base's tree, the diff's patch-id, or the effective config hash no longer match what the seal recorded;
+- no signing key can be resolved (`--key` was not given and `git config user.signingkey` is unset).
+
+On success it prints the run id and the reviewers it covers, the resolved public key, and the push command for the notes ref:
+
+```
+Attested run 'r-0f3a' on HEAD (2 reviewer(s): fail-closed-gates, single-responsibility)
+Signed with ssh-ed25519 AAAA... you@example.com
+Push the note with: git push origin refs/notes/bastion
+```
+
+The note itself does not push automatically; run the printed command (or fold it into your usual `git push`) to make the attestation visible to CI. `bastion attest` is local-only, with no GitHub mirror: CI consumes the note `bastion review` writes when it verifies and replays.
 
 ---
 
@@ -133,5 +160,5 @@ Anyone who understands one surface understands the other; this is deliberate, so
 Local-specific deferrals, separate from the core design's list.
 
 - Watch mode. A `bastion review --watch` that re-runs affected reviewers as files change, instead of once per invocation.
-- A shared verdict cache so an unchanged reviewer result can be reused across local runs rather than recomputed. Handing a local result to CI has a design of its own: [attestation](./attestation.md).
+- A shared verdict cache so an unchanged reviewer result can be reused across local runs rather than recomputed, distinct from [attestation](./attestation.md): attestation hands a signed local run to CI; a local cache would reuse a result within the local loop itself.
 - Transport beyond a process. Driving Bastion over a socket with the same event stream, if an agent harness ever wants to consume it that way rather than from stdout.

@@ -1,9 +1,9 @@
 # Local review attestation
 
-> **Implementation status.** This document is a design target. None of it is
-> implemented: there is no `bastion attest` command, no notes ref, and no
-> verification path in CI. It is written down so the implementation has a spec
-> to converge to.
+> **Implemented.** The run seal is [`src/seal.rs`](../../src/seal.rs), sealed by
+> the runner at persist time. `bastion attest` and the CI verify-and-replay
+> planner live in [`src/attest.rs`](../../src/attest.rs). This document
+> describes the shipped design and is the reference to read alongside the code.
 
 When a project runs Bastion both locally and in CI, a well-behaved agent runs
 `bastion review` before pushing, and then CI runs the same reviewers over the
@@ -101,7 +101,8 @@ same artifact and add nothing.
 The digest also records whether any of the test seams (the
 `BASTION_CLAUDE_BIN`-style backend overrides and the container-engine
 override) were active during the run. `bastion attest` refuses to attest a
-run that used them: a run against a stubbed reviewer is a real run of the
+run that used them, and CI's own planner refuses to replay a bundle whose
+seal carries the flag: a run against a stubbed reviewer is a real run of the
 binary, but not a real review.
 
 The seal is checked twice. `bastion attest` re-derives every input (the
@@ -131,12 +132,13 @@ has invalidated nothing.
 
 ## Storage: a git note
 
-The bundle and its detached signature live in a git note under a dedicated ref,
+The bundle and its signature live in a git note under a dedicated ref,
 `refs/notes/bastion`, attached to the head commit. Notes attach data to a
 commit without changing its hash or its object, so the author's own commit
-signature is untouched. The note pushes independently
-(`git push origin refs/notes/bastion`); `actions/checkout` does not fetch notes
-by default, so the workflow adds one fetch line.
+signature is untouched. The note's text is the envelope: the bundle's compact
+JSON, a newline, then the armored SSH signature block verbatim. The note
+pushes independently (`git push origin refs/notes/bastion`); `actions/checkout`
+does not fetch notes by default, so the workflow adds one fetch line.
 
 The note is *indexed* by commit but *verified* by the content bindings above.
 Notes keyed purely by commit id would die on every squash merge; because CI
@@ -148,6 +150,9 @@ matches.
 Signatures are SSH signatures (`ssh-keygen -Y sign` / `-Y verify`), not GPG:
 every contributor already has an SSH key, git itself supports SSH commit
 signing, and hardware-token and keychain backends exist for presence gating.
+Signing and verification both scope to the `bastion` namespace
+(`ssh-keygen -Y sign/verify -n bastion`), so a bundle signature cannot be
+replayed as, say, a git commit signature by the same key.
 
 CI fetches the SSH signing keys the PR author has registered with GitHub
 (`GET /users/{username}/ssh_signing_keys`, over the same REST seam the adapter
@@ -162,34 +167,63 @@ Registry config is a single switch: `attestations: true` enables the feature
 of being replayed (`attestation: never` on the reviewer) for a gate the team
 wants CI-executed unconditionally.
 
+An empty diff between the merge base and HEAD (a no-op changeset) binds to the
+literal patch-id string `"none"` rather than an empty value, so an empty-diff
+run and a run whose patch-id genuinely failed to compute are never confused.
+
+## The run store: `seal.json`
+
+The seal persists alongside a run's other files, at `runs/<id>/seal.json`
+under the data directory (see [Local surface](./local-surface.md#the-data-directory)).
+`bastion attest` reads it to build a bundle. A run with no `seal.json` (an
+older run, or one whose sealing failed) cannot be attested; sealing failure
+never fails the review itself, so the run is otherwise complete, just
+unattestable.
+
 ## The `bastion attest` flow
 
 1. `bastion review --base <base>` runs, persists to the run store as today,
    and seals the run as it finishes.
-2. `bastion attest` loads that run, verifies the seal, and re-derives the
-   repository state: HEAD's tree must still match the tree the review saw, and
-   the config hash must still match. It refuses on any mismatch, since the
-   note would otherwise assert the reviewers saw content they did not.
-3. It builds the bundle (seal included), signs it with the author's SSH key
-   (prompting for presence if the key demands it), writes the note on HEAD,
-   and prints the push command for the notes ref.
+2. `bastion attest [<run>] [--key <path>]` loads that run (the latest by
+   default), verifies the seal, and refuses outright if the seal recorded a
+   test seam. It then re-derives the repository state: HEAD's tree, the merge
+   base's tree, the diff's patch-id, and the config hash must all still match
+   what the seal recorded. It refuses on any mismatch, since the note would
+   otherwise assert the reviewers saw content they did not.
+3. It resolves the signing key (`--key`, else `git config user.signingkey`,
+   else a refusal naming both options), builds the bundle (the seal, the
+   sealed reviewers' `reviewer.resolved` events, the version, and the signer's
+   public key), signs it with the author's SSH key (prompting for presence if
+   the key demands it), writes the note on HEAD, and prints the resolved
+   public key and the push command for the notes ref
+   (`git push origin refs/notes/bastion`).
 
 ## Verification and replay in CI
 
-`bastion review` in CI (the same binary, no separate verb) fetches the note for
-the head commit, verifies the author's signature against the PR author's
-GitHub-registered signing keys, verifies the run seal with its own embedded
-secret, and checks every binding. Then, per reviewer:
-an attested verdict whose inputs match replays; everything else executes. The
-merged result flows into the normal report path, so `bastion github report`
+`bastion review` in CI attempts a replay only when the repository config sets
+`attestations: true` and the run carries a GitHub source (`--repo`/`--pr`); a
+purely local review never attempts it. It looks up the note on HEAD first,
+falling back to the PR's head SHA when HEAD carries none (CI's checkout can be
+a merge commit, so the note the author actually attested may hang off the
+PR's own head commit instead). Given a note, it verifies the author's
+signature against the PR author's GitHub-registered signing keys
+(`GET /users/{username}/ssh_signing_keys`), verifies the run seal with its own
+embedded secret, and checks every binding (head tree, merge-base tree,
+patch-id, config hash) against its own re-derived values. Then, per routed
+reviewer: one covered by the bundle and not opted out (`attestation: never`)
+replays; everything else, including a reviewer the bundle does not cover,
+executes fresh. Coverage mismatch degrades rather than invalidating the whole
+plan.
+
+The merged result flows into the normal report path, so `bastion github report`
 posts the same sticky comment and check runs it would for a fresh run, with two
 additions for auditability:
 
-- The sticky comment opens with a prominent callout (the same mechanism as the
-  skills-drift `[!WARNING]` block): which reviewers were replayed from a signed
-  local run, which key attested, and when.
-- Each replayed reviewer's check-run summary states that its verdict was
-  replayed from an attested local run rather than executed fresh.
+- The sticky comment opens with a prominent `[!NOTE]` callout (the same
+  mechanism as the skills-drift `[!WARNING]` block): which reviewers were
+  replayed from a signed local run, which key attested, and when.
+- Each replayed reviewer's check-run summary adds a line stating its verdict
+  was replayed from an attested local run rather than executed fresh.
 
 The local `bastion review` mirrors the callout to stderr when it replays, as it
 does for the drift advisory. This surfacing is the human breadcrumb: anyone
@@ -198,7 +232,21 @@ local run and by whom, and can trace it back to the note on the head commit.
 
 Every failure is fail-closed to a full run, never to a silent pass: a missing
 or unverifiable note, a key the author has not registered with GitHub, a seal
-that does not verify (tampered, or produced by a different release), a
-binding mismatch, or a stale base all mean the reviewers simply execute, and
-the report notes why the attestation was not honored so the author is not left
-guessing.
+that does not verify (tampered, produced by a different release, or carrying
+an active test seam), a binding mismatch, or a stale base all mean the
+reviewers simply execute. The run records why as a `run.attestation-fallback`
+event, and the sticky comment surfaces the same reason as a line under the
+headline, so the author is not left guessing. Replay itself is recorded as a
+single `run.attested` event covering every replayed reviewer, and each
+replayed reviewer's own `reviewer.resolved` event carries `replayed: true`.
+
+### The adopter's two workflow requirements
+
+CI's checkout must be the PR head commit, not the default merge commit:
+attestation binds to the head tree the author attested, and a merge commit's
+tree never matches it. `actions/checkout` also does not fetch notes by
+default, so the workflow needs an explicit fetch of `refs/notes/bastion`,
+tolerant of the ref being absent (most PRs will not carry a note). Both are
+one-line additions to an existing `bastion` workflow; see
+[the GitHub adapter](./github-adapter.md#verification-and-replay) for the
+concrete steps.

@@ -33,8 +33,8 @@ verdict returns an error, never a fabricated pass, and gates fail closed on it.
     local-only exception, so a purely local review can run personal reviewers the
     GitHub adapter does not.
   - `docs/developer-guide/attestation.md`: the design for signed local runs that
-    CI verifies and replays instead of re-executing reviewers. A design target,
-    entirely unimplemented.
+    CI verifies and replays instead of re-executing reviewers. Implemented: the
+    seal in `src/seal.rs`, `bastion attest` and the CI planner in `src/attest.rs`.
 - `.bastion.yaml`: the example reviewer registry at the repository root (the
   `.bastion.yml` spelling is also honored); update it when the schema changes.
 - `.agents/skills/readme.md`: repo-local Rust coding skills and their provenance.
@@ -67,6 +67,7 @@ bastion github report --repo OWNER/NAME --pr N --sha SHA
 bastion skills install
 bastion skills check
 bastion skills list
+bastion attest
 ```
 
 ## Architecture map
@@ -115,7 +116,18 @@ version:
 - `src/render.rs`: human and JSONL output.
 - `src/runner.rs`: the parallel, timeout-bounded runner: fans matched reviewers
   out over a `JoinSet`, fails closed on error/timeout, streams run events, and
-  persists each run.
+  persists each run, sealing it at persist time.
+- `src/seal.rs` / `src/attest.rs`: signed local-run attestation
+  (`docs/developer-guide/attestation.md`). `seal.rs` is the run seal: an
+  HMAC-SHA256 keyed by a secret embedded in the binary at build time, over a
+  canonical digest of the reviewed trees, the diff, the effective config hash,
+  whether a test seam was active, and the sorted `reviewer.resolved` events;
+  the runner seals every run and persists the seal to `runs/<id>/seal.json`.
+  `attest.rs` is `bastion attest` (verifies the seal, re-derives the repository
+  state, signs a bundle with the author's SSH key, writes it as a git note
+  under `refs/notes/bastion`) and the CI-side verify-and-replay planner
+  (`plan`, `AttestationOutcome`) that `commands::review` calls when the
+  registry sets `attestations: true` and the run carries a GitHub source.
 - `src/backend/`: the agent execution boundary. `mod.rs` defines the `Backend`
   trait, the deterministic `MockBackend`, `dispatch`, and the shared prompt helpers
   (including the fenced-YAML `SCHEMA_INSTRUCTION`/`extract_verdict` that the Codex
@@ -160,6 +172,11 @@ version:
   and never touches a check-run conclusion. The local `bastion review` mirrors it to
   stderr, but only when the repository has adopted Bastion (a repo-level registry is
   present); a user-level-only local review stays silent (see the `src/skills.rs` entry).
+  When one or more reviewers replayed from a verified attestation, `report.rs` adds a
+  `[!NOTE]` callout naming them, the attesting key, and when it was signed, plus a line
+  on each replayed reviewer's own check-run summary; a fallback (attestation attempted
+  but not honored) surfaces as a line naming why. See `src/seal.rs` / `src/attest.rs`
+  below and `docs/developer-guide/attestation.md`.
   Check runs need a GitHub App installation token, so this
   runs under one (the default Actions `GITHUB_TOKEN` qualifies; a classic PAT does
   not). API-created check runs carry no check-suite id, so under the shared

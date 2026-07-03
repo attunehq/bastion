@@ -5,10 +5,17 @@
 //! the `git` binary, the same one the surrounding workflow already uses.
 
 use std::collections::BTreeSet;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use color_eyre::eyre::{Context, Result, bail};
+
+/// The dedicated git-notes ref an attestation bundle and its signature are
+/// attached under (`docs/developer-guide/attestation.md`, "Storage: a git
+/// note"). A distinct ref keeps the note independent of any other notes usage
+/// and lets it push/fetch as one unit (`git push origin refs/notes/bastion`).
+pub const NOTES_REF: &str = "refs/notes/bastion";
 
 /// Run `git` with `args` in `cwd`, returning trimmed stdout on success.
 fn run_git(cwd: &Path, args: &[&str]) -> Result<String> {
@@ -17,6 +24,40 @@ fn run_git(cwd: &Path, args: &[&str]) -> Result<String> {
         .current_dir(cwd)
         .output()
         .wrap_err("failed to invoke git; is it installed and on PATH?")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git {} failed: {}", args.join(" "), stderr.trim());
+    }
+    Ok(String::from_utf8(output.stdout)
+        .wrap_err("git produced non-UTF-8 output")?
+        .trim()
+        .to_string())
+}
+
+/// Like [`run_git`], but pipes `stdin_bytes` to the child's stdin. Used for
+/// `git patch-id`, which reads the diff to fingerprint from stdin rather than
+/// taking it as an argument.
+fn run_git_with_stdin(cwd: &Path, args: &[&str], stdin_bytes: &[u8]) -> Result<String> {
+    let mut child = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .wrap_err("failed to invoke git; is it installed and on PATH?")?;
+
+    // The child's stdin handle is always present for a `Stdio::piped()` spawn.
+    child
+        .stdin
+        .take()
+        .expect("stdin was requested as piped")
+        .write_all(stdin_bytes)
+        .wrap_err("writing to git's stdin")?;
+
+    let output = child
+        .wait_with_output()
+        .wrap_err("waiting for git to finish")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("git {} failed: {}", args.join(" "), stderr.trim());
@@ -106,6 +147,162 @@ pub fn short_head(cwd: &Path) -> Option<String> {
     run_git(cwd, &["rev-parse", "--short", "HEAD"])
         .ok()
         .filter(|sha| !sha.is_empty())
+}
+
+/// The commit `base` and `HEAD` diverged from: `git merge-base <base> HEAD`.
+///
+/// This is the changeset's actual starting point, which may differ from `base`
+/// itself if `base` has moved on since the branch was cut. The run seal binds to
+/// this commit's tree, not `base`'s current tree, so a local review remains
+/// attestable even after the target branch advances.
+///
+/// # Errors
+///
+/// Returns an error if `base` does not resolve or the two histories share no
+/// common ancestor (e.g. unrelated histories).
+pub fn merge_base(cwd: &Path, base: &str) -> Result<String> {
+    run_git(cwd, &["merge-base", base, "HEAD"])
+}
+
+/// The git tree hash `rev` points at: `git rev-parse <rev>^{tree}`.
+///
+/// A tree hash names content, not history, so two commits with identical file
+/// contents (an amend, a rebase that changes only the message) share a tree
+/// hash. That is exactly the property the run seal wants: it binds to what was
+/// reviewed, not to how it got committed.
+///
+/// # Errors
+///
+/// Returns an error if `rev` does not resolve.
+pub fn tree_hash(cwd: &Path, rev: &str) -> Result<String> {
+    run_git(cwd, &["rev-parse", &format!("{rev}^{{tree}}")])
+}
+
+/// The stable patch-id of the diff `base_commit..HEAD`: `git diff` piped through
+/// `git patch-id --stable`.
+///
+/// `git patch-id` fingerprints a diff's *content* (the lines added and removed),
+/// ignoring line numbers and blob hashes, so it is stable across a rebase that
+/// reapplies the same change on a different base. `--stable` additionally makes
+/// the id independent of line order within a hunk, so it agrees across git
+/// versions.
+///
+/// An empty diff (`base_commit` and `HEAD` are identical) is a real, well-defined
+/// case: `git patch-id` prints nothing for empty input, since there is no patch to
+/// fingerprint. This function represents that case as the literal string
+/// `"none"` rather than an empty string, so a caller can distinguish "no patch id
+/// was computed" (a bug) from "the patch id is the documented empty-diff
+/// sentinel" (expected) without special-casing an empty string everywhere a
+/// patch id is displayed or compared.
+///
+/// # Errors
+///
+/// Returns an error if `base_commit` does not resolve or `git diff`/`git
+/// patch-id` fails.
+pub fn patch_id(cwd: &Path, base_commit: &str) -> Result<String> {
+    let diff = run_git(cwd, &["diff", base_commit, "HEAD"])?;
+    if diff.is_empty() {
+        return Ok("none".to_string());
+    }
+    let output = run_git_with_stdin(
+        cwd,
+        &["patch-id", "--stable"],
+        format!("{diff}\n").as_bytes(),
+    )?;
+    // `git patch-id` prints "<id> <commit>"; the commit half is the diff's first
+    // line's blob (meaningless here, since stdin was a raw diff, not a commit),
+    // so only the id itself is wanted.
+    output
+        .split_whitespace()
+        .next()
+        .map(str::to_string)
+        .ok_or_else(|| {
+            color_eyre::eyre::eyre!("git patch-id produced no output for a non-empty diff")
+        })
+}
+
+/// The configured `git config user.signingkey`, if any.
+///
+/// Non-fatal by design: an unset key is the ordinary case for most
+/// repositories, not an error, so this reports `None` on any failure
+/// (unset key, no git config at all) rather than propagating a `Result`.
+/// `bastion attest` (`src/attest.rs`) uses this as one of the ways to resolve
+/// a signing key, falling back to `--key` or refusing outright when both are
+/// absent.
+#[must_use]
+pub fn run_git_config_signingkey(cwd: &Path) -> Option<String> {
+    run_git(cwd, &["config", "user.signingkey"])
+        .ok()
+        .filter(|v| !v.is_empty())
+}
+
+/// Read the git note under `notes_ref` attached to `rev`, if one exists:
+/// `git notes --ref=<notes_ref> show <rev>`.
+///
+/// Returns `Ok(None)` when `rev` simply has no note, which is the ordinary case
+/// for nearly every commit; only a genuine git failure (not "no note") is
+/// propagated as an error. `git notes show` exits non-zero for both cases, so
+/// this distinguishes them by checking whether stderr names the "no note found"
+/// condition rather than treating every non-zero exit as an error.
+///
+/// # Errors
+///
+/// Returns an error if `git` fails for a reason other than the note being
+/// absent (e.g. `rev` does not resolve at all).
+pub fn note_show(cwd: &Path, notes_ref: &str, rev: &str) -> Result<Option<String>> {
+    let output = Command::new("git")
+        .args(["notes", &format!("--ref={notes_ref}"), "show", rev])
+        .current_dir(cwd)
+        .output()
+        .wrap_err("failed to invoke git; is it installed and on PATH?")?;
+    if output.status.success() {
+        return Ok(Some(
+            String::from_utf8(output.stdout)
+                .wrap_err("git produced non-UTF-8 output")?
+                .trim()
+                .to_string(),
+        ));
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("no note found") {
+        return Ok(None);
+    }
+    bail!("git notes show failed: {}", stderr.trim());
+}
+
+/// Write (force-overwriting) the git note under `notes_ref` attached to `rev`:
+/// `git notes --ref=<notes_ref> add -f -F <tempfile> <rev>`.
+///
+/// Force-overwrite is deliberate: re-running `bastion attest` on a commit that
+/// already carries a note (a re-review after fixing a finding, say) should
+/// replace the stale note rather than fail. `content` is written through a
+/// temporary file (`-F`) rather than `-m` on the command line, since a bundle can
+/// be arbitrarily large and contain characters unsafe to pass as a single shell
+/// argument.
+///
+/// # Errors
+///
+/// Returns an error if the temporary file cannot be written or `git notes add`
+/// fails.
+pub fn note_add(cwd: &Path, notes_ref: &str, rev: &str, content: &str) -> Result<()> {
+    let mut file = tempfile::NamedTempFile::new().wrap_err("creating a temporary note file")?;
+    file.write_all(content.as_bytes())
+        .wrap_err("writing note content to a temporary file")?;
+    file.flush().wrap_err("flushing the temporary note file")?;
+
+    run_git(
+        cwd,
+        &[
+            "notes",
+            &format!("--ref={notes_ref}"),
+            "add",
+            "-f",
+            "-F",
+            &file.path().to_string_lossy(),
+            rev,
+        ],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -210,5 +407,141 @@ mod tests {
         assert!(!sha.is_empty());
         // A short hash is a handful of hex characters with no whitespace.
         assert!(sha.chars().all(|c| c.is_ascii_hexdigit()), "got {sha:?}");
+    }
+
+    #[test]
+    fn merge_base_and_tree_hash_resolve_over_a_diverged_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        git(dir, &["init"]);
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        git(dir, &["add", "a.txt"]);
+        git(dir, &["commit", "-m", "base"]);
+        let base_sha = run_git(dir, &["rev-parse", "HEAD"]).unwrap();
+
+        git(dir, &["branch", "base"]);
+        std::fs::write(dir.join("a.txt"), "two\n").unwrap();
+        git(dir, &["commit", "-am", "feature work"]);
+
+        let merge_base = merge_base(dir, "base").expect("a common ancestor exists");
+        assert_eq!(merge_base, base_sha);
+
+        let head_tree = tree_hash(dir, "HEAD").expect("HEAD resolves a tree");
+        let base_tree = tree_hash(dir, &merge_base).expect("merge base resolves a tree");
+        assert_ne!(
+            head_tree, base_tree,
+            "the two commits have different content, so different trees"
+        );
+        assert!(!head_tree.is_empty());
+    }
+
+    #[test]
+    fn identical_content_after_amend_or_rebase_yields_identical_tree_and_patch_id() {
+        // Two commits with the same file content but different messages (standing
+        // in for an amend or a rebase that only rewrites history, not content) must
+        // produce the same tree hash and the same patch-id: the seal binds content,
+        // not commit identity.
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+
+        for dir in [dir_a.path(), dir_b.path()] {
+            git(dir, &["init"]);
+            std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+            git(dir, &["add", "a.txt"]);
+            git(dir, &["commit", "-m", "base"]);
+            git(dir, &["branch", "base"]);
+        }
+
+        std::fs::write(dir_a.path().join("a.txt"), "one\ntwo\n").unwrap();
+        git(dir_a.path(), &["commit", "-am", "message A"]);
+
+        std::fs::write(dir_b.path().join("a.txt"), "one\ntwo\n").unwrap();
+        git(
+            dir_b.path(),
+            &["commit", "-am", "a completely different message B"],
+        );
+
+        let tree_a = tree_hash(dir_a.path(), "HEAD").unwrap();
+        let tree_b = tree_hash(dir_b.path(), "HEAD").unwrap();
+        assert_eq!(
+            tree_a, tree_b,
+            "identical content must yield identical trees"
+        );
+
+        let base_a = merge_base(dir_a.path(), "base").unwrap();
+        let base_b = merge_base(dir_b.path(), "base").unwrap();
+        let patch_a = patch_id(dir_a.path(), &base_a).unwrap();
+        let patch_b = patch_id(dir_b.path(), &base_b).unwrap();
+        assert_eq!(
+            patch_a, patch_b,
+            "identical diffs must yield identical patch ids regardless of commit message"
+        );
+    }
+
+    #[test]
+    fn patch_id_of_an_empty_diff_is_the_documented_sentinel() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        git(dir, &["init"]);
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        git(dir, &["add", "a.txt"]);
+        git(dir, &["commit", "-m", "base"]);
+
+        // HEAD..HEAD is an empty diff.
+        let id = patch_id(dir, "HEAD").expect("empty diff still resolves");
+        assert_eq!(id, "none");
+    }
+
+    #[test]
+    fn patch_id_differs_for_different_diffs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        git(dir, &["init"]);
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        git(dir, &["add", "a.txt"]);
+        git(dir, &["commit", "-m", "base"]);
+        let base_sha = run_git(dir, &["rev-parse", "HEAD"]).unwrap();
+
+        std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+        git(dir, &["commit", "-am", "add a line"]);
+        let id_1 = patch_id(dir, &base_sha).unwrap();
+
+        std::fs::write(dir.join("a.txt"), "one\nthree\nfour\n").unwrap();
+        git(dir, &["commit", "-am", "add different lines"]);
+        let id_2 = patch_id(dir, &base_sha).unwrap();
+
+        assert_ne!(id_1, id_2);
+        assert_ne!(id_1, "none");
+    }
+
+    #[test]
+    fn notes_round_trip_and_show_returns_none_without_a_note() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        git(dir, &["init"]);
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        git(dir, &["add", "a.txt"]);
+        git(dir, &["commit", "-m", "base"]);
+
+        assert_eq!(note_show(dir, NOTES_REF, "HEAD").unwrap(), None);
+
+        note_add(dir, NOTES_REF, "HEAD", "bundle-v1").expect("note is written");
+        assert_eq!(
+            note_show(dir, NOTES_REF, "HEAD").unwrap(),
+            Some("bundle-v1".to_string())
+        );
+
+        // A second commit with no note of its own still shows none.
+        std::fs::write(dir.join("b.txt"), "two\n").unwrap();
+        git(dir, &["add", "b.txt"]);
+        git(dir, &["commit", "-m", "second"]);
+        assert_eq!(note_show(dir, NOTES_REF, "HEAD").unwrap(), None);
+
+        // Force-overwrite replaces the existing note on the first commit.
+        note_add(dir, NOTES_REF, "HEAD~1", "bundle-v2").expect("note is overwritten");
+        assert_eq!(
+            note_show(dir, NOTES_REF, "HEAD~1").unwrap(),
+            Some("bundle-v2".to_string())
+        );
     }
 }

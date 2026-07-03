@@ -110,6 +110,41 @@ pub enum RunEvent {
         duration_ms: u64,
         /// Whether a transcript was saved to disk for this reviewer.
         has_transcript: bool,
+        /// Whether this verdict was replayed from a signed local attestation
+        /// rather than executed fresh (`docs/developer-guide/attestation.md`).
+        /// Additive: a run persisted before this field existed deserializes with
+        /// `false`, which is the correct reading (nothing could be replayed
+        /// before the feature existed).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        replayed: bool,
+    },
+    /// A CI run that replayed one or more reviewers from a signed local
+    /// attestation instead of executing them, recorded once per run as the
+    /// audit trail for what was replayed, by which key, and when. A later phase
+    /// emits this; the schema lands now so the wire shape is fixed.
+    #[serde(rename = "run.attested")]
+    AttestationReplayed {
+        /// The run id.
+        run: RunId,
+        /// The names of the reviewers replayed from the attestation.
+        reviewers: Vec<String>,
+        /// The SSH public key (as registered with the forge) that signed the
+        /// attestation.
+        public_key: String,
+        /// When the attestation was signed, as recorded in the bundle.
+        attested_at: String,
+    },
+    /// Emitted when attestations are enabled for a CI run but the attestation was
+    /// not honored: the reviewers executed fresh, and this records why, so the
+    /// report can tell the author rather than leaving them guessing
+    /// (`docs/developer-guide/attestation.md`, "Verification and replay in CI").
+    #[serde(rename = "run.attestation-fallback")]
+    AttestationFallback {
+        /// The run id.
+        run: RunId,
+        /// A plain-English reason naming the cause (a missing note, an
+        /// unverifiable signature, a seal mismatch, a stale binding, and so on).
+        reason: String,
     },
     /// The aggregate outcome: the local equivalent of the `bastion` check.
     #[serde(rename = "run.completed")]
@@ -148,6 +183,8 @@ impl RunEvent {
             RunEvent::RunStarted { run, .. }
             | RunEvent::ReviewerStarted { run, .. }
             | RunEvent::ReviewerResolved { run, .. }
+            | RunEvent::AttestationReplayed { run, .. }
+            | RunEvent::AttestationFallback { run, .. }
             | RunEvent::RunCompleted { run, .. } => run,
         }
     }
@@ -180,16 +217,78 @@ mod tests {
             }),
             duration_ms: 38120,
             has_transcript: true,
+            replayed: false,
         };
 
         let line = serde_json::to_string(&event).expect("serializes");
         assert!(line.contains(r#""type":"reviewer.resolved""#));
         assert!(line.contains(r#""verdict":"block""#));
         assert!(line.contains(r#""cost_usd":0.21"#));
+        // `replayed: false` is the common case and is omitted from the wire form.
+        assert!(!line.contains("replayed"));
 
         let parsed: RunEvent = serde_json::from_str(&line).expect("round-trips");
         assert_eq!(parsed, event);
         assert_eq!(parsed.run_id().as_str(), "r-0f3a");
+    }
+
+    #[test]
+    fn a_legacy_resolved_event_with_no_replayed_field_defaults_to_false() {
+        // A run persisted before `replayed` existed must still load, and the
+        // absence of a signed attestation to replay from is the correct reading:
+        // it was executed fresh.
+        let line = r#"{"type":"reviewer.resolved","run":"r-old","reviewer":"r","verdict":"pass","summary":"s","duration_ms":1,"has_transcript":false}"#;
+        let parsed: RunEvent = serde_json::from_str(line).expect("legacy event loads");
+        match parsed {
+            RunEvent::ReviewerResolved { replayed, .. } => assert!(!replayed),
+            other => panic!("expected reviewer.resolved, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_replayed_resolved_event_serializes_the_flag() {
+        let event = RunEvent::ReviewerResolved {
+            run: RunId("r-1".into()),
+            reviewer: "tenant-isolation".into(),
+            verdict: Decision::Pass,
+            summary: "replayed from an attested local run".into(),
+            findings: vec![],
+            usage: None,
+            duration_ms: 0,
+            has_transcript: false,
+            replayed: true,
+        };
+        let line = serde_json::to_string(&event).unwrap();
+        assert!(line.contains(r#""replayed":true"#));
+        assert_eq!(serde_json::from_str::<RunEvent>(&line).unwrap(), event);
+    }
+
+    #[test]
+    fn attestation_replayed_round_trips() {
+        let event = RunEvent::AttestationReplayed {
+            run: RunId("r-1".into()),
+            reviewers: vec!["tenant-isolation".into(), "file-responsibility".into()],
+            public_key: "ssh-ed25519 AAAA...".into(),
+            attested_at: "2026-07-01T12:00:00Z".into(),
+        };
+        let line = serde_json::to_string(&event).unwrap();
+        assert!(line.contains(r#""type":"run.attested""#));
+        let parsed: RunEvent = serde_json::from_str(&line).unwrap();
+        assert_eq!(parsed, event);
+        assert_eq!(parsed.run_id().as_str(), "r-1");
+    }
+
+    #[test]
+    fn attestation_fallback_round_trips() {
+        let event = RunEvent::AttestationFallback {
+            run: RunId("r-1".into()),
+            reason: "no attestation note found on HEAD".into(),
+        };
+        let line = serde_json::to_string(&event).unwrap();
+        assert!(line.contains(r#""type":"run.attestation-fallback""#));
+        let parsed: RunEvent = serde_json::from_str(&line).unwrap();
+        assert_eq!(parsed, event);
+        assert_eq!(parsed.run_id().as_str(), "r-1");
     }
 
     #[test]

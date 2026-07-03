@@ -81,6 +81,8 @@ Formalized, Bastion is built around the following threat model:
 
 The PR description and discussion Bastion feeds a reviewer (the [review context](#review-context)) are authored by the gate's *subject*, not its policy authority. They explain intent and carry the author's pushback, the way a human reviewer reads them, but Bastion presents them as untrusted claims and excludes them from the gate logic, so an author cannot talk a gate into passing. Granting an exception remains a human governance act.
 
+[Attestation](./attestation.md) fits inside this same threat model rather than weakening it: CI trusting a signed local run in place of re-executing a reviewer carries the same trust as any other aligned-contributor assumption above.
+
 ---
 
 ## The reviewer

@@ -264,6 +264,58 @@ require review of the reviewer-policy paths; see [Governance](./governance.md)).
 Merging stays GitHub-native: an author enables auto-merge, and once the required
 job is green GitHub merges. A push re-triggers the workflow and it resolves again.
 
+## Attesting a run so CI can replay it
+
+Every reviewer is an agent invocation, so a PR that ran clean locally pays for
+each reviewer again when CI confirms it. If you would rather CI trust a signed
+local run than re-execute every reviewer, opt in with one registry field:
+
+```yaml
+attestations: true
+
+reviewers:
+  # ...
+```
+
+With this set, an author who runs `bastion attest` after a green local review
+(see [The local workflow](./local-workflow.md#attesting-a-run-for-ci)) and pushes
+the resulting note can have CI replay the covered reviewers instead of
+re-running them. `bastion review` in CI verifies the note's signature against
+the PR author's GitHub-registered SSH signing keys, checks that the attested
+run reviewed the exact same content CI is looking at (the same trees, the same
+diff, the same effective reviewer config), and only then replays. A replayed
+block still blocks the merge, exactly as a fresh one would; attestation skips
+duplicate execution, not the gate.
+
+Two workflow additions are required for this to work, both already present in
+Bastion's own self-hosted example below: checking out the PR's head commit
+(`ref: ${{ github.event.pull_request.head.sha }}`), since attestation binds to
+that exact tree and the default merge-commit checkout will never match it, and
+fetching the notes ref (`git fetch origin +refs/notes/bastion:refs/notes/bastion
+|| true`), since `actions/checkout` does not fetch notes by default.
+
+When attestation replaces execution, the sticky comment opens with a callout
+naming which reviewers replayed, the key that attested, and when; each
+replayed reviewer's check-run summary says so too. When it does not (a missing
+note, an unregistered key, a stale base, or any other mismatch), CI simply
+executes every reviewer as usual and the comment says why the attestation was
+not honored, so you are never left guessing.
+
+A reviewer can opt out of ever being replayed with `attestation: never` on that
+reviewer, for a gate your team wants CI to execute unconditionally regardless
+of what was attested locally.
+
+Whether the SSH key an author attests with is a plain file or a presence-gated
+one (a hardware token or an OS keychain entry that prompts per signature) is
+worth deciding deliberately. A coding agent running on the author's machine can
+use a plain file key without their involvement, so enrolling one means
+accepting that an agent on that machine could sign an attestation on its own,
+the same trust already extended to that machine through commit access. Bastion
+cannot tell the two kinds of key apart from the signature alone, so this is a
+call for the author (or your team's policy) to make, not something the tool
+enforces. See the [attestation design](https://github.com/jssblck/bastion/blob/main/docs/developer-guide/attestation.md#trust-posture)
+for the full reasoning.
+
 ## Authentication & billing
 
 Coding-agent subscriptions tie usage to an individual, not a team, so Bastion bills

@@ -563,6 +563,7 @@ findings: []
             env: Default::default(),
             capabilities: Default::default(),
             inputs: Default::default(),
+            attestation: None,
             prompt: "p".into(),
         }
     }

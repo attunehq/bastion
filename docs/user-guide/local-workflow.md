@@ -239,6 +239,44 @@ reaches a containerized one only if you write its literal value into that review
 reviewer typically reaches a host service over the container network rather than
 `localhost`.
 
+## Attesting a run for CI
+
+Every reviewer is an agent invocation, so a project running Bastion both locally
+and in CI pays for each review roughly twice: once in your loop, once again when
+CI confirms it. If your repository has set `attestations: true` in its registry
+(see [Continuous integration](./continuous-integration.md#attesting-a-run-so-ci-can-replay-it)),
+you can sign your last green local run so CI reuses it instead of re-running
+every reviewer:
+
+```sh
+bastion review --base main   # ends green
+bastion attest                # signs the run that just finished
+git push origin refs/notes/bastion
+```
+
+`bastion attest` re-checks that your repository has not moved on since the
+review (the same tree, the same diff, the same effective reviewer config) and
+refuses to sign if it has, so the note can never claim the reviewers saw
+something they did not. It signs with your SSH key (`git config
+user.signingkey`, or `--key <path>` to name one explicitly), prompting for a
+hardware token or keychain if your key requires it, and prints the exact push
+command. The signed bundle carries the run's actual verdicts and findings, not
+just a pass/fail flag, so a blocked local run that gets attested and pushed
+still blocks in CI.
+
+Push the printed command (or fold it into your normal `git push`) before
+opening the PR, so CI has the note when it runs. CI verifies the signature
+against the SSH signing keys you have registered with GitHub, so this only
+works for a key you have added there; a key freshly generated on the machine
+you are pushing from, with nothing registered, never verifies.
+
+Whether to use a plain key file or a presence-gated one (a hardware token or an
+OS keychain entry that prompts you per signature) is your call to make. A plain
+file key means an agent running on your machine could sign an attestation
+without you noticing, the same trust you already extend to that machine
+through your commit access. See [Attestation](https://github.com/jssblck/bastion/blob/main/docs/developer-guide/attestation.md)
+for the full trust model.
+
 ## The same surface in CI
 
 For the repository's reviewers, these local events are not a separate system from CI;

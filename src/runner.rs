@@ -25,6 +25,7 @@ use crate::context::ReviewContext;
 use crate::event::{Gates, ReviewerRef, RunEvent, RunId};
 use crate::paths::Layout;
 use crate::reviewer::{Mode, Reviewer};
+use crate::seal::SealBindings;
 use crate::verdict::{Decision, Money, Usage, Verdict};
 
 // Re-exports so existing imports (`runner::Backend`, `runner::MockBackend`, ...)
@@ -94,11 +95,64 @@ pub struct ExecContext {
     /// Number of changed files (for the persisted `run.started`).
     pub changed: u32,
     /// The reviewers that matched and will run (for the persisted `run.started`).
+    /// Includes both the reviewers that execute fresh and any that replay
+    /// (`replayed`): a replayed reviewer still matched CI's routing, so it
+    /// belongs in the plan the way a pending check does.
     pub reviewers: Vec<ReviewerRef>,
     /// The review context handed to every reviewer this run: the author's stated
     /// intent, the surrounding discussion, and each reviewer's prior findings. Empty
     /// when no producer supplied any, which leaves every reviewer's prompt unchanged.
     pub context: ReviewContext,
+    /// The git- and config-derived bindings the run should be sealed with, when
+    /// the caller could derive them. `None` means this run stays unsealed (a
+    /// zero-match fast path, or a caller that failed to derive the bindings and
+    /// chose to proceed unsealed rather than fail the review over it).
+    pub seal: Option<SealBindings>,
+    /// Reviewers replaying from a verified attestation instead of executing,
+    /// keyed by name (`docs/developer-guide/attestation.md`, "Verification and
+    /// replay in CI"). Empty for every run before this phase and for any local
+    /// review: only the CI surface, with attestations enabled and a verified
+    /// bundle, ever populates this.
+    pub replayed: std::collections::BTreeMap<String, ReplayedReviewer>,
+    /// The attestation this run replayed from, when `replayed` is non-empty.
+    /// Drives the single `run.attested` audit-trail event; `None` whenever
+    /// `replayed` is empty.
+    pub attestation: Option<AttestationAudit>,
+    /// The `run.attestation-fallback` event, when the caller already rendered one
+    /// (attestations were enabled but the note did not verify or replay).
+    /// Carried here so persistence includes it too: the caller renders it to the
+    /// live stream directly (before any reviewer has resolved, since it decides
+    /// which reviewers execute fresh), so without this the persisted `run.jsonl`
+    /// would silently drop the one event that explains why nothing replayed.
+    pub attestation_fallback: Option<RunEvent>,
+}
+
+/// One reviewer's replayed verdict, carried into [`ExecContext`] so the runner
+/// can fold it into the normal tally/persist/report machinery without handing
+/// it to the backend `JoinSet`.
+#[derive(Debug, Clone)]
+pub struct ReplayedReviewer {
+    /// The reviewer's own definition, exactly as CI routed it. Carried in full
+    /// (not just its name) so persistence (backend, mode, trigger) has the same
+    /// fidelity a freshly-executed reviewer's row does.
+    pub reviewer: Reviewer,
+    /// The bundle's `reviewer.resolved` event for this reviewer, exactly as
+    /// attested. The runner re-derives verdict, summary, findings, usage, and
+    /// duration from it; `has_transcript` is always overridden to `false` (see
+    /// [`ExecContext::replayed`]'s doc comment) since there is no local
+    /// transcript in the CI store.
+    pub event: serde_json::Value,
+}
+
+/// Metadata about a run's attestation replay, for the `run.attested` audit-trail
+/// event `execute_with` emits once, before `run.completed`, when
+/// [`ExecContext::replayed`] is non-empty.
+#[derive(Debug, Clone)]
+pub struct AttestationAudit {
+    /// The SSH public key that signed the attestation.
+    pub public_key: String,
+    /// When the attestation was signed, as recorded in the bundle.
+    pub attested_at: String,
 }
 
 /// How long a reviewer with no explicit `timeout` is allowed to run before it is
@@ -119,6 +173,9 @@ struct Resolved {
     /// Whether this reviewer's outcome counts toward the aggregate gate. Advisors
     /// never do; a failed advisor is ignored entirely.
     counts_as_gate: bool,
+    /// Whether this verdict was replayed from a signed local attestation rather
+    /// than executed fresh this run.
+    replayed: bool,
 }
 
 /// Execute the matched reviewers for a run using the real backends.
@@ -162,16 +219,30 @@ pub async fn execute_with(
     let run_started = Instant::now();
 
     // Emit `reviewer.started` for each reviewer up front (the pending-checks
-    // equivalent), then launch them all concurrently. The started events are also
-    // retained for persistence so `run.jsonl` is the *full* event stream the docs
+    // equivalent), then launch the ones that must actually execute concurrently.
+    // A replayed reviewer still gets a `reviewer.started` (mirroring what
+    // actually produced the verdict, per its own definition) so the reported
+    // plan matches what ran, but it is never handed to the `JoinSet`: only the
+    // non-replayed matched reviewers are. The started events are also retained
+    // for persistence so `run.jsonl` is the *full* event stream the docs
     // promise, not just the resolve/completed tail.
-    let mut started_events = Vec::with_capacity(matched.len());
+    let mut started_events = Vec::with_capacity(matched.len() + ctx.replayed.len());
     for reviewer in matched {
         let event = RunEvent::ReviewerStarted {
             run: ctx.run.clone(),
             reviewer: reviewer.name.clone(),
             mode: reviewer.mode,
             backend: reviewer.backend,
+        };
+        emit(&event);
+        started_events.push(event);
+    }
+    for replay in ctx.replayed.values() {
+        let event = RunEvent::ReviewerStarted {
+            run: ctx.run.clone(),
+            reviewer: replay.reviewer.name.clone(),
+            mode: replay.reviewer.mode,
+            backend: replay.reviewer.backend,
         };
         emit(&event);
         started_events.push(event);
@@ -223,17 +294,29 @@ pub async fn execute_with(
         }
     }
 
-    // Resolve each reviewer, applying fail-closed / fail-open policy.
-    let mut resolved = Vec::with_capacity(matched.len());
+    // Resolve each freshly-executed reviewer, applying fail-closed / fail-open
+    // policy, then fold in every replayed reviewer from its attested event. A
+    // replayed row is never subject to fail-closed/fail-open: it already carries
+    // a real, previously-resolved verdict, so it is reconstructed verbatim
+    // (verdict, findings, usage, duration) rather than re-derived.
+    let mut resolved = Vec::with_capacity(matched.len() + ctx.replayed.len());
     for (index, reviewer) in matched.iter().enumerate() {
         resolved.push(resolve(reviewer, results[index].take()));
     }
+    for replay in ctx.replayed.values() {
+        resolved.push(resolve_replayed(replay));
+    }
 
     // Persist per-reviewer artifacts and build the resolve events. The persisted
-    // stream opens with the retained `reviewer.started` events so a replay sees the
-    // same sequence the live `emit` produced.
-    let mut events = started_events;
-    events.reserve(matched.len() + 1);
+    // stream opens with the caller's `run.attestation-fallback` (when present,
+    // decided and rendered before any reviewer was dispatched) followed by the
+    // retained `reviewer.started` events, so a replay sees the same sequence the
+    // live `emit` produced.
+    let mut events = Vec::with_capacity(started_events.len() + resolved.len() + 3);
+    if let Some(fallback) = ctx.attestation_fallback.clone() {
+        events.push(fallback);
+    }
+    events.extend(started_events);
     for item in &resolved {
         persist_reviewer(layout, &ctx.run, item)
             .wrap_err_with(|| format!("persisting reviewer '{}'", item.reviewer.name))?;
@@ -246,12 +329,31 @@ pub async fn execute_with(
             usage: item.usage,
             duration_ms: duration_ms(item.duration),
             has_transcript: item.transcript.is_some(),
+            replayed: item.replayed,
         };
         emit(&event);
         events.push(event);
     }
 
-    // Aggregate: all gates must pass.
+    // The attestation audit trail, once per run, right before `run.completed`:
+    // which reviewers replayed, by which key, and when.
+    if let Some(audit) = &ctx.attestation
+        && !ctx.replayed.is_empty()
+    {
+        let mut reviewers: Vec<String> = ctx.replayed.keys().cloned().collect();
+        reviewers.sort();
+        let event = RunEvent::AttestationReplayed {
+            run: ctx.run.clone(),
+            reviewers,
+            public_key: audit.public_key.clone(),
+            attested_at: audit.attested_at.clone(),
+        };
+        emit(&event);
+        events.push(event);
+    }
+
+    // Aggregate: all gates must pass. A replayed block still blocks the run;
+    // replay never changes an outcome.
     let gates = tally(&resolved);
     let aggregate = if gates.blocked == 0 {
         Decision::Pass
@@ -280,7 +382,110 @@ pub async fn execute_with(
     stream.push(completed);
     persist_run(layout, &ctx.run, ctx, &stream)?;
 
+    seal_run(layout, ctx, &stream);
+
     Ok(aggregate)
+}
+
+/// Reconstruct a [`Resolved`] row for a replayed reviewer from its attested
+/// `reviewer.resolved` event.
+///
+/// A malformed event (a bundle field this binary's [`RunEvent`] shape cannot
+/// parse) is a defect in the planner or the bundle, not something a reviewer's
+/// own gate/advisor policy should paper over: a gate replay that cannot be
+/// parsed fails closed exactly like a crashed fresh execution would, and an
+/// advisor replay fails open the same way, so a broken replay degrades no
+/// differently than a broken backend.
+fn resolve_replayed(replay: &ReplayedReviewer) -> Resolved {
+    let is_gate = replay.reviewer.mode == Mode::Gate;
+    match serde_json::from_value::<RunEvent>(replay.event.clone()) {
+        Ok(RunEvent::ReviewerResolved {
+            verdict,
+            summary,
+            findings,
+            usage,
+            duration_ms,
+            ..
+        }) => Resolved {
+            reviewer: replay.reviewer.clone(),
+            decision: verdict,
+            summary,
+            findings,
+            usage,
+            // There is no local transcript in the CI store: the bundle carries
+            // only the resolved event, never the transcript file.
+            transcript: None,
+            duration: Duration::from_millis(duration_ms),
+            counts_as_gate: is_gate,
+            replayed: true,
+        },
+        Ok(_) | Err(_) => fail(
+            &replay.reviewer,
+            is_gate,
+            "the attested reviewer.resolved event could not be parsed",
+            Duration::ZERO,
+        ),
+    }
+}
+
+/// Seal the run when `ctx` carries [`SealBindings`], persisting the result
+/// alongside `run.jsonl`.
+///
+/// Sealing failure is deliberately non-fatal: an unsealed run is simply a run
+/// nobody can attest later, not a failed review. Every failure path here (no
+/// bindings, zero repo-reviewer events, a persistence error) logs at most a
+/// `tracing::warn!` and returns without touching `aggregate`.
+fn seal_run(layout: &Layout, ctx: &ExecContext, stream: &[RunEvent]) {
+    let Some(bindings) = &ctx.seal else {
+        return;
+    };
+
+    // Only the repository reviewers this seal covers are eligible: a
+    // user-level-only reviewer's verdict never gates anyone else's PR, so it
+    // cannot attest anything either (`docs/developer-guide/attestation.md`).
+    // Sorting by name makes the digest independent of completion order.
+    let mut sealed: Vec<(&str, &RunEvent)> = stream
+        .iter()
+        .filter_map(|event| match event {
+            RunEvent::ReviewerResolved { reviewer, .. }
+                if bindings.repo_reviewers.contains(reviewer.as_str()) =>
+            {
+                Some((reviewer.as_str(), event))
+            }
+            _ => None,
+        })
+        .collect();
+    sealed.sort_by_key(|(name, _)| *name);
+
+    if sealed.is_empty() {
+        return;
+    }
+
+    let reviewers: Vec<String> = sealed.iter().map(|(name, _)| (*name).to_string()).collect();
+    let events: Vec<serde_json::Value> = match sealed
+        .iter()
+        .map(|(_, event)| serde_json::to_value(event))
+        .collect::<std::result::Result<_, _>>()
+    {
+        Ok(values) => values,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to serialize resolved events for sealing; run will be unsealed");
+            return;
+        }
+    };
+
+    let seal = crate::seal::seal(
+        crate::seal::embedded_secret(),
+        crate::version::VERSION,
+        bindings,
+        crate::seal::seams_active(),
+        reviewers,
+        &events,
+    );
+
+    if let Err(err) = crate::store::write_seal(layout, &ctx.run, &seal) {
+        tracing::warn!(error = %err, "failed to persist run seal; run will be unsealed");
+    }
 }
 
 /// The raw result of one reviewer task before fail-closed/open policy is applied.
@@ -328,6 +533,7 @@ fn resolve(reviewer: &Reviewer, result: Option<ReviewTaskResult>) -> Resolved {
                 transcript: outcome.transcript,
                 duration,
                 counts_as_gate: is_gate,
+                replayed: false,
             }
         }
         Some(ReviewTaskResult {
@@ -374,6 +580,7 @@ fn fail(reviewer: &Reviewer, is_gate: bool, reason: &str, duration: Duration) ->
             transcript: None,
             duration,
             counts_as_gate: true,
+            replayed: false,
         }
     } else {
         Resolved {
@@ -385,6 +592,7 @@ fn fail(reviewer: &Reviewer, is_gate: bool, reason: &str, duration: Duration) ->
             transcript: None,
             duration,
             counts_as_gate: false,
+            replayed: false,
         }
     }
 }
@@ -509,6 +717,18 @@ mod tests {
     use crate::reviewer::{self as rev, Capabilities};
     use crate::verdict::{Finding, FindingKind};
 
+    /// Serializes every test that touches the real seam environment (directly,
+    /// by mutating `BASTION_CLAUDE_BIN`, or indirectly, by sealing a run and so
+    /// reading it) against every other such test. `seams_active()` reads the
+    /// real process environment, which is global to the test binary, so two
+    /// scenarios racing here would otherwise leak one test's env var into
+    /// another's sealed `seams` flag. Every test that seals a run
+    /// (`ctx.seal = Some(...)`) acquires this at its own top, held for its
+    /// whole body. A `tokio::sync::Mutex` rather than `std::sync::Mutex`: each
+    /// guard is held across an `.await`, which clippy's `await_holding_lock`
+    /// correctly refuses for a blocking mutex.
+    static SEAM_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     fn reviewer(name: &str, mode: Mode) -> Reviewer {
         Reviewer {
             name: name.into(),
@@ -522,6 +742,7 @@ mod tests {
             env: Default::default(),
             capabilities: Capabilities::default(),
             inputs: Default::default(),
+            attestation: None,
             prompt: "p".into(),
         }
     }
@@ -541,6 +762,10 @@ mod tests {
                 })
                 .collect(),
             context: ReviewContext::default(),
+            seal: None,
+            replayed: Default::default(),
+            attestation: None,
+            attestation_fallback: None,
         }
     }
 
@@ -584,13 +809,23 @@ mod tests {
         reviewers: &[&Reviewer],
         responses: std::collections::HashMap<String, Response>,
     ) -> (Decision, Vec<RunEvent>, Layout) {
+        run_scenario_with_ctx(reviewers, ctx(reviewers), responses).await
+    }
+
+    /// Like [`run_scenario`], but with a caller-supplied [`ExecContext`], so a
+    /// test can set `seal` (or anything else `ctx` defaults) without threading a
+    /// new parameter through every existing scenario call.
+    async fn run_scenario_with_ctx(
+        reviewers: &[&Reviewer],
+        ctx: ExecContext,
+        responses: std::collections::HashMap<String, Response>,
+    ) -> (Decision, Vec<RunEvent>, Layout) {
         let tmp = tempfile::tempdir().unwrap();
         let layout = Layout::with_root(tmp.path().to_path_buf());
         // Keep the tempdir alive for the duration by leaking it into the layout's
         // lifetime via a Box; tests read the layout immediately after.
         std::mem::forget(tmp);
 
-        let ctx = ctx(reviewers);
         let responses = std::sync::Arc::new(responses);
         let exec = move |req: OwnedRequest| -> ReviewFuture {
             let responses = responses.clone();
@@ -883,5 +1118,394 @@ mod tests {
         assert_eq!(tokens_out, 10);
         assert_eq!(cache_read, 40);
         assert_eq!(cost, Money::from_cents(5));
+    }
+
+    fn seal_bindings(repo_reviewers: &[&str]) -> SealBindings {
+        SealBindings {
+            head_tree: "head-tree".into(),
+            base_tree: "base-tree".into(),
+            patch_id: "patch-id".into(),
+            config_hash: "config-hash".into(),
+            repo_reviewers: repo_reviewers.iter().map(|s| (*s).to_string()).collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_run_with_seal_bindings_produces_a_verifiable_seal_on_disk() {
+        // Sealing reads the real process environment (`seams_active()`); hold
+        // the lock so this scenario cannot interleave with the test that
+        // mutates a seam env var (see `SEAM_ENV_LOCK`'s doc comment).
+        let _seam_guard = SEAM_ENV_LOCK.lock().await;
+        let g1 = reviewer("g1", Mode::Gate);
+        let reviewers = [&g1];
+        let mut ctx = ctx(&reviewers);
+        ctx.seal = Some(seal_bindings(&["g1"]));
+
+        let (_decision, _events, layout) = run_scenario_with_ctx(
+            &reviewers,
+            ctx,
+            responses(vec![("g1", Response::Outcome(pass("ok")))]),
+        )
+        .await;
+
+        let run = RunId("r-exec".into());
+        let seal = crate::store::read_seal(&layout, &run)
+            .unwrap()
+            .expect("a sealed run persists a seal.json");
+        assert_eq!(seal.reviewers, vec!["g1".to_string()]);
+        assert_eq!(seal.head_tree, "head-tree");
+        assert!(!seal.seams, "no seam env var was set for this test");
+
+        // The seal must verify against the run's own persisted resolved events,
+        // using the same embedded secret the runner sealed with (sealer and
+        // verifier are the same test binary).
+        let events = crate::store::read_run(&layout, &run).unwrap();
+        let resolved: Vec<serde_json::Value> = events
+            .iter()
+            .filter(
+                |e| matches!(e, RunEvent::ReviewerResolved { reviewer, .. } if reviewer == "g1"),
+            )
+            .map(|e| serde_json::to_value(e).unwrap())
+            .collect();
+        assert!(crate::seal::verify(
+            crate::seal::embedded_secret(),
+            &seal,
+            &resolved
+        ));
+    }
+
+    #[tokio::test]
+    async fn perturbing_a_persisted_resolved_event_breaks_seal_verification() {
+        let _seam_guard = SEAM_ENV_LOCK.lock().await;
+        let g1 = reviewer("g1", Mode::Gate);
+        let reviewers = [&g1];
+        let mut ctx = ctx(&reviewers);
+        ctx.seal = Some(seal_bindings(&["g1"]));
+
+        let (_decision, _events, layout) = run_scenario_with_ctx(
+            &reviewers,
+            ctx,
+            responses(vec![("g1", Response::Outcome(pass("ok")))]),
+        )
+        .await;
+
+        let run = RunId("r-exec".into());
+        let seal = crate::store::read_seal(&layout, &run).unwrap().unwrap();
+        let events = crate::store::read_run(&layout, &run).unwrap();
+        let mut resolved: Vec<serde_json::Value> = events
+            .iter()
+            .filter(
+                |e| matches!(e, RunEvent::ReviewerResolved { reviewer, .. } if reviewer == "g1"),
+            )
+            .map(|e| serde_json::to_value(e).unwrap())
+            .collect();
+
+        // Tamper with the persisted event's summary before re-verifying.
+        resolved[0]["summary"] = serde_json::Value::String("a different summary".into());
+        assert!(!crate::seal::verify(
+            crate::seal::embedded_secret(),
+            &seal,
+            &resolved
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_reviewer_outside_the_repo_set_is_excluded_from_the_seal() {
+        // A user-level-only reviewer (not in `repo_reviewers`) must not be sealed:
+        // its events are excluded, and if it is the only reviewer that ran, no
+        // seal is written at all.
+        let _seam_guard = SEAM_ENV_LOCK.lock().await;
+        let a1 = reviewer("a1", Mode::Gate);
+        let reviewers = [&a1];
+        let mut ctx = ctx(&reviewers);
+        ctx.seal = Some(seal_bindings(&["some-other-repo-reviewer"]));
+
+        let (_decision, _events, layout) = run_scenario_with_ctx(
+            &reviewers,
+            ctx,
+            responses(vec![("a1", Response::Outcome(pass("ok")))]),
+        )
+        .await;
+
+        let run = RunId("r-exec".into());
+        assert_eq!(crate::store::read_seal(&layout, &run).unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn no_seal_bindings_leaves_the_run_unsealed() {
+        let g1 = reviewer("g1", Mode::Gate);
+        let reviewers = [&g1];
+        let (_decision, _events, layout) = run_scenario(
+            &reviewers,
+            responses(vec![("g1", Response::Outcome(pass("ok")))]),
+        )
+        .await;
+        let run = RunId("r-exec".into());
+        assert_eq!(crate::store::read_seal(&layout, &run).unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn seams_active_is_recorded_on_the_seal_when_a_backend_seam_env_is_set() {
+        // `seams_active()` reads real process env vars, which are process-global
+        // and unsafe to mutate from parallel tests; this test is the one place in
+        // the suite allowed to touch `BASTION_CLAUDE_BIN` for that reason. It holds
+        // `SEAM_ENV_LOCK` for the whole window (the env var is set before, and
+        // cleared after, `run_scenario_with_ctx`'s own internal acquisition), so no
+        // other seal-touching scenario can observe this env var.
+        let _seam_guard = SEAM_ENV_LOCK.lock().await;
+
+        let g1 = reviewer("g1", Mode::Gate);
+        let reviewers = [&g1];
+        let mut ctx = ctx(&reviewers);
+        ctx.seal = Some(seal_bindings(&["g1"]));
+
+        // Safety: this test owns the env var for its duration (under the lock
+        // above) and clears it immediately after driving the scenario, before
+        // any assertion that could panic and skip the cleanup.
+        unsafe {
+            std::env::set_var(crate::backend::claude_code::PROGRAM_ENV, "/bin/true");
+        }
+        let result = run_scenario_with_ctx(
+            &reviewers,
+            ctx,
+            responses(vec![("g1", Response::Outcome(pass("ok")))]),
+        )
+        .await;
+        unsafe {
+            std::env::remove_var(crate::backend::claude_code::PROGRAM_ENV);
+        }
+
+        let (_decision, _events, layout) = result;
+        let run = RunId("r-exec".into());
+        let seal = crate::store::read_seal(&layout, &run).unwrap().unwrap();
+        assert!(
+            seal.seams,
+            "the active backend seam must be recorded on the seal"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Attestation replay
+    // -----------------------------------------------------------------------
+
+    /// A `reviewer.resolved` event JSON value, as a bundle would carry it, for a
+    /// replay test.
+    fn attested_event(name: &str, verdict: Decision, summary: &str) -> serde_json::Value {
+        let event = RunEvent::ReviewerResolved {
+            run: RunId("r-attested-elsewhere".into()),
+            reviewer: name.into(),
+            verdict,
+            summary: summary.into(),
+            findings: if verdict == Decision::Block {
+                vec![Finding {
+                    kind: FindingKind::Blocking,
+                    path: "a.rs".into(),
+                    line_start: 1,
+                    line_end: 1,
+                    detail: "fix".into(),
+                }]
+            } else {
+                vec![]
+            },
+            usage: Some(Usage {
+                tokens_in: 50,
+                tokens_out: 5,
+                cache_read: 0,
+                cost_usd: Money::from_cents(2),
+            }),
+            duration_ms: 12_345,
+            has_transcript: true,
+            replayed: false,
+        };
+        serde_json::to_value(&event).unwrap()
+    }
+
+    #[tokio::test]
+    async fn zero_fresh_reviewers_with_a_full_replay_produces_a_complete_persisted_run() {
+        let g1 = reviewer("g1", Mode::Gate);
+        let mut ctx = ctx(&[&g1]);
+        ctx.replayed.insert(
+            "g1".to_string(),
+            ReplayedReviewer {
+                reviewer: g1.clone(),
+                event: attested_event("g1", Decision::Pass, "replayed pass"),
+            },
+        );
+        ctx.attestation = Some(AttestationAudit {
+            public_key: "ssh-ed25519 AAAA test@bastion.dev".into(),
+            attested_at: "2026-07-01T00:00:00Z".into(),
+        });
+
+        // No reviewers handed to the JoinSet at all: `matched` is empty.
+        let (decision, events, layout) = run_scenario_with_ctx(&[], ctx, responses(vec![])).await;
+
+        assert_eq!(decision, Decision::Pass);
+
+        let resolved = events
+            .iter()
+            .find(|e| matches!(e, RunEvent::ReviewerResolved { .. }))
+            .expect("a resolved event exists even with zero fresh reviewers");
+        match resolved {
+            RunEvent::ReviewerResolved {
+                replayed, verdict, ..
+            } => {
+                assert!(replayed, "the replayed row must carry replayed: true");
+                assert_eq!(*verdict, Decision::Pass);
+            }
+            other => panic!("expected reviewer.resolved, got {other:?}"),
+        }
+
+        let attested = events
+            .iter()
+            .find(|e| matches!(e, RunEvent::AttestationReplayed { .. }))
+            .expect("a run.attested event is emitted");
+        match attested {
+            RunEvent::AttestationReplayed {
+                reviewers,
+                public_key,
+                ..
+            } => {
+                assert_eq!(reviewers, &["g1".to_string()]);
+                assert_eq!(public_key, "ssh-ed25519 AAAA test@bastion.dev");
+            }
+            other => panic!("expected run.attested, got {other:?}"),
+        }
+
+        // The attested event must appear before run.completed.
+        let attested_pos = events
+            .iter()
+            .position(|e| matches!(e, RunEvent::AttestationReplayed { .. }))
+            .unwrap();
+        let completed_pos = events
+            .iter()
+            .position(|e| matches!(e, RunEvent::RunCompleted { .. }))
+            .unwrap();
+        assert!(attested_pos < completed_pos);
+
+        // The run is fully persisted, readable back exactly like a fresh run.
+        let persisted = crate::store::read_run(&layout, &RunId("r-exec".into())).unwrap();
+        assert!(
+            persisted
+                .iter()
+                .any(|e| matches!(e, RunEvent::ReviewerResolved { replayed: true, .. }))
+        );
+        assert!(
+            persisted
+                .iter()
+                .any(|e| matches!(e, RunEvent::AttestationReplayed { .. }))
+        );
+
+        // Persisted per-reviewer artifacts exist (verdict + meta), but no
+        // transcript: there is no local transcript for a replayed reviewer.
+        let run = RunId("r-exec".into());
+        assert!(layout.verdict(&run, "g1").exists());
+        assert!(layout.meta(&run, "g1").exists());
+        assert!(!layout.transcript(&run, "g1").exists());
+    }
+
+    #[tokio::test]
+    async fn a_replayed_block_blocks_the_run() {
+        // Replay never changes an outcome: a block that was attested still blocks
+        // when replayed.
+        let g1 = reviewer("g1", Mode::Gate);
+        let mut ctx = ctx(&[&g1]);
+        ctx.replayed.insert(
+            "g1".to_string(),
+            ReplayedReviewer {
+                reviewer: g1.clone(),
+                event: attested_event("g1", Decision::Block, "replayed block"),
+            },
+        );
+        ctx.attestation = Some(AttestationAudit {
+            public_key: "ssh-ed25519 AAAA".into(),
+            attested_at: "2026-07-01T00:00:00Z".into(),
+        });
+
+        let (decision, events, _layout) = run_scenario_with_ctx(&[], ctx, responses(vec![])).await;
+        assert_eq!(decision, Decision::Block);
+
+        let gates = events
+            .iter()
+            .find_map(|e| match e {
+                RunEvent::RunCompleted { gates, .. } => Some(*gates),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(gates.total, 1);
+        assert_eq!(gates.blocked, 1);
+    }
+
+    #[tokio::test]
+    async fn mixed_replay_and_fresh_reviewers_both_resolve() {
+        let g1 = reviewer("g1", Mode::Gate); // replayed
+        let g2 = reviewer("g2", Mode::Gate); // fresh
+        let mut ctx = ctx(&[&g1, &g2]);
+        ctx.replayed.insert(
+            "g1".to_string(),
+            ReplayedReviewer {
+                reviewer: g1.clone(),
+                event: attested_event("g1", Decision::Pass, "replayed pass"),
+            },
+        );
+        ctx.attestation = Some(AttestationAudit {
+            public_key: "ssh-ed25519 AAAA".into(),
+            attested_at: "2026-07-01T00:00:00Z".into(),
+        });
+
+        // Only g2 is handed to the JoinSet; g1 is not in `matched`.
+        let (decision, events, _layout) = run_scenario_with_ctx(
+            &[&g2],
+            ctx,
+            responses(vec![("g2", Response::Outcome(pass("fresh pass")))]),
+        )
+        .await;
+        assert_eq!(decision, Decision::Pass);
+
+        let resolved: Vec<(&str, bool)> = events
+            .iter()
+            .filter_map(|e| match e {
+                RunEvent::ReviewerResolved {
+                    reviewer, replayed, ..
+                } => Some((reviewer.as_str(), *replayed)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(resolved.len(), 2);
+        assert!(resolved.contains(&("g1", true)));
+        assert!(resolved.contains(&("g2", false)));
+
+        let gates = events
+            .iter()
+            .find_map(|e| match e {
+                RunEvent::RunCompleted { gates, .. } => Some(*gates),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(gates.total, 2);
+        assert_eq!(gates.passed, 2);
+    }
+
+    #[tokio::test]
+    async fn no_run_attested_event_when_nothing_replayed() {
+        // `attestation` set but `replayed` empty (should not happen in practice,
+        // but the runner must not emit a vacuous run.attested event).
+        let g1 = reviewer("g1", Mode::Gate);
+        let mut ctx = ctx(&[&g1]);
+        ctx.attestation = Some(AttestationAudit {
+            public_key: "k".into(),
+            attested_at: "t".into(),
+        });
+
+        let (_decision, events, _layout) = run_scenario_with_ctx(
+            &[&g1],
+            ctx,
+            responses(vec![("g1", Response::Outcome(pass("ok")))]),
+        )
+        .await;
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, RunEvent::AttestationReplayed { .. }))
+        );
     }
 }
