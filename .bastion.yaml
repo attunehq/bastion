@@ -14,7 +14,7 @@
 # subscription; see the authentication notes in
 # docs/developer-guide/github-adapter.md. Adapt it to your repository.
 
-# attestations: true   # let CI replay a signed `bastion attest` run instead of re-executing reviewers; see docs/developer-guide/attestation.md
+attestations: true   # CI replays a signed `bastion attest` run instead of re-executing reviewers; see docs/developer-guide/attestation.md
 
 # Registry-wide defaults, inherited by every reviewer that does not set the field
 # itself (an explicit field on a reviewer wins). Every reviewer below pins
