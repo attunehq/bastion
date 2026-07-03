@@ -1957,7 +1957,9 @@ fn github_report_with_no_recorded_run_exits_zero_with_a_notice() {
 
 /// Every local `bastion review` seals its run: `seal.json` lands next to
 /// `run.jsonl`, parses, and (since the whole suite drives the fake-agent seams)
-/// always records `seams: true`.
+/// always records `seams: true`. `TestRepo` dirties the tree by design (an
+/// uncommitted edit plus an untracked file, so a reviewer always has files to
+/// route), so this run's seal also records `dirty: true`.
 #[test]
 fn review_seals_its_run() {
     let Some(fake) = tooling() else { return };
@@ -1987,6 +1989,11 @@ fn review_seals_its_run() {
         "the suite always runs under the fake-agent seams; seal: {seal_json}"
     );
     assert_eq!(
+        seal["dirty"],
+        serde_json::Value::Bool(true),
+        "TestRepo dirties the tree by design; seal: {seal_json}"
+    );
+    assert_eq!(
         seal["reviewers"],
         serde_json::json!(["sealed-gate"]),
         "seal: {seal_json}"
@@ -2007,6 +2014,40 @@ fn review_seals_its_run() {
             "seal.{field} was empty; seal: {seal_json}"
         );
     }
+}
+
+/// A review over a fully committed working tree (no uncommitted or untracked
+/// changes left dangling) seals `dirty: false`: the dirty flag reflects the
+/// actual state of the tree at review time, not a fixed default.
+#[test]
+fn review_over_a_clean_committed_tree_seals_dirty_false() {
+    let Some(fake) = tooling() else { return };
+
+    let repo = TestRepo::new(&registry(&[
+        Reviewer::new("sealed-gate", "codex", "gate").behavior("pass")
+    ]));
+    // Commit the dirtied files `TestRepo::new` left uncommitted, so the tree is
+    // clean when the review runs. `TestRepo` has only one branch (everything
+    // lands on `main` directly), so `--base main` would diff HEAD against
+    // itself once this commit lands; diff against the parent commit
+    // (`HEAD~1`, the fixture's own base commit) instead, so the changeset is
+    // still non-empty and the reviewer still routes.
+    repo.commit_all("commit the changeset");
+    let run = repo.review_base(fake, "HEAD~1", &[]);
+    assert!(run.exited_zero(), "stderr:\n{}", run.stderr);
+
+    let layout = repo.layout();
+    let run_id = &store::list_runs(&layout).unwrap()[0].run;
+    let seal_path = layout.seal(run_id);
+    let seal_json = std::fs::read_to_string(&seal_path).unwrap();
+    let seal: serde_json::Value = serde_json::from_str(&seal_json)
+        .unwrap_or_else(|e| panic!("seal.json did not parse: {e}\n{seal_json}"));
+
+    assert_eq!(
+        seal["dirty"],
+        serde_json::Value::Bool(false),
+        "a fully committed tree must seal dirty: false; seal: {seal_json}"
+    );
 }
 
 /// `bastion attest` refuses to sign a run that used a test-backend seam: exercising

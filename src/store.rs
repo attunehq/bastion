@@ -340,6 +340,7 @@ mod tests {
                 repo_reviewers: ["r1".to_string()].into_iter().collect(),
             },
             false,
+            false,
             vec!["r1".into()],
             &[],
         )

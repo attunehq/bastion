@@ -92,13 +92,20 @@ Each run gets a directory keyed by its run id, holding the full event stream and
     latest                       # a plain file holding the most recent run id
 ```
 
-The runner seals a run as it finishes persisting: a canonical digest of the
-reviewed trees, the diff, the effective config hash, whether a test seam was
-active, and the sorted `reviewer.resolved` events, MAC'd with a secret embedded
-in the binary at build time. `bastion attest` reads `seal.json` to build an
-attestation; a run with none (an older run, or one whose sealing failed, which
-is non-fatal and never fails the review) cannot be attested. See
-[Attestation](./attestation.md) for the full design.
+The runner seals an eligible run on a best-effort basis as it finishes
+persisting: a canonical digest of the committed HEAD tree, the merge-base
+tree, the `base..HEAD` patch-id, the effective config hash, whether a test
+seam was active, whether the working tree was dirty (uncommitted tracked
+changes or untracked files), and the sorted `reviewer.resolved` events, MAC'd
+with a secret embedded in the binary at build time. `bastion attest` reads
+`seal.json` to build an attestation. A run has no `seal.json`, and so cannot
+be attested, in a few cases: a zero-match run (persisted without going
+through the runner), a run whose bindings could not be derived, a run that
+resolved no repository-reviewer event, or an older run predating sealing.
+Sealing failure is non-fatal and never fails the review itself; a review over
+a dirty working tree still seals, but the seal records `dirty: true`, which
+`bastion attest` also refuses. See [Attestation](./attestation.md) for the
+full design.
 
 The run is always persisted as JSONL regardless of the `--format` used on screen, so `run.jsonl` holds the same events whether a human or an agent triggered it; a run can be replayed or inspected after the fact without re-running it, and the per-reviewer files hold what was deliberately kept off the stream. Runs accumulate; `bastion review` does not prune, so history grows until you run `bastion clean` (which keeps the most recent 20 when given no arguments).
 
@@ -119,8 +126,9 @@ Separate from these run-inspection commands, `bastion validate [FILE]` parses th
 
 `bastion attest [<run>] [--key <path>]` signs a sealed local run as an attestation note on HEAD, so CI can verify and replay it instead of re-executing the reviewers (see [Attestation](./attestation.md) for the full design). It defaults to the latest recorded run; `--key` picks the SSH signing key, falling back to `git config user.signingkey` when omitted. It refuses to sign when:
 
-- the run was never sealed (an older run, or one whose sealing failed);
+- the run was never sealed (a zero-match run, one whose bindings could not be derived, one with no repository-reviewer resolved events, or an older run predating sealing);
 - the seal recorded that a test seam (a `BASTION_*_BIN` backend override, or the container-engine override) was active, since a run against a stubbed reviewer is not a real review;
+- the seal recorded `dirty: true`, meaning the working tree carried uncommitted tracked changes or untracked files at review time: commit the final content, re-run the review, and attest that run instead;
 - the run store no longer matches its own seal, meaning it was edited after the run finished, or sealed by a different build of Bastion;
 - the repository has moved on since the run: HEAD's tree, the merge base's tree, the diff's patch-id, or the effective config hash no longer match what the seal recorded;
 - no signing key can be resolved (`--key` was not given and `git config user.signingkey` is unset).

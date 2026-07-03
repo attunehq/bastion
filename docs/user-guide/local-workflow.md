@@ -80,8 +80,8 @@ The event types:
 
 | Event | Meaning |
 | --- | --- |
-| `run.started` | The run began; lists the reviewers that matched and will run. |
-| `reviewer.started` | One reviewer was dispatched. |
+| `run.started` | The run began; lists the reviewers that matched. Each either executes or replays from a verified attestation. |
+| `reviewer.started` | One reviewer began: dispatched to its backend, or, for a reviewer covered by a verified attestation, reconstructed from the bundle with no backend dispatched. |
 | `reviewer.resolved` | One reviewer finished; carries its `verdict`, `summary`, `findings`, `usage`, and a `has_transcript` flag. Carries `replayed: true` when the verdict came from a verified attestation instead of a fresh execution. |
 | `run.completed` | The aggregate decision and the gate tally, plus the run's wall-clock `duration_ms` and the usage totals (`tokens_in`, `tokens_out`, `cache_read`, `cost_usd`) summed across reviewers. |
 | `run.attested` | A signed local run was replayed; carries the replayed `reviewers`, the attesting `public_key`, and `attested_at`. |
@@ -251,8 +251,9 @@ you can sign your last green local run so CI reuses it instead of re-running
 every reviewer:
 
 ```sh
-bastion review --base main   # ends green
-bastion attest                # signs the run that just finished
+git commit -am "final change"   # attest needs a review over committed content
+bastion review --base main      # ends green
+bastion attest                  # signs the run that just finished
 git push origin refs/notes/bastion
 ```
 
@@ -260,8 +261,14 @@ git push origin refs/notes/bastion
 the latest recorded run, which is what you want right after `bastion review`.
 Pass one explicitly (`bastion attest r-0f3a`) to attest an older run instead.
 
-`bastion attest` re-checks that your repository has not moved on since the
-review (the same tree, the same diff, the same effective reviewer config) and
+The review has to run over committed content for this to work: commit your
+final change, then run `bastion review`, then `bastion attest`. A review over
+a dirty working tree (uncommitted tracked changes or untracked files) still
+runs and seals, but the seal records that the tree was dirty, and `bastion
+attest` refuses that run outright, naming the reason: commit the final
+content, re-run the review, and attest that run instead. `bastion attest`
+also re-checks that your repository has not moved on since a clean review
+(the same tree, the same diff, the same effective reviewer config) and
 refuses to sign if it has, so the note can never claim the reviewers saw
 something they did not. It signs with your SSH key (`git config
 user.signingkey`, or `--key <path>` to name one explicitly), prompting for a

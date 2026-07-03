@@ -118,6 +118,22 @@ pub fn changed_files(cwd: &Path, base: &str) -> Result<Vec<String>> {
     Ok(files.into_iter().collect())
 }
 
+/// Whether `cwd`'s working tree carries uncommitted changes: a modified tracked
+/// file, a staged change, or an untracked, non-ignored file.
+///
+/// `git status --porcelain` prints one line per such change and nothing at all
+/// for a clean tree, so emptiness of its output is exactly the dirty/clean
+/// signal. The run seal uses this to record whether a review saw content HEAD's
+/// committed tree does not name (`docs/developer-guide/attestation.md`): a dirty
+/// run still seals, but `bastion attest` refuses to attest it.
+///
+/// # Errors
+///
+/// Returns an error if `git` fails.
+pub fn is_dirty(cwd: &Path) -> Result<bool> {
+    Ok(!run_git(cwd, &["status", "--porcelain"])?.is_empty())
+}
+
 /// The commit messages on `HEAD` since it diverged from `base`, oldest first, as the
 /// local stand-in for a pull request description.
 ///
@@ -520,6 +536,36 @@ mod tests {
 
         assert_ne!(id_1, id_2);
         assert_ne!(id_1, "none");
+    }
+
+    #[test]
+    fn is_dirty_is_false_on_a_clean_repo_and_true_after_a_tracked_edit_or_an_untracked_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        git(dir, &["init"]);
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        git(dir, &["add", "a.txt"]);
+        git(dir, &["commit", "-m", "base"]);
+
+        assert!(!is_dirty(dir).unwrap(), "a freshly committed repo is clean");
+
+        std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+        assert!(
+            is_dirty(dir).unwrap(),
+            "an edited tracked file makes the tree dirty"
+        );
+
+        git(dir, &["checkout", "--", "a.txt"]);
+        assert!(
+            !is_dirty(dir).unwrap(),
+            "reverting the edit cleans the tree again"
+        );
+
+        std::fs::write(dir.join("b.txt"), "new\n").unwrap();
+        assert!(
+            is_dirty(dir).unwrap(),
+            "an untracked file also makes the tree dirty"
+        );
     }
 
     #[test]

@@ -80,7 +80,9 @@ version:
 
 - `build.rs`: derives `BASTION_VERSION` from `git describe --always --tags
   --dirty=-dirty`, with a `BASTION_VERSION` env override and a `Cargo.toml`
-  fallback.
+  fallback; also resolves the run-seal secret (`BASTION_SEAL_SECRET` env
+  override, else a generated secret cached under `OUT_DIR`) that `src/seal.rs`
+  embeds at build time.
 - `src/main.rs`: thin binary entrypoint; wires the tokio runtime to
   `bastion::run`.
 - `src/lib.rs`: library root; installs `color_eyre` + `tracing` and dispatches.
@@ -116,16 +118,20 @@ version:
 - `src/render.rs`: human and JSONL output.
 - `src/runner.rs`: the parallel, timeout-bounded runner: fans matched reviewers
   out over a `JoinSet`, fails closed on error/timeout, streams run events, and
-  persists each run, sealing it at persist time.
+  persists each run, sealing an eligible run on a best-effort basis at persist
+  time.
 - `src/seal.rs` / `src/attest.rs`: signed local-run attestation
   (`docs/developer-guide/attestation.md`). `seal.rs` is the run seal: an
   HMAC-SHA256 keyed by a secret embedded in the binary at build time, over a
-  canonical digest of the reviewed trees, the diff, the effective config hash,
-  whether a test seam was active, and the sorted `reviewer.resolved` events;
-  the runner seals an eligible run on a best-effort basis and persists the
-  seal to `runs/<id>/seal.json` (the zero-match fast path persists without a
-  seal, and `seal_run` skips when the bindings it needs are absent or no repo
-  reviewer resolved).
+  canonical digest of the committed HEAD tree, the merge-base tree, the
+  `base..HEAD` patch-id, the effective config hash, whether a test seam was
+  active, whether the working tree was dirty (uncommitted tracked changes or
+  untracked files), and the sorted `reviewer.resolved` events; the runner
+  seals an eligible run on a best-effort basis and persists the seal to
+  `runs/<id>/seal.json` (the zero-match fast path persists without a seal, and
+  `seal_run` skips when the bindings it needs are absent or no repo reviewer
+  resolved). A dirty review still runs and still seals, but the seal records
+  `dirty: true`; `bastion attest` refuses to attest such a run.
   `attest.rs` is `bastion attest` (verifies the seal, re-derives the repository
   state, signs a bundle with the author's SSH key, writes it as a git note
   under `refs/notes/bastion`) and the CI-side verify-and-replay planner

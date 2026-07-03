@@ -77,11 +77,20 @@ jobs:
       - name: Fetch the attestation notes ref
         run: |
           set -euo pipefail
-          if git ls-remote --exit-code origin refs/notes/bastion >/dev/null; then
-            git fetch origin +refs/notes/bastion:refs/notes/bastion
-          else
-            echo "::notice::no refs/notes/bastion on origin yet; skipping attestation notes fetch"
-          fi
+          # `git ls-remote --exit-code` exits 2 for "no matching refs" but also
+          # exits nonzero for a genuine network or auth failure, so the status
+          # must be captured and inspected rather than used directly as an `if`
+          # condition: that would misreport every failure as an absent ref and
+          # silently skip the fetch instead of failing the step.
+          set +e
+          git ls-remote --exit-code origin refs/notes/bastion >/dev/null
+          status=$?
+          set -e
+          case "$status" in
+            0) git fetch origin +refs/notes/bastion:refs/notes/bastion ;;
+            2) echo "::notice::no refs/notes/bastion on origin yet; skipping attestation notes fetch" ;;
+            *) exit "$status" ;;
+          esac
 
       - name: Install the bastion release
         env:

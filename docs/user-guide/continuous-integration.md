@@ -285,15 +285,19 @@ reviewers:
   # ...
 ```
 
-With this set, an author who runs `bastion attest` after a green local review
-(see [The local workflow](./local-workflow.md#attesting-a-run-for-ci)) and pushes
-the resulting note can have CI replay the covered reviewers instead of
-re-running them. `bastion review` in CI verifies the note's signature against
-the PR author's GitHub-registered SSH signing keys, checks that the attested
-run reviewed the exact same content CI is looking at (the same trees, the same
-diff, the same effective reviewer config), and only then replays. A replayed
-block still blocks the merge, exactly as a fresh one would; attestation skips
-duplicate execution, not the gate.
+This works only for a review over committed content: commit the final change,
+run `bastion review`, then `bastion attest` (see [The local
+workflow](./local-workflow.md#attesting-a-run-for-ci)). A review over a dirty
+working tree still runs and still seals, but the seal records that the tree
+was dirty, and `bastion attest` refuses to sign it; attest the clean,
+committed run instead. Once an author pushes the resulting note, CI can replay
+the covered reviewers instead of re-running them. `bastion review` in CI
+verifies the note's signature against the PR author's GitHub-registered SSH
+signing keys, checks that the attested run reviewed the exact same content CI
+is looking at (the same trees, the same diff, the same effective reviewer
+config), and only then replays. A replayed block still blocks the merge,
+exactly as a fresh one would; attestation skips duplicate execution, not the
+gate.
 
 Two workflow additions are required for this to work, both already present in
 Bastion's own self-hosted example below: checking out the PR's head commit

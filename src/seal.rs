@@ -3,12 +3,15 @@
 //! A verdict is a judgment about a changeset under a policy, so a persisted run
 //! is trustworthy only if it demonstrably reviewed what it claims to. The seal is
 //! an HMAC-SHA256, keyed by a secret embedded in the binary at build time, over a
-//! canonical digest of everything a verdict depends on: the reviewed trees, the
-//! diff, the effective reviewer config, whether any test seam was active, and the
-//! resolved reviewer events themselves. See `docs/developer-guide/attestation.md`
-//! (the run seal) for the full design; this module implements the sealer and
-//! verifier phase 1 needs, with `bastion attest` and CI replay landing in later
-//! phases.
+//! canonical digest of the committed HEAD tree, the merge-base tree, the
+//! `base..HEAD` patch-id, the effective config hash, the seam and dirty flags, and
+//! the resolved reviewer events. See `docs/developer-guide/attestation.md` (the run
+//! seal) for the full design; this module implements the seal.
+//!
+//! A dirty run (uncommitted or untracked changes present when it ran) is sealed
+//! honestly, with `dirty: true`, but `src/attest.rs` refuses to attest it: a
+//! green review over content that never landed in a commit says nothing about the
+//! committed tree the seal otherwise binds.
 //!
 //! A keyed MAC rather than an asymmetric signature is deliberate: the sealer and
 //! the verifier are the same binary on both ends (the local `bastion` that sealed
@@ -24,8 +27,8 @@ use sha2::Sha256;
 type HmacSha256 = Hmac<Sha256>;
 
 /// The git- and config-derived values a run's seal binds, gathered by the caller
-/// (the local `bastion review` today; `bastion attest` and CI replay reuse the
-/// same shape in later phases) and threaded into [`crate::runner::ExecContext`].
+/// (`bastion review` locally; `bastion attest` and CI replay reuse the same shape)
+/// and threaded into [`crate::runner::ExecContext`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SealBindings {
     /// The git tree hash of HEAD.
@@ -56,6 +59,11 @@ struct SealInput<'a> {
     patch_id: &'a str,
     config_hash: &'a str,
     seams: bool,
+    /// Whether the working tree carried uncommitted or untracked changes when the
+    /// run reviewed it. Placed next to `seams`: both are process-state flags the
+    /// seal binds so a run that exercised the binary under non-ordinary
+    /// conditions is recorded honestly and later refused by `bastion attest`.
+    dirty: bool,
     /// The sealed `reviewer.resolved` events, sorted by reviewer name so the
     /// digest does not depend on completion order.
     events: &'a [serde_json::Value],
@@ -86,6 +94,14 @@ pub struct Seal {
     /// refuses to attest a sealed run with this set: a run against a stubbed
     /// reviewer exercised the binary, but not a real review.
     pub seams: bool,
+    /// Whether the working tree carried uncommitted or untracked changes at
+    /// review time. `bastion review` reviews the working tree, but the rest of
+    /// this seal binds only HEAD's *committed* tree and the `base..HEAD`
+    /// patch-id, so a dirty run's reviewers may have judged content those
+    /// bindings never name. `bastion attest` refuses to attest a sealed run with
+    /// this set, with a plain reason: commit the final content, re-run `bastion
+    /// review`, and attest that run instead.
+    pub dirty: bool,
     /// The sorted names of the repository reviewers this seal covers.
     pub reviewers: Vec<String>,
     /// The lowercase-hex HMAC-SHA256 over the `SealInput` this seal was built
@@ -158,6 +174,7 @@ fn seal_input<'a>(
     version: &'a str,
     bindings: &'a SealBindings,
     seams: bool,
+    dirty: bool,
     events: &'a [serde_json::Value],
 ) -> SealInput<'a> {
     SealInput {
@@ -167,6 +184,7 @@ fn seal_input<'a>(
         patch_id: &bindings.patch_id,
         config_hash: &bindings.config_hash,
         seams,
+        dirty,
         events,
     }
 }
@@ -189,10 +207,11 @@ pub fn seal(
     version: &str,
     bindings: &SealBindings,
     seams: bool,
+    dirty: bool,
     reviewers: Vec<String>,
     events: &[serde_json::Value],
 ) -> Seal {
-    let input = seal_input(version, bindings, seams, events);
+    let input = seal_input(version, bindings, seams, dirty, events);
     let mac = mac_hex(secret, &input);
     Seal {
         version: version.to_string(),
@@ -201,6 +220,7 @@ pub fn seal(
         patch_id: bindings.patch_id.clone(),
         config_hash: bindings.config_hash.clone(),
         seams,
+        dirty,
         reviewers,
         mac,
     }
@@ -223,7 +243,7 @@ pub fn verify(secret: &[u8], seal: &Seal, events: &[serde_json::Value]) -> bool 
         config_hash: seal.config_hash.clone(),
         repo_reviewers: seal.reviewers.iter().cloned().collect(),
     };
-    let input = seal_input(&seal.version, &bindings, seal.seams, events);
+    let input = seal_input(&seal.version, &bindings, seal.seams, seal.dirty, events);
     let Ok(bytes) = hex::decode(&seal.mac) else {
         return false;
     };
@@ -284,6 +304,7 @@ mod tests {
             "0.1.0",
             &bindings(),
             false,
+            false,
             vec!["r1".into()],
             &events(),
         );
@@ -297,6 +318,7 @@ mod tests {
             secret,
             "0.1.0",
             &bindings(),
+            false,
             false,
             vec!["r1".into()],
             &events(),
@@ -313,6 +335,7 @@ mod tests {
             "0.1.0",
             &bindings(),
             false,
+            false,
             vec!["r1".into()],
             &events(),
         );
@@ -327,6 +350,7 @@ mod tests {
             secret,
             "0.1.0",
             &bindings(),
+            false,
             false,
             vec!["r1".into()],
             &events(),
@@ -343,6 +367,7 @@ mod tests {
             "0.1.0",
             &bindings(),
             false,
+            false,
             vec!["r1".into()],
             &events(),
         );
@@ -358,6 +383,7 @@ mod tests {
             "0.1.0",
             &bindings(),
             true,
+            false,
             vec!["r1".into()],
             &events(),
         );
@@ -368,6 +394,7 @@ mod tests {
             "0.1.0",
             &bindings(),
             false,
+            false,
             vec!["r1".into()],
             &events(),
         );
@@ -377,12 +404,39 @@ mod tests {
     }
 
     #[test]
+    fn perturbing_dirty_flag_fails_verification() {
+        // A run sealed as dirty must not verify against a seal claiming a clean
+        // tree: attestation's dirty refusal (`src/attest.rs`) depends on `dirty`
+        // being load-bearing in the digest, not decorative metadata a verifier
+        // could silently drop.
+        let secret = b"test-secret";
+        let s = seal(
+            secret,
+            "0.1.0",
+            &bindings(),
+            false,
+            true,
+            vec!["r1".into()],
+            &events(),
+        );
+        assert!(verify(secret, &s, &events()));
+
+        let mut tampered = s.clone();
+        tampered.dirty = false;
+        assert!(
+            !verify(secret, &tampered, &events()),
+            "flipping dirty after sealing must fail verification"
+        );
+    }
+
+    #[test]
     fn perturbing_an_events_summary_fails_verification() {
         let secret = b"test-secret";
         let s = seal(
             secret,
             "0.1.0",
             &bindings(),
+            false,
             false,
             vec!["r1".into()],
             &events(),
@@ -399,6 +453,7 @@ mod tests {
             "0.1.0",
             &bindings(),
             false,
+            false,
             vec!["r1".into()],
             &events(),
         );
@@ -413,6 +468,7 @@ mod tests {
             "0.1.0",
             &bindings(),
             false,
+            false,
             vec!["r1".into()],
             &events(),
         );
@@ -423,6 +479,7 @@ mod tests {
             secret,
             "0.1.0",
             &bindings(),
+            false,
             false,
             vec!["r1".into()],
             &events(),
@@ -454,6 +511,7 @@ mod tests {
             secret,
             "0.1.0",
             &bindings(),
+            false,
             false,
             vec!["r1".into()],
             &events(),

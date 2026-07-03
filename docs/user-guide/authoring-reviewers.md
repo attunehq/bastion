@@ -18,9 +18,16 @@ fields you will reach for only occasionally.
 The repository's reviewers live in one file at its root: `.bastion.yaml` (the
 `.bastion.yml` spelling is also honored). Bastion finds it by walking up from the
 current directory, so the command works anywhere inside the repo. The file is a
-single `reviewers:` list:
+top-level mapping with a `reviewers:` list plus two optional keys, `defaults:`
+and `attestations:`:
 
 ```yaml
+attestations: true   # optional, default off; see below
+
+defaults:             # optional; see "Registry-wide defaults"
+  model: gpt-5
+  effort: high
+
 reviewers:
   - name: single-responsibility
     trigger: [src/**/*.rs]
@@ -34,10 +41,9 @@ reviewers:
       ...
 ```
 
-An optional top-level `attestations: true` (default off) opts the repository
-into letting CI verify and replay a signed local run instead of re-executing
-every reviewer; see [Attesting a run so CI can
-replay it](./continuous-integration.md#attesting-a-run-so-ci-can-replay-it).
+`attestations: true` opts the repository into letting CI verify and replay a
+signed local run instead of re-executing every reviewer; see [Attesting a run
+so CI can replay it](./continuous-integration.md#attesting-a-run-so-ci-can-replay-it).
 
 Reviewer **names must be unique** within the file; a duplicate name is a load
 error. A name also has to work as a directory name in the run store, so a name that

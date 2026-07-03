@@ -108,6 +108,12 @@ pub struct ExecContext {
     /// zero-match fast path, or a caller that failed to derive the bindings and
     /// chose to proceed unsealed rather than fail the review over it).
     pub seal: Option<SealBindings>,
+    /// Whether the working tree carried uncommitted or untracked changes when
+    /// this review ran ([`crate::git::is_dirty`]), computed once by the caller at
+    /// review time. Recorded on the seal so `bastion attest` can refuse a run
+    /// that reviewed content HEAD's committed tree does not name. Meaningless
+    /// when `seal` is `None`.
+    pub dirty: bool,
     /// Reviewers replaying from a verified attestation instead of executing,
     /// keyed by name (`docs/developer-guide/attestation.md`, "Verification and
     /// replay in CI"). Empty for every run before this phase and for any local
@@ -137,11 +143,14 @@ pub struct ReplayedReviewer {
     /// fidelity a freshly-executed reviewer's row does.
     pub reviewer: Reviewer,
     /// The bundle's `reviewer.resolved` event for this reviewer, exactly as
-    /// attested. The runner re-derives verdict, summary, findings, usage, and
-    /// duration from it; `has_transcript` is always overridden to `false` (see
-    /// [`ExecContext::replayed`]'s doc comment) since there is no local
-    /// transcript in the CI store.
-    pub event: serde_json::Value,
+    /// attested. Already parsed and checked by
+    /// [`crate::attest::replay::plan`] (a well-formed `reviewer.resolved`
+    /// event bound to its own reviewer name), so the runner re-derives
+    /// verdict, summary, findings, usage, and duration from it with no
+    /// further JSON parsing or boundary revalidation; `has_transcript` is
+    /// always overridden to `false` (see [`ExecContext::replayed`]'s doc
+    /// comment) since there is no local transcript in the CI store.
+    pub event: RunEvent,
 }
 
 /// Metadata about a run's attestation replay, for the `run.attested` audit-trail
@@ -390,14 +399,17 @@ pub async fn execute_with(
 /// Reconstruct a [`Resolved`] row for a replayed reviewer from its attested
 /// `reviewer.resolved` event.
 ///
-/// A malformed event (a bundle field this binary's [`RunEvent`] shape cannot
-/// parse) is a defect in the planner or the bundle, not something a reviewer's
-/// own gate/advisor policy should paper over: a gate replay that cannot be
-/// parsed fails closed exactly like a crashed fresh execution would, and an
-/// advisor replay fails open the same way, so a broken replay degrades no
-/// differently than a broken backend.
+/// `replay.event` arrives already parsed and boundary-checked:
+/// [`crate::attest::replay::plan`] is the sole producer of a [`ReplayedReviewer`]
+/// and only ever hands this function a [`RunEvent::ReviewerResolved`] whose
+/// `reviewer` field matches `replay.reviewer.name` (its own key-to-event binding
+/// check). There is nothing left here to parse or revalidate at that boundary; a
+/// non-`ReviewerResolved` variant reaching this function would be a defect in
+/// the planner, not attacker-shaped input, so the fallback arm exists only to
+/// keep this total rather than to police untrusted data a second time.
 ///
-/// The same rule applies to a *parseable but inconsistent* event: fresh
+/// What *does* stay reviewer-shaped input, and so is checked here rather than
+/// trusted: whether the claimed verdict is internally consistent. Fresh
 /// execution never reaches [`resolve`] with a `pass` that also carries a
 /// blocking finding, because [`backend::extract_verdict`] and the Claude Code
 /// backend's own extraction both reject that shape before it ever becomes a
@@ -407,17 +419,17 @@ pub async fn execute_with(
 /// require it to be consistent before trusting its decision.
 fn resolve_replayed(replay: &ReplayedReviewer) -> Resolved {
     let is_gate = replay.reviewer.mode == Mode::Gate;
-    match serde_json::from_value::<RunEvent>(replay.event.clone()) {
-        Ok(RunEvent::ReviewerResolved {
+    match &replay.event {
+        RunEvent::ReviewerResolved {
             verdict,
             summary,
             findings,
             usage,
             duration_ms,
             ..
-        }) => {
+        } => {
             let claimed = Verdict {
-                decision: verdict,
+                decision: *verdict,
                 summary: summary.clone(),
                 findings: findings.clone(),
             };
@@ -427,27 +439,28 @@ fn resolve_replayed(replay: &ReplayedReviewer) -> Resolved {
                     is_gate,
                     "the attested reviewer.resolved event was internally inconsistent \
                      (a pass carrying a blocking finding, or a block with none)",
-                    Duration::from_millis(duration_ms),
+                    Duration::from_millis(*duration_ms),
                 );
             }
             Resolved {
                 reviewer: replay.reviewer.clone(),
-                decision: verdict,
-                summary,
-                findings,
-                usage,
+                decision: *verdict,
+                summary: summary.clone(),
+                findings: findings.clone(),
+                usage: *usage,
                 // There is no local transcript in the CI store: the bundle carries
                 // only the resolved event, never the transcript file.
                 transcript: None,
-                duration: Duration::from_millis(duration_ms),
+                duration: Duration::from_millis(*duration_ms),
                 counts_as_gate: is_gate,
                 replayed: true,
             }
         }
-        Ok(_) | Err(_) => fail(
+        _ => fail(
             &replay.reviewer,
             is_gate,
-            "the attested reviewer.resolved event could not be parsed",
+            "the attested reviewer.resolved event was not a reviewer.resolved event \
+             (a defect in the attestation planner, not the bundle)",
             Duration::ZERO,
         ),
     }
@@ -504,6 +517,7 @@ fn seal_run(layout: &Layout, ctx: &ExecContext, stream: &[RunEvent]) {
         crate::version::VERSION,
         bindings,
         crate::seal::seams_active(),
+        ctx.dirty,
         reviewers,
         &events,
     );
@@ -861,6 +875,7 @@ mod tests {
                 .collect(),
             context: ReviewContext::default(),
             seal: None,
+            dirty: false,
             replayed: Default::default(),
             attestation: None,
             attestation_fallback: None,
@@ -1382,10 +1397,10 @@ mod tests {
     // Attestation replay
     // -----------------------------------------------------------------------
 
-    /// A `reviewer.resolved` event JSON value, as a bundle would carry it, for a
-    /// replay test.
-    fn attested_event(name: &str, verdict: Decision, summary: &str) -> serde_json::Value {
-        let event = RunEvent::ReviewerResolved {
+    /// A `reviewer.resolved` event, as [`crate::attest::replay::plan`] would
+    /// hand it to the runner after parsing and checking it, for a replay test.
+    fn attested_event(name: &str, verdict: Decision, summary: &str) -> RunEvent {
+        RunEvent::ReviewerResolved {
             run: RunId("r-attested-elsewhere".into()),
             reviewer: name.into(),
             verdict,
@@ -1410,8 +1425,7 @@ mod tests {
             duration_ms: 12_345,
             has_transcript: true,
             replayed: false,
-        };
-        serde_json::to_value(&event).unwrap()
+        }
     }
 
     #[tokio::test]
@@ -1607,8 +1621,8 @@ mod tests {
     /// verdict that nonetheless carries a blocking finding. Fresh execution can
     /// never produce this shape (the backends reject it before it becomes an
     /// outcome), so this simulates a malformed or tampered attestation bundle.
-    fn inconsistent_pass_event(name: &str) -> serde_json::Value {
-        let event = RunEvent::ReviewerResolved {
+    fn inconsistent_pass_event(name: &str) -> RunEvent {
+        RunEvent::ReviewerResolved {
             run: RunId("r-attested-elsewhere".into()),
             reviewer: name.into(),
             verdict: Decision::Pass,
@@ -1624,8 +1638,7 @@ mod tests {
             duration_ms: 1,
             has_transcript: true,
             replayed: false,
-        };
-        serde_json::to_value(&event).unwrap()
+        }
     }
 
     #[tokio::test]
