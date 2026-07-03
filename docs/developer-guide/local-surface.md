@@ -162,6 +162,8 @@ Push the note with: git push origin refs/notes/bastion
 
 The note itself does not push automatically; run the printed command (or fold it into your usual `git push`) to make the attestation visible to CI. `bastion attest` is local-only, with no GitHub mirror: it is the only command that writes the note, and `bastion review` in CI verifies and replays it.
 
+`bastion update` keeps the CLI current without re-running the install script. It resolves the latest published release (from the `releases/latest` redirect, so it is not subject to the unauthenticated `api.github.com` rate limit), downloads the `bastion-<target>.tar.gz` built for this binary's target triple, verifies it against the release `checksums.txt`, and swaps it over the running executable in place. It installs the same bits as `scripts/install.sh`, so a self-update and a fresh install converge on the same SHA-256. `bastion update --check` reports the status (`up to date`, an available version, or a development build) without installing; `--force` reinstalls the latest even when already current. This is also local-only, with no GitHub mirror: CI pins the release it runs, and a self-updating CI runner would defeat that. Separately, every command but `update` itself prints a short stderr notice when a release build detects a newer version (an availability line plus the `bastion update` command to run), gated to an interactive terminal and silenced by `BASTION_NO_UPDATE_CHECK`; the check runs off a day-TTL cache refreshed by a detached background process, so it never blocks or fails the command that ran.
+
 ---
 
 ## Parity with GitHub

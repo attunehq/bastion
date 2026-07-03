@@ -95,9 +95,11 @@ struct ReviewerRow {
     /// than executed fresh (`docs/developer-guide/attestation.md`).
     replayed: bool,
     /// Whether this verdict was carried forward from the branch's previous run
-    /// because its trigger-scoped diff was unchanged ([`crate::carry`]). CI
-    /// itself never carries, but the schema mirrors the local surface, so a
-    /// reported run that somehow contains one still reads honestly.
+    /// because its trigger-scoped diff was unchanged ([`crate::carry`]). Both
+    /// surfaces carry: locally from the branch's prior local run, and in CI from
+    /// its own prior CI run when the workflow persists and restores the run
+    /// store. The report flags a carried reviewer in its per-reviewer check-run
+    /// summary and, at comment level, in the [`carried_callout`].
     carried: bool,
 }
 
@@ -345,6 +347,21 @@ fn comment_body(
         out.push('\n');
     }
 
+    // A carried reviewer never dispatched a backend this run: its prior pass was
+    // reused because its trigger-scoped diff was unchanged. Flag it at comment
+    // level so the sticky comment matches the per-reviewer check runs and the
+    // local CLI, both of which already mark a carried reviewer.
+    let carried: Vec<&str> = digest
+        .rows
+        .iter()
+        .filter(|row| row.carried)
+        .map(|row| row.name.as_str())
+        .collect();
+    if !carried.is_empty() {
+        out.push_str(&carried_callout(&carried));
+        out.push('\n');
+    }
+
     if digest.rows.is_empty() {
         out.push_str("No reviewers were triggered by this change.\n");
         out.push_str(&footer(suggest_dedicated_app));
@@ -445,6 +462,31 @@ fn attestation_callout(attested: &AttestedSummary) -> String {
         },
         truncate_key(&attested.public_key),
         attested.attested_at,
+    )
+}
+
+/// A `[!NOTE]` callout naming the reviewers whose verdict was carried forward
+/// from the branch's previous run (trigger-scoped diff unchanged) rather than
+/// executed fresh this run ([`crate::carry`]). Mirrors [`attestation_callout`]
+/// so the sticky comment flags carry the way it flags an attestation replay,
+/// and stays consistent with the per-reviewer check-run line and the local
+/// CLI's `carried` marker. Carry is not attestation and carries no signature:
+/// the note states only that the verdict was reused, not that anyone signed it.
+fn carried_callout(reviewers: &[&str]) -> String {
+    let names = reviewers
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "> [!NOTE]\n\
+         > {} carried forward from the branch's previous run (trigger-scoped diff \
+         unchanged) rather than executed fresh: {names}.\n",
+        if reviewers.len() == 1 {
+            "1 reviewer was"
+        } else {
+            "reviewers were"
+        },
     )
 }
 
@@ -1487,6 +1529,50 @@ mod tests {
             .find(|c| c.name == "bastion / tenant-isolation")
             .unwrap();
         assert!(!fresh_check.summary.contains("Carried"));
+    }
+
+    /// Flip one reviewer to carried, the way a re-run with an unchanged
+    /// trigger-scoped diff records it.
+    fn sample_events_with_carry() -> Vec<RunEvent> {
+        let mut events = sample_events();
+        for event in &mut events {
+            if let RunEvent::ReviewerResolved {
+                reviewer, carried, ..
+            } = event
+                && reviewer == "file-responsibility"
+            {
+                *carried = true;
+            }
+        }
+        events
+    }
+
+    #[test]
+    fn comment_opens_with_a_carry_callout_naming_the_carried_reviewers() {
+        let body = comment_body(&digest(&sample_events_with_carry()), false, None);
+        assert!(body.contains("[!NOTE]"));
+        assert!(body.contains("carried forward from the branch's previous run"));
+        assert!(body.contains("`file-responsibility`"));
+        // A fresh reviewer is not named in the carry callout: the phrase and the
+        // fresh reviewer's name never share a line.
+        let callout_line = body
+            .lines()
+            .find(|line| line.contains("carried forward from the branch's previous run"))
+            .unwrap();
+        assert!(!callout_line.contains("`tenant-isolation`"));
+
+        // The callout sits after the headline, before the reviewer table, the
+        // same slot the replay callout uses.
+        let headline_at = body.find("reviewer(s) ran").unwrap();
+        let note_at = body.find("[!NOTE]").unwrap();
+        let table_at = body.find("| Reviewer |").unwrap();
+        assert!(headline_at < note_at && note_at < table_at);
+    }
+
+    #[test]
+    fn comment_has_no_carry_callout_when_nothing_carried() {
+        let body = comment_body(&digest(&sample_events()), false, None);
+        assert!(!body.contains("carried forward from the branch's previous run"));
     }
 
     #[test]

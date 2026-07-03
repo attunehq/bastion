@@ -28,6 +28,8 @@
 //!   bundle CI can verify and replay (`docs/developer-guide/attestation.md`).
 //! - [`skills`]: the agent skills bundled into the binary and installed into a
 //!   consuming repo so its agents learn how to use Bastion.
+//! - [`update`]: `bastion update`, the native self-updater that swaps the running
+//!   binary for the latest GitHub release, plus the passive out-of-date nag.
 //! - [`cli`] / [`commands`]: the argument surface and command handlers.
 
 #![warn(missing_docs)]
@@ -50,6 +52,7 @@ pub mod runner;
 pub mod seal;
 pub mod skills;
 pub mod store;
+pub mod update;
 pub mod verdict;
 pub mod version;
 
