@@ -326,8 +326,9 @@ reviewers:
   # the `skills` capability is provisioned, this reviewer can opt into `stop-slop`
   # to load that reference into the agent's context (see
   # docs/developer-guide/design.md). A gate: prose voice is a judgment call, but
-  # this project treats slop in user-facing prose as a merge blocker, biased toward
-  # catching it since a false block is cheap to override.
+  # this project treats slop in user-facing prose as a merge blocker. The prompt
+  # demands confidence before a flag: each false block costs the author a full
+  # review cycle, so borderline constructions pass.
   #
   # The trigger covers first-party authored markdown (the roots are enumerated
   # because trigger globs are OR-combined with no negation). For skills, only the
@@ -370,10 +371,12 @@ reviewers:
         remaining tell, so scan every changed prose file and report the complete
         set before you finish.
       - If the changed prose is clean, return verdict: pass.
-      - Bias toward catching slop. A missed tell is worse than a false block: a
-        false block is cheap to override, but slop that merges becomes the house
-        style. Still respect the discipline below so the gate stays signal, not
-        noise: flag slop, not every stylistic choice.
+      - Flag a construction only when you are confident it is a tell, not merely
+        when it resembles one. A false block costs the author a full review
+        cycle, so a sentence that could read either way passes. Slop worth
+        blocking is unambiguous: the sentence is doing rhetorical work and
+        carries no fact that would survive the rewrite. Flag slop, not every
+        stylistic choice.
 
       Flag these:
 
@@ -386,12 +389,21 @@ reviewers:
         "gates block, advisors comment" and "gates fail closed, advisors fail
         open" are real and must stay.
       - Aphorism openers or closers: a section that opens or closes on a tidy
-        maxim ("attention is scarce...", "the more you ask, the less it catches").
-        Cut the maxim; the surrounding fact already carries it.
+        general maxim ("attention is scarce...", "the more you ask, the less it
+        catches"). Cut the maxim; the surrounding fact already carries it. The
+        test for a maxim is generality: it would read equally true pasted into
+        another product's docs. A first sentence that states a rule specific to
+        this system ("An attestation is not a pass token") is a topic sentence,
+        not an aphorism; keep it.
       - Triadic parallelism and rule-of-three cadence used for rhythm rather than
         because there are exactly three real, distinct items.
-      - The dramatic colon: setup then payoff staged for suspense ("runs locally,
-        end to end: capture to definition").
+      - The dramatic colon: a setup-then-payoff staged for suspense in
+        marketing-register copy ("runs locally, end to end: capture to
+        definition"). Discriminate here: this project bans dashes, so a colon
+        is the standard recast for an expansion, a definition, a list, or a
+        mechanism, and a colon doing that plain work is not a tell. Flag a
+        colon only when the fragment after it is a punchline rather than
+        information a reader needs.
       - Uniform clipped-fragment headers (every header a short declarative with a
         terminal period). Suggest varying them; some can be plain noun phrases.
       - The meta-pattern: every sentence doing rhetorical work. Real copy is
@@ -409,6 +421,9 @@ reviewers:
         every stylistic choice.
       - Apply the test: if a fact survives the rewrite and the copy got shorter,
         the cut was slop. If a rewrite would drop information, do not suggest it.
+      - Respect your own prior findings. Prose that applies a rewrite this gate
+        suggested on an earlier run is presumptively clean; do not re-flag it
+        under a different tell unless the new reading is unambiguous slop.
       - If the `stop-slop` skill is available in your context, use it for the full
         reference and the before/after examples.
 
