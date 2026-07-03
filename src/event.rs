@@ -163,16 +163,20 @@ pub enum RunEvent {
         /// When the attestation was signed, as recorded in the bundle.
         attested_at: String,
     },
-    /// Emitted when attestations are enabled for a CI run but the attestation was
-    /// not honored: the reviewers executed fresh, and this records why, so the
-    /// report can tell the author rather than leaving them guessing
+    /// Emitted when attestations are enabled for a CI run and an attestation was
+    /// *offered but refused*: the reviewers executed fresh, and this records why,
+    /// so the report can tell the author rather than leaving them guessing
     /// (`docs/developer-guide/attestation.md`, "Verification and replay in CI").
+    /// A commit that simply carries no note is not a refusal and records no such
+    /// event (it resolves to `AttestationOutcome::NotAttested`); only a note that
+    /// failed a check reaches here, which is why the report surfaces it in a
+    /// `[!WARNING]` block.
     #[serde(rename = "run.attestation-fallback")]
     AttestationFallback {
         /// The run id.
         run: RunId,
-        /// A plain-English reason naming the cause (a missing note, an
-        /// unverifiable signature, a seal mismatch, a stale binding, and so on).
+        /// A plain-English reason naming the cause (an unverifiable signature, a
+        /// seal mismatch, a stale binding, and so on).
         reason: String,
     },
     /// The aggregate outcome: the local equivalent of the `bastion` check.
@@ -394,7 +398,7 @@ mod tests {
     fn attestation_fallback_round_trips() {
         let event = RunEvent::AttestationFallback {
             run: RunId("r-1".into()),
-            reason: "no attestation note found on HEAD".into(),
+            reason: "the attestation's seal does not verify".into(),
         };
         let line = serde_json::to_string(&event).unwrap();
         assert!(line.contains(r#""type":"run.attestation-fallback""#));

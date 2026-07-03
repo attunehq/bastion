@@ -55,13 +55,21 @@ pub enum AttestationOutcome {
     /// otherwise make every [`AttestationOutcome`] pay for the largest variant's
     /// size even on the common `Fallback` path.
     Replay(Box<ReplayPlan>),
-    /// The attestation was not honored; every routed reviewer executes fresh.
-    /// `reason` names exactly what failed, in plain English, so the report can
-    /// tell the author rather than leaving them guessing.
+    /// An attestation was present but not honored; every routed reviewer executes
+    /// fresh. `reason` names exactly what failed, in plain English, so the report
+    /// can tell the author rather than leaving them guessing. This is the surfaced
+    /// case: a note was offered and rejected, which the author should see.
     Fallback {
         /// Why the attestation was not honored.
         reason: String,
     },
+    /// No attestation was offered at all: HEAD carried no note. Every routed
+    /// reviewer executes fresh, exactly as when attestation is disabled. Distinct
+    /// from [`Fallback`](AttestationOutcome::Fallback) because there is nothing to
+    /// tell the author: a missing note is the ordinary case for most commits, not
+    /// a rejection, so no event is recorded and no report line is drawn. Only an
+    /// attestation that was *offered and refused* warrants surfacing.
+    NotAttested,
 }
 
 /// The re-derived repository state CI's own checkout produces, to compare
@@ -626,6 +634,7 @@ mod tests {
             AttestationOutcome::Fallback { reason } => {
                 panic!("expected a replay, got a fallback: {reason}")
             }
+            AttestationOutcome::NotAttested => panic!("expected a replay, got NotAttested"),
         };
         assert_eq!(plan.replay.len(), 2);
         assert!(plan.replay.contains_key("r1"));
@@ -665,6 +674,7 @@ mod tests {
             AttestationOutcome::Fallback { reason } => {
                 panic!("expected a replay, got a fallback: {reason}")
             }
+            AttestationOutcome::NotAttested => panic!("expected a replay, got NotAttested"),
         };
         assert_eq!(plan.replay.keys().collect::<Vec<_>>(), ["r1"]);
         assert_eq!(plan.executed_fresh, vec!["r2".to_string()]);
@@ -696,6 +706,7 @@ mod tests {
             AttestationOutcome::Fallback { reason } => {
                 panic!("expected a replay, got a fallback: {reason}")
             }
+            AttestationOutcome::NotAttested => panic!("expected a replay, got NotAttested"),
         };
         assert_eq!(plan.replay.keys().collect::<Vec<_>>(), ["r1"]);
         assert_eq!(plan.executed_fresh, vec!["r3".to_string()]);
@@ -782,7 +793,7 @@ mod tests {
                     "expected a reason naming the malformed bundle, got: {reason}"
                 );
             }
-            AttestationOutcome::Replay(_) => {
+            AttestationOutcome::Replay(_) | AttestationOutcome::NotAttested => {
                 panic!("a permuted-key bundle must fall back, not replay")
             }
         }
@@ -802,7 +813,9 @@ mod tests {
             AttestationOutcome::Fallback { reason } => {
                 assert!(reason.contains("unreadable"), "got: {reason}");
             }
-            AttestationOutcome::Replay(_) => panic!("expected a fallback"),
+            AttestationOutcome::Replay(_) | AttestationOutcome::NotAttested => {
+                panic!("expected a fallback")
+            }
         }
     }
 
@@ -827,7 +840,9 @@ mod tests {
             AttestationOutcome::Fallback { reason } => {
                 assert!(reason.contains("unreadable"), "got: {reason}");
             }
-            AttestationOutcome::Replay(_) => panic!("expected a fallback"),
+            AttestationOutcome::Replay(_) | AttestationOutcome::NotAttested => {
+                panic!("expected a fallback")
+            }
         }
     }
 
@@ -860,7 +875,9 @@ mod tests {
             AttestationOutcome::Fallback { reason } => {
                 assert!(reason.contains("does not verify"), "got: {reason}");
             }
-            AttestationOutcome::Replay(_) => panic!("expected a fallback"),
+            AttestationOutcome::Replay(_) | AttestationOutcome::NotAttested => {
+                panic!("expected a fallback")
+            }
         }
     }
 
@@ -893,7 +910,9 @@ mod tests {
             AttestationOutcome::Fallback { reason } => {
                 assert!(reason.contains("does not verify"), "got: {reason}");
             }
-            AttestationOutcome::Replay(_) => panic!("expected a fallback"),
+            AttestationOutcome::Replay(_) | AttestationOutcome::NotAttested => {
+                panic!("expected a fallback")
+            }
         }
     }
 
@@ -926,7 +945,9 @@ mod tests {
                     "expected a tampered-run wording (same version), got: {reason}"
                 );
             }
-            AttestationOutcome::Replay(_) => panic!("expected a fallback"),
+            AttestationOutcome::Replay(_) | AttestationOutcome::NotAttested => {
+                panic!("expected a fallback")
+            }
         }
     }
 
@@ -1002,7 +1023,9 @@ mod tests {
                     crate::version::VERSION.trim_start_matches('v')
                 )));
             }
-            AttestationOutcome::Replay(_) => panic!("expected a fallback"),
+            AttestationOutcome::Replay(_) | AttestationOutcome::NotAttested => {
+                panic!("expected a fallback")
+            }
         }
     }
 
@@ -1085,7 +1108,9 @@ mod tests {
             AttestationOutcome::Fallback { reason } => {
                 assert!(reason.contains("test seam"), "got: {reason}");
             }
-            AttestationOutcome::Replay(_) => panic!("expected a fallback"),
+            AttestationOutcome::Replay(_) | AttestationOutcome::NotAttested => {
+                panic!("expected a fallback")
+            }
         }
     }
 
@@ -1166,7 +1191,9 @@ mod tests {
             AttestationOutcome::Fallback { reason } => {
                 assert!(reason.contains("dirty"), "got: {reason}");
             }
-            AttestationOutcome::Replay(_) => panic!("expected a fallback"),
+            AttestationOutcome::Replay(_) | AttestationOutcome::NotAttested => {
+                panic!("expected a fallback")
+            }
         }
     }
 
@@ -1196,7 +1223,9 @@ mod tests {
             AttestationOutcome::Fallback { reason } => {
                 assert!(reason.contains("head tree"), "got: {reason}");
             }
-            AttestationOutcome::Replay(_) => panic!("expected a fallback"),
+            AttestationOutcome::Replay(_) | AttestationOutcome::NotAttested => {
+                panic!("expected a fallback")
+            }
         }
     }
 
@@ -1226,7 +1255,9 @@ mod tests {
             AttestationOutcome::Fallback { reason } => {
                 assert!(reason.contains("base"), "got: {reason}");
             }
-            AttestationOutcome::Replay(_) => panic!("expected a fallback"),
+            AttestationOutcome::Replay(_) | AttestationOutcome::NotAttested => {
+                panic!("expected a fallback")
+            }
         }
     }
 
@@ -1256,7 +1287,9 @@ mod tests {
             AttestationOutcome::Fallback { reason } => {
                 assert!(reason.contains("patch id"), "got: {reason}");
             }
-            AttestationOutcome::Replay(_) => panic!("expected a fallback"),
+            AttestationOutcome::Replay(_) | AttestationOutcome::NotAttested => {
+                panic!("expected a fallback")
+            }
         }
     }
 
@@ -1286,7 +1319,9 @@ mod tests {
             AttestationOutcome::Fallback { reason } => {
                 assert!(reason.contains("config"), "got: {reason}");
             }
-            AttestationOutcome::Replay(_) => panic!("expected a fallback"),
+            AttestationOutcome::Replay(_) | AttestationOutcome::NotAttested => {
+                panic!("expected a fallback")
+            }
         }
     }
 

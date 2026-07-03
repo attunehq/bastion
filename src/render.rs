@@ -417,13 +417,19 @@ mod tests {
 
     #[test]
     fn run_attestation_fallback_line_states_the_reason() {
+        // A fallback event is only recorded for a refused attestation (a missing
+        // note is silent), so the sample reason is a genuine rejection.
         let event = RunEvent::AttestationFallback {
             run: RunId("r-1".into()),
-            reason: "no attestation note found on HEAD".into(),
+            reason: "the attested patch id does not match CI's diff".into(),
         };
         let mut buf = Vec::new();
         write_event(&mut buf, Format::Human, &event).unwrap();
         let text = String::from_utf8(buf).unwrap();
-        assert!(text.contains("attestation not honored: no attestation note found on HEAD"));
+        assert!(
+            text.contains(
+                "attestation not honored: the attested patch id does not match CI's diff"
+            )
+        );
     }
 }

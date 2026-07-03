@@ -99,8 +99,11 @@ work around a refusal.
 Re-run `bastion review` and attest that fresh run instead.
 
 Attesting is optional even when the registry allows it. If you skip these two
-commands, CI runs every reviewer fresh and the PR report says why the
-attestation was not honored. See
+commands, CI resolves reviewers the ordinary way (an unchanged prior pass still
+carries, the rest execute) and says nothing about attestation: an un-attested PR
+is the ordinary case, not a problem to flag. The report warns only when an
+attestation was offered and refused, for example a note that no longer matches
+CI's checkout. See
 [Attesting a run for CI](https://github.com/jssblck/bastion/blob/main/docs/user-guide/local-workflow.md#attesting-a-run-for-ci)
 for the full mechanics and trust model.
 

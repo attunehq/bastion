@@ -271,12 +271,15 @@ version:
   present); a user-level-only local review stays silent (see the `src/skills.rs` entry).
   When one or more reviewers replayed from a verified attestation, `report.rs` adds a
   `[!NOTE]` callout naming them, the attesting key, and when it was signed, plus a line
-  on each replayed reviewer's own check-run summary; a fallback (attestation attempted
-  but not honored) surfaces as a line naming why. Carried reviewers (a prior pass reused
-  because the trigger-scoped diff was unchanged, on either surface) get the parallel
-  treatment: a `[!NOTE]` callout naming them plus a line on each carried reviewer's own
-  check-run summary, mirroring the local CLI's `carried` marker. See `src/seal.rs` /
-  `src/attest/` below and `docs/developer-guide/attestation.md`.
+  on each replayed reviewer's own check-run summary; an attestation that was *offered and
+  refused* (a `run.attestation-fallback` event) surfaces as a `[!WARNING]` block naming why.
+  A commit that offered no note is not a refusal: it resolves to
+  `AttestationOutcome::NotAttested`, records no event, and draws no block, so an un-attested
+  PR is never nagged. Carried reviewers (a prior pass reused because the trigger-scoped diff
+  was unchanged, on either surface) get the parallel treatment: a `[!NOTE]` callout naming
+  them plus a line on each carried reviewer's own check-run summary, mirroring the local
+  CLI's `carried` marker. See `src/seal.rs` / `src/attest/` below and
+  `docs/developer-guide/attestation.md`.
   Check runs need a GitHub App installation token, so this
   runs under one (the default Actions `GITHUB_TOKEN` qualifies; a classic PAT does
   not). API-created check runs carry no check-suite id, so under the shared
