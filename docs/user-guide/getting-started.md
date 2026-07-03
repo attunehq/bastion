@@ -85,9 +85,19 @@ release, downloads the archive built for your platform, verifies its SHA-256
 against the release checksums, and swaps it over the running binary, no shell or
 `curl` needed. It installs the same bits as the install scripts, so a self-update
 and a fresh install converge. `bastion update --check` reports whether a newer
-release exists without installing it. Bastion also prints a one-line nudge on
-stderr when a release build notices a newer version is available; set
-`BASTION_NO_UPDATE_CHECK=1` to silence it.
+release exists without installing it, and `bastion update --force` reinstalls the
+latest release even when the running version is already current.
+
+Bastion also prints a notice on stderr when a release build detects that a newer
+version is available: a line naming the available version, followed by the
+`bastion update` command to run. It shows only on an interactive terminal, never
+in CI or a pipe; set `BASTION_NO_UPDATE_CHECK=1` to silence it entirely.
+
+Two environment variables retarget where updates come from, for a fork or a
+private mirror of the releases: `BASTION_REPO` overrides the `owner/name`
+repository (default `jssblck/bastion`), and `BASTION_BASE_URL` overrides the base
+URL the release archive and `checksums.txt` are fetched from. Leave both unset for
+the normal case.
 
 ## 2. Make sure the backend is ready
 
