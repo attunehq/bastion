@@ -79,14 +79,19 @@ jobs:
       # One sealing secret per release, shared by the whole platform matrix below, so
       # every binary of this release verifies every other's run seals and a new
       # release invalidates old bundles automatically (see build.rs and
-      # docs/developer-guide/attestation.md, "The run seal"). Masking is best effort,
-      # not secrecy: the value ships embedded in the public binaries and exists for
-      # tamper evidence, not confidentiality; masking only keeps it out of this log.
+      # docs/developer-guide/attestation.md, "The run seal"). Deliberately not
+      # masked: the value ships embedded in every public release binary and exists
+      # for tamper evidence, not confidentiality, so there is nothing to protect by
+      # hiding it from this log. Masking it would actively break the release: GitHub
+      # Actions drops a masked value from job outputs, which would leave
+      # `needs.prepare.outputs.seal_secret` empty and silently fall each matrix
+      # build back to its own per-build secret, breaking cross-platform seal
+      # verification.
       - name: Generate the sealing secret
         id: seal
         run: |
+          set -euo pipefail
           secret="$(openssl rand -hex 32)"
-          echo "::add-mask::$secret"
           echo "secret=${secret}" >> "$GITHUB_OUTPUT"
 
   build:

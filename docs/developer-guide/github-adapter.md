@@ -75,7 +75,7 @@ Honoring an attestation needs two small additions to an ordinary `bastion` workf
 - **Check out the PR head, not the merge commit.** `actions/checkout`'s default `pull_request` behavior checks out a synthetic merge commit, whose tree never matches the head tree an author attested. Set `ref: ${{ github.event.pull_request.head.sha }}` so CI's HEAD is the commit the note is actually attached to.
 - **Fetch the notes ref.** `actions/checkout` does not fetch notes by default, so add `git fetch origin +refs/notes/bastion:refs/notes/bastion`, tolerant of the ref being absent (most PRs will not carry a note; that is the ordinary case, not an error).
 
-A repository that skips either step, or has not set `attestations: true`, simply never replays: every reviewer executes fresh, exactly as it did before this feature existed.
+A repository that skips either step, or has not set `attestations: true`, never replays: every reviewer executes fresh.
 
 ### The aggregate check
 

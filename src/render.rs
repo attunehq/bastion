@@ -277,4 +277,67 @@ mod tests {
         let parsed: RunEvent = serde_json::from_str(line.trim()).unwrap();
         assert_eq!(parsed, resolved());
     }
+
+    #[test]
+    fn a_replayed_resolved_event_carries_the_replayed_suffix() {
+        // A reviewer that replayed from a signed local attestation must say so
+        // inline, right next to the elapsed time, so a person watching the run
+        // can tell at a glance which verdicts were freshly computed.
+        let mut event = resolved();
+        let RunEvent::ReviewerResolved { replayed, .. } = &mut event else {
+            unreachable!()
+        };
+        *replayed = true;
+
+        let mut buf = Vec::new();
+        write_event(&mut buf, Format::Human, &event).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(
+            text.contains("(4s, replayed)"),
+            "expected the replayed suffix right after the elapsed time, got: {text}"
+        );
+    }
+
+    #[test]
+    fn a_fresh_resolved_event_carries_no_replayed_suffix() {
+        // The common case (`replayed: false`) must not print the suffix at all,
+        // not even an empty one.
+        let mut buf = Vec::new();
+        write_event(&mut buf, Format::Human, &resolved()).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(text.contains("(4s)"));
+        assert!(!text.contains("replayed"));
+    }
+
+    #[test]
+    fn run_attested_line_names_the_key_count_and_timestamp() {
+        let event = RunEvent::AttestationReplayed {
+            run: RunId("r-1".into()),
+            reviewers: vec!["r1".into(), "r2".into()],
+            public_key: "ssh-ed25519 AAAA grace@bastion.dev".into(),
+            attested_at: "2026-07-01T12:00:00Z".into(),
+        };
+        let mut buf = Vec::new();
+        write_event(&mut buf, Format::Human, &event).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(
+            text.contains(
+                "attested: 2 reviewer(s) replayed from a signed local run \
+                 (key ssh-ed25519 AAAA grace@bastion.dev, attested 2026-07-01T12:00:00Z)"
+            ),
+            "got: {text}"
+        );
+    }
+
+    #[test]
+    fn run_attestation_fallback_line_states_the_reason() {
+        let event = RunEvent::AttestationFallback {
+            run: RunId("r-1".into()),
+            reason: "no attestation note found on HEAD".into(),
+        };
+        let mut buf = Vec::new();
+        write_event(&mut buf, Format::Human, &event).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(text.contains("attestation not honored: no attestation note found on HEAD"));
+    }
 }

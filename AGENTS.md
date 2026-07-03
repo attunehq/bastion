@@ -122,7 +122,10 @@ version:
   HMAC-SHA256 keyed by a secret embedded in the binary at build time, over a
   canonical digest of the reviewed trees, the diff, the effective config hash,
   whether a test seam was active, and the sorted `reviewer.resolved` events;
-  the runner seals every run and persists the seal to `runs/<id>/seal.json`.
+  the runner seals an eligible run on a best-effort basis and persists the
+  seal to `runs/<id>/seal.json` (the zero-match fast path persists without a
+  seal, and `seal_run` skips when the bindings it needs are absent or no repo
+  reviewer resolved).
   `attest.rs` is `bastion attest` (verifies the seal, re-derives the repository
   state, signs a bundle with the author's SSH key, writes it as a git note
   under `refs/notes/bastion`) and the CI-side verify-and-replay planner

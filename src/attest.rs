@@ -48,10 +48,10 @@ pub const SIG_NAMESPACE: &str = "bastion";
 /// no separate canonicalization step to keep in sync.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Bundle {
-    /// Always [`KIND`]. Present so a note this module did not produce is
+    /// Always `KIND`. Present so a note this module did not produce is
     /// rejected by [`Bundle::from_json`] rather than partially parsed.
     pub kind: String,
-    /// Always [`SCHEMA`]. A future breaking change to this shape bumps the
+    /// Always `SCHEMA`. A future breaking change to this shape bumps the
     /// constant; an old binary then refuses a new bundle instead of
     /// misreading it.
     pub schema: u32,
@@ -137,7 +137,7 @@ pub fn envelope(bundle_json: &str, signature: &str) -> String {
 
 /// Split a note's text back into its bundle JSON and armored signature.
 ///
-/// Splits at [`SIG_BEGIN`] (the signature block's own opening line) rather than
+/// Splits at `SIG_BEGIN` (the signature block's own opening line) rather than
 /// at a fixed line count, since the bundle JSON is always a single line
 /// (compact `serde_json` output) but is not guaranteed to stay that way
 /// forever. The bundle half's trailing newline (the join character
@@ -290,6 +290,7 @@ fn run_ssh_keygen_with_stdin(args: &[&str], data: &[u8]) -> Result<String> {
 
 /// A resolved signing key: the file `ssh-keygen -Y sign` should be pointed at,
 /// and the public key line the bundle should record.
+#[derive(Debug)]
 struct SigningKey {
     /// The path `-f` is given. May be a private key file (the ordinary case)
     /// or a public key file backed by an agent (the `git config
@@ -778,6 +779,12 @@ pub fn plan(
     // A routed reviewer covered by the bundle and not opted out replays;
     // everything else (uncovered, or `attestation: never`) executes fresh.
     // Coverage mismatch degrades rather than invalidating the whole plan.
+    //
+    // The seal MAC covers `bundle.events`' *values* (sorted, see above) but never
+    // its map keys, so a signed-but-malformed bundle could file reviewer A's
+    // sealed event under reviewer B's key and so skip executing B entirely. Bind
+    // key to value here: require the event under `name` to actually be that
+    // reviewer's own `reviewer.resolved` event before trusting it to replay.
     let mut replay = BTreeMap::new();
     let mut executed_fresh = Vec::new();
     for (name, reviewer) in routed {
@@ -786,10 +793,22 @@ pub fn plan(
             Some(crate::reviewer::AttestationPolicy::Never)
         );
         match bundle.events.get(*name) {
-            Some(event) if !never_replay => {
-                replay.insert((*name).to_string(), event.clone());
-            }
-            _ => executed_fresh.push((*name).to_string()),
+            Some(_) if never_replay => executed_fresh.push((*name).to_string()),
+            Some(event) => match serde_json::from_value::<RunEvent>(event.clone()) {
+                Ok(RunEvent::ReviewerResolved {
+                    reviewer: bound, ..
+                }) if bound == *name => {
+                    replay.insert((*name).to_string(), event.clone());
+                }
+                _ => {
+                    return fallback(format!(
+                        "the attestation bundle carries a malformed or mismatched event under \
+                         reviewer '{name}' (its key does not match the event's own reviewer \
+                         field, or the event is not a reviewer.resolved event)"
+                    ));
+                }
+            },
+            None => executed_fresh.push((*name).to_string()),
         }
     }
 
@@ -923,6 +942,123 @@ mod tests {
         let pub_text =
             std::fs::read_to_string(key_path.with_extension("pub")).expect("public key written");
         (key_path, single_line(&pub_text))
+    }
+
+    /// Set `user.signingkey` in `dir`'s *local* git config.
+    ///
+    /// Deliberately local, never global or system: this test binary runs many
+    /// tests concurrently, `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` (or the
+    /// developer's real `~/.gitconfig`) are shared process- or host-wide
+    /// state, and a git subprocess whose config file disappears or changes
+    /// mid-read fails with a raw `fatal: unknown error occurred while reading
+    /// the configuration files`, exactly the flake this local-only scoping
+    /// avoids. Local config also always wins over global/system for the same
+    /// key, so this is sufficient to make `resolve_signing_key`'s "configured"
+    /// tests deterministic regardless of what the host's own global git
+    /// config carries.
+    fn set_signingkey(dir: &Path, value: &str) {
+        git(dir, &["config", "--local", "user.signingkey", value]);
+    }
+
+    /// Set `user.signingkey` to an empty value in `dir`'s *local* git config.
+    ///
+    /// `git config user.signingkey` returns this empty local value rather
+    /// than falling through to global/system config (git resolves a key from
+    /// the most specific scope that defines it at all, even if the value
+    /// found there is empty), and [`crate::git::run_git_config_signingkey`]
+    /// already filters an empty value to `None`. So this deterministically
+    /// simulates "no signing key configured" for [`resolve_signing_key`]
+    /// regardless of what the host's own global git config carries, with no
+    /// process- or host-wide state to isolate.
+    fn clear_signingkey(dir: &Path) {
+        git(dir, &["config", "--local", "user.signingkey", ""]);
+    }
+
+    #[test]
+    fn resolve_signing_key_follows_a_configured_key_file_path() {
+        // `git config user.signingkey` pointing at an ordinary private key file
+        // path (not a literal `ssh-...` public key) is used directly as `-f`,
+        // and its public key is read from the `.pub` sibling `generate_keypair`
+        // already wrote.
+        if !git_available() || !ssh_keygen_available() {
+            eprintln!("skipping: git or ssh-keygen not available");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init"]);
+
+        let keys_dir = tmp.path().join("keys");
+        std::fs::create_dir_all(&keys_dir).unwrap();
+        let (key_path, pubkey) = generate_keypair(&keys_dir);
+        set_signingkey(&repo, &key_path.to_string_lossy());
+
+        let temp_pubkey_file = tempfile::NamedTempFile::new().unwrap();
+        let resolved = resolve_signing_key(&repo, None, &temp_pubkey_file)
+            .expect("a configured key file path resolves");
+        assert_eq!(resolved.key_file, key_path);
+        assert_eq!(resolved.public_key, pubkey);
+    }
+
+    #[test]
+    fn resolve_signing_key_refuses_with_no_configured_key_and_no_explicit_key() {
+        // The absent-config case: `git config user.signingkey` was never set and
+        // no `--key` was passed. This must refuse with actionable guidance
+        // rather than trying to sign with nothing. The local config explicitly
+        // clears the key (see `clear_signingkey`'s doc comment) so the
+        // assertion holds regardless of what the developer's own global git
+        // config carries.
+        if !git_available() {
+            eprintln!("skipping: git not available");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init"]);
+        clear_signingkey(&repo);
+
+        let temp_pubkey_file = tempfile::NamedTempFile::new().unwrap();
+        let err = resolve_signing_key(&repo, None, &temp_pubkey_file).unwrap_err();
+        assert!(
+            err.to_string().contains("no signing key configured"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn resolve_signing_key_writes_a_literal_public_key_to_a_temp_file() {
+        // `git config user.signingkey` set to a literal `ssh-...` public key
+        // (git's convention for an agent-backed SSH signing identity, with no
+        // private key file on disk at all) is written verbatim to the caller's
+        // temp file and used as `-f`; `public_key_line` recognizes the temp
+        // file's content as already being a public key and returns it as-is,
+        // without ever trying to derive one from a private half that does not
+        // exist.
+        if !git_available() || !ssh_keygen_available() {
+            eprintln!("skipping: git or ssh-keygen not available");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init"]);
+
+        // Only the public half exists; the private key backing it is never
+        // written anywhere this test can see, simulating an agent-resolved
+        // identity where the private key lives outside the filesystem (a
+        // hardware key, or ssh-agent).
+        let keys_dir = tmp.path().join("keys");
+        std::fs::create_dir_all(&keys_dir).unwrap();
+        let (_key_path, pubkey) = generate_keypair(&keys_dir);
+        set_signingkey(&repo, &pubkey);
+
+        let temp_pubkey_file = tempfile::NamedTempFile::new().unwrap();
+        let resolved = resolve_signing_key(&repo, None, &temp_pubkey_file)
+            .expect("a literal public key resolves without needing the private half on disk");
+        assert_eq!(resolved.key_file, temp_pubkey_file.path());
+        assert_eq!(resolved.public_key, pubkey);
     }
 
     #[test]
@@ -1586,6 +1722,92 @@ mod tests {
         };
         assert_eq!(plan.replay.keys().collect::<Vec<_>>(), ["r1"]);
         assert_eq!(plan.executed_fresh, vec!["r3".to_string()]);
+    }
+
+    #[test]
+    fn plan_falls_back_on_a_bundle_with_a_permuted_event_key() {
+        // The seal MAC covers `bundle.events`' *values* (sorted by map key) but
+        // never checks that a value's own `reviewer` field matches the key it is
+        // filed under. Anyone holding the `bastion` binary can compute a valid
+        // seal (the embedded secret is tamper evidence, not a secret, per
+        // `docs/developer-guide/attestation.md`), so a signer who legitimately
+        // controls their own attestation could file reviewer r1's event under
+        // r2's key, sign the result with their own valid key, and still produce
+        // a seal that verifies against the (relabeled) event set. Without a
+        // key-to-event binding check, CI would then skip executing r2 and trust
+        // r1's verdict in its place. `plan` must reject this outright.
+        if !git_available() || !ssh_keygen_available() {
+            eprintln!("skipping: git or ssh-keygen not available");
+            return;
+        }
+        let att = build_attested_fixture();
+        let (bundle_json, _signature) = split_envelope(&att.note).expect("splits cleanly");
+        let mut bundle = Bundle::from_json(bundle_json).expect("bundle parses");
+
+        // Swap which key each event is filed under; each event's own embedded
+        // `reviewer` field still names its original reviewer.
+        let r1_event = bundle.events.remove("r1").expect("r1 was sealed");
+        let r2_event = bundle.events.remove("r2").expect("r2 was sealed");
+        bundle.events.insert("r1".to_string(), r2_event.clone());
+        bundle.events.insert("r2".to_string(), r1_event.clone());
+
+        // Recompute a valid seal over the permuted (but still sorted-by-key)
+        // event values: this is exactly what a legitimate signer's own
+        // `bastion` binary could do, since the sealing secret ships embedded in
+        // every binary.
+        let mut sorted: Vec<(&String, &serde_json::Value)> = bundle.events.iter().collect();
+        sorted.sort_by_key(|(name, _)| (*name).clone());
+        let event_values: Vec<serde_json::Value> =
+            sorted.into_iter().map(|(_, v)| v.clone()).collect();
+        bundle.seal = crate::seal::seal(
+            att.fixture.secret,
+            &bundle.seal.version,
+            &crate::seal::SealBindings {
+                head_tree: bundle.seal.head_tree.clone(),
+                base_tree: bundle.seal.base_tree.clone(),
+                patch_id: bundle.seal.patch_id.clone(),
+                config_hash: bundle.seal.config_hash.clone(),
+                repo_reviewers: bundle.seal.reviewers.iter().cloned().collect(),
+            },
+            bundle.seal.seams,
+            bundle.seal.reviewers.clone(),
+            &event_values,
+        );
+
+        // Re-sign the permuted bundle with the same key material the fixture
+        // already generated, so the signature itself verifies cleanly and the
+        // only thing under test is the key-to-event binding.
+        let keys_dir = att.fixture._tmp.path().join("keys-permuted");
+        std::fs::create_dir_all(&keys_dir).unwrap();
+        let (key_path, pubkey) = generate_keypair(&keys_dir);
+        let tampered_json = bundle.to_json().unwrap();
+        let signature = sign(&key_path, tampered_json.as_bytes()).unwrap();
+        let tampered_note = envelope(&tampered_json, &signature);
+
+        let r1 = reviewer_def("r1", None);
+        let r2 = reviewer_def("r2", None);
+        let routed: std::collections::BTreeMap<&str, &crate::reviewer::Reviewer> =
+            [("r1", &r1), ("r2", &r2)].into_iter().collect();
+
+        let outcome = plan(
+            &tampered_note,
+            "test-principal",
+            &[pubkey],
+            &att.ci,
+            &routed,
+            att.fixture.secret,
+        );
+        match outcome {
+            AttestationOutcome::Fallback { reason } => {
+                assert!(
+                    reason.contains("malformed") || reason.contains("mismatched"),
+                    "expected a reason naming the malformed bundle, got: {reason}"
+                );
+            }
+            AttestationOutcome::Replay(_) => {
+                panic!("a permuted-key bundle must fall back, not replay")
+            }
+        }
     }
 
     #[test]

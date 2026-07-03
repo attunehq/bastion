@@ -133,7 +133,7 @@ Signed with ssh-ed25519 AAAA... you@example.com
 Push the note with: git push origin refs/notes/bastion
 ```
 
-The note itself does not push automatically; run the printed command (or fold it into your usual `git push`) to make the attestation visible to CI. `bastion attest` is local-only, with no GitHub mirror: CI consumes the note `bastion review` writes when it verifies and replays.
+The note itself does not push automatically; run the printed command (or fold it into your usual `git push`) to make the attestation visible to CI. `bastion attest` is local-only, with no GitHub mirror: it is the only command that writes the note, and `bastion review` in CI verifies and replays it.
 
 ---
 
@@ -160,5 +160,4 @@ Anyone who understands one surface understands the other; this is deliberate, so
 Local-specific deferrals, separate from the core design's list.
 
 - Watch mode. A `bastion review --watch` that re-runs affected reviewers as files change, instead of once per invocation.
-- A shared verdict cache so an unchanged reviewer result can be reused across local runs rather than recomputed, distinct from [attestation](./attestation.md): attestation hands a signed local run to CI; a local cache would reuse a result within the local loop itself.
 - Transport beyond a process. Driving Bastion over a socket with the same event stream, if an agent harness ever wants to consume it that way rather than from stdout.

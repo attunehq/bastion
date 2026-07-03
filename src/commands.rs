@@ -288,17 +288,12 @@ async fn plan_attestation_replay(
     gathered: Option<&crate::github::context::GatheredContext>,
     routed: &[&crate::reviewer::Reviewer],
 ) -> Option<crate::attest::AttestationOutcome> {
-    let ci = match crate::attest::derive_ci_bindings(repo_root, base, &repo_attestation.config_hash)
-    {
-        Ok(ci) => ci,
-        Err(err) => {
-            eprintln!(
-                "bastion review: attestation not honored: could not re-derive CI bindings ({err:#})"
-            );
-            return None;
-        }
-    };
-
+    // Look up the note before deriving CI's own bindings: the ordinary case for
+    // most commits is simply "no note", which is a fallback in its own right and
+    // has nothing to do with whether bindings re-derive cleanly. Deriving
+    // bindings first would record a `could not re-derive CI bindings` fallback
+    // even when there was never a note to replay against, burying the real
+    // "no attestation note found" reason under irrelevant noise.
     let head_sha = gathered.and_then(|g| g.head_sha.as_deref());
     let note = match crate::attest::note_for_review(repo_root, "HEAD", head_sha) {
         Ok(Some(note)) => note,
@@ -310,6 +305,16 @@ async fn plan_attestation_replay(
         Err(err) => {
             return Some(crate::attest::AttestationOutcome::Fallback {
                 reason: format!("could not look up the attestation note: {err:#}"),
+            });
+        }
+    };
+
+    let ci = match crate::attest::derive_ci_bindings(repo_root, base, &repo_attestation.config_hash)
+    {
+        Ok(ci) => ci,
+        Err(err) => {
+            return Some(crate::attest::AttestationOutcome::Fallback {
+                reason: format!("could not re-derive CI bindings: {err:#}"),
             });
         }
     };
@@ -1107,5 +1112,82 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].verdict, Some(Decision::Pass));
         assert_eq!(runs[0].reviewers, 0);
+    }
+
+    /// A minimal repository whose HEAD carries a note under `NOTES_REF`, for
+    /// `plan_attestation_replay` tests. The note's own content never matters for
+    /// these tests: every scenario below fails (or is meant to fail) before the
+    /// note's bundle is ever parsed.
+    fn repo_with_a_note() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        git(dir, &["init"]);
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        git(dir, &["add", "a.txt"]);
+        git(dir, &["commit", "-m", "base"]);
+        git::note_add(dir, git::NOTES_REF, "HEAD", "not-a-real-bundle").unwrap();
+        tmp
+    }
+
+    fn attestation_enabled() -> crate::config::RepoAttestation {
+        crate::config::RepoAttestation {
+            config_hash: "config-hash".into(),
+            reviewers: std::collections::BTreeSet::new(),
+            attestations_enabled: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_attestation_replay_falls_back_with_no_attestation_note_reason_when_absent() {
+        // The ordinary case: no note at all. This must stay the "no attestation
+        // note found" fallback, not get shadowed by an unrelated bindings failure.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        git(dir, &["init"]);
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        git(dir, &["add", "a.txt"]);
+        git(dir, &["commit", "-m", "base"]);
+
+        let outcome =
+            plan_attestation_replay(dir, "nonexistent-base", &attestation_enabled(), None, &[])
+                .await;
+        match outcome {
+            Some(crate::attest::AttestationOutcome::Fallback { reason }) => {
+                assert!(
+                    reason.contains("no attestation note found"),
+                    "a missing note must report its own reason even when the base is also \
+                     unresolvable, got: {reason}"
+                );
+            }
+            other => panic!("expected a fallback, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_attestation_replay_falls_back_when_ci_bindings_cannot_be_derived() {
+        // A note is present, but `base` does not resolve, so `derive_ci_bindings`
+        // fails. This must still record a persisted fallback (not `None`), and the
+        // reason must name the bindings failure, not the (irrelevant, since a note
+        // exists) "no attestation note found" reason.
+        let tmp = repo_with_a_note();
+        let dir = tmp.path();
+
+        let outcome = plan_attestation_replay(
+            dir,
+            "this-base-does-not-exist",
+            &attestation_enabled(),
+            None,
+            &[],
+        )
+        .await;
+        match outcome {
+            Some(crate::attest::AttestationOutcome::Fallback { reason }) => {
+                assert!(
+                    reason.contains("could not re-derive CI bindings"),
+                    "got: {reason}"
+                );
+            }
+            other => panic!("expected a fallback, got: {other:?}"),
+        }
     }
 }

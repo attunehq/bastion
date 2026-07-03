@@ -81,7 +81,7 @@ Formalized, Bastion is built around the following threat model:
 
 The PR description and discussion Bastion feeds a reviewer (the [review context](#review-context)) are authored by the gate's *subject*, not its policy authority. They explain intent and carry the author's pushback, the way a human reviewer reads them, but Bastion presents them as untrusted claims and excludes them from the gate logic, so an author cannot talk a gate into passing. Granting an exception remains a human governance act.
 
-[Attestation](./attestation.md) fits inside this same threat model rather than weakening it: CI trusting a signed local run in place of re-executing a reviewer carries the same trust as any other aligned-contributor assumption above.
+[Attestation](./attestation.md) uses this same threat model: CI trusting a signed local run in place of re-executing a reviewer carries the same trust as any other aligned-contributor assumption above.
 
 ---
 
@@ -169,7 +169,10 @@ reviewers:
 > (a gate blocks, an advisor is skipped) rather than running without it. The
 > least-privilege default (`network: false`, no `mcp`/`skills`, no `runner`) runs
 > natively. `env` and
-> `inputs` values are literal strings (no shell `$VAR` expansion). See the
+> `inputs` values are literal strings (no shell `$VAR` expansion). `Config` also
+> parses a top-level `attestations` flag and `Reviewer` an `attestation: never`
+> field; both are honored by the CI verify-and-replay planner (see
+> [Attestation](./attestation.md)). See the
 > [honored-fields table](./backends.md#what-a-backend-applies-from-the-profile).
 
 ---

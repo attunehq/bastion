@@ -64,8 +64,8 @@ struct SealInput<'a> {
 /// A persisted, tamper-evident record of what a run reviewed and concluded.
 ///
 /// Stored alongside a run (`store::write_seal`/`read_seal`) so a later `bastion
-/// attest` or CI replay can re-derive the same [`SealInput`] and check `mac`
-/// against it. Every field here is also a [`SealInput`] field except `mac`
+/// attest` or CI replay can re-derive the same `SealInput` and check `mac`
+/// against it. Every field here is also a `SealInput` field except `mac`
 /// itself and `reviewers` (the sealed reviewer *names*, kept for a human-readable
 /// record; the events they resolved are re-read from the run store to recompute
 /// the digest, not carried in the seal).
@@ -88,7 +88,7 @@ pub struct Seal {
     pub seams: bool,
     /// The sorted names of the repository reviewers this seal covers.
     pub reviewers: Vec<String>,
-    /// The lowercase-hex HMAC-SHA256 over the [`SealInput`] this seal was built
+    /// The lowercase-hex HMAC-SHA256 over the `SealInput` this seal was built
     /// from.
     pub mac: String,
 }

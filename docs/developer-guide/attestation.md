@@ -5,13 +5,12 @@
 > planner live in [`src/attest.rs`](../../src/attest.rs). This document
 > describes the shipped design and is the reference to read alongside the code.
 
-When a project runs Bastion both locally and in CI, a well-behaved agent runs
-`bastion review` before pushing, and then CI runs the same reviewers over the
-same changeset again. Every reviewer is an agent invocation, so the project pays
-for each review roughly twice. Attestation lets CI reuse a local run instead of
-repeating it: the local run signs a record of what it reviewed and what it
-concluded, and CI verifies that record and replays it rather than re-executing
-the reviewers.
+When a project runs Bastion both locally and in CI, an agent can run `bastion
+review` before pushing; CI then runs the same reviewers over the same
+changeset again. Every reviewer is an agent invocation, so the project pays
+for each review roughly twice. Attestation lets CI reuse the local run: it
+signs what it reviewed and concluded, and CI verifies and replays that
+record.
 
 An attestation is not a pass token. It is the run itself, signed: per-reviewer
 verdicts, findings included, blocks included. CI replaying an attested run that
@@ -20,11 +19,10 @@ changes an outcome.
 
 ## Trust posture
 
-This fits inside the existing [threat model](./design.md#threat-model--trust-boundary)
-rather than weakening it. Bastion assumes aligned authors and aims for
-reasonable reduction proportionate to effort, not an adversarial boundary; an
-attestation trusted by CI carries the same trust as "we assume contributors are
-not disabling lints." Three rules define what is trusted and why:
+Attestation uses the existing [threat model](./design.md#threat-model--trust-boundary).
+Bastion assumes aligned authors and aims for reasonable reduction proportionate
+to effort; CI trusting a signed local run carries the same trust as "we assume
+contributors are not disabling lints." Three rules define what is trusted and why:
 
 1. **Key trust rides on the forge account.** CI verifies the note's signature
    against the SSH signing keys the PR author has registered with GitHub.
@@ -42,8 +40,8 @@ not disabling lints." Three rules define what is trusted and why:
    means accepting that an agent on that machine could attest without a human
    touch, the same trust as the author's commit access.
 3. **Bastion refuses to attest what it cannot verify.** The binary is code the
-   agent does not control, so it is the one local component that can hold the
-   line. Every run is sealed by the binary the moment it finishes (see
+   agent does not control, so it checks the run before signing. Every run is
+   sealed by the binary the moment it finishes (see
    [the run seal](#the-run-seal)), and `bastion attest` re-derives the
    repository state and checks that seal before signing anything: an edited
    run store, a bundle describing a run that never happened, or a repository
@@ -60,8 +58,14 @@ back to a full run on any mismatch:
 - **The changeset, not the commit.** The merge-base tree and the head tree (with
   a patch-id over the diff). CI recomputes its own merge base against the PR's
   target and replays only on exact match, which catches a local review that
-  diffed against a stale base. Binding by content rather than commit id also
-  lets an attestation survive a squash or rebase that produces identical trees.
+  diffed against a stale base. Binding by content rather than commit id means a
+  note that CI *finds* verifies against identical trees regardless of the
+  commit id it hangs off (a re-attached note, or a rewrite that happens to keep
+  the commit id). The note itself is still looked up by commit id, on HEAD or
+  the PR's head SHA (see [Storage](#storage-a-git-note)), so a squash or rebase
+  that changes the commit id leaves the note behind on the old, now-orphaned
+  commit; CI does not find it there and falls back to a full run. Re-running
+  `bastion attest` after a rewrite re-attaches the note to the new HEAD.
 - **The effective reviewer config.** A hash of the repository registry after
   each file's `defaults` are applied. The user-level registry is excluded:
   personal reviewers never gate anyone else's PR, so they cannot attest anything
@@ -121,14 +125,17 @@ distinguish from real ones. That act is the deliberate malice the
 seal exists to stop the inadvertent version (an agent editing run-store files,
 replaying a stale run, or stubbing a reviewer), and those it stops outright.
 
-The seal binds content, never git ceremony. It names the content reviewed, the
-base it was diffed against, the policy that ran, the engine that ran it, and
-what was concluded. It says nothing about whether that content was committed
-at the time, what any commit message said, or whether a commit was signed,
-because none of that affects what the reviewers saw: commit messages feed the
-intent context, which is untrusted input excluded from gate logic. An author
-who amends a message, commits after reviewing, or signs the commit afterward
-has invalidated nothing.
+The seal binds the reviewed content, not commit metadata. It names the content
+reviewed, the base it was diffed against, the policy that ran, the engine that
+ran it, and what was concluded. Because the seal is computed over HEAD's tree
+at review time, an attestable review has to run over committed content: review,
+commit nothing further, then attest. It says nothing about what any commit
+message said or whether a commit was signed, because none of that affects what
+the reviewers saw: commit messages feed the intent context, which is untrusted
+input excluded from gate logic. An author who amends a message or signs the
+commit afterward has invalidated nothing, since the tree is unchanged. A review
+run over a dirty working tree, though, seals a tree that stops matching once
+that work is committed, so attest only after the final commit.
 
 ## Storage: a git note
 
@@ -182,8 +189,8 @@ unattestable.
 
 ## The `bastion attest` flow
 
-1. `bastion review --base <base>` runs, persists to the run store as today,
-   and seals the run as it finishes.
+1. `bastion review --base <base>` runs, persists to the run store, and seals
+   the run as it finishes.
 2. `bastion attest [<run>] [--key <path>]` loads that run (the latest by
    default), verifies the seal, and refuses outright if the seal recorded a
    test seam. It then re-derives the repository state: HEAD's tree, the merge
@@ -226,9 +233,9 @@ additions for auditability:
   was replayed from an attested local run rather than executed fresh.
 
 The local `bastion review` mirrors the callout to stderr when it replays, as it
-does for the drift advisory. This surfacing is the human breadcrumb: anyone
-reading the PR can see at a glance that the gate was satisfied by an attested
-local run and by whom, and can trace it back to the note on the head commit.
+does for the drift advisory. Anyone reading the PR can see that the gate was
+satisfied by an attested local run, who attested it, and which note on the head
+commit backs it.
 
 Every failure is fail-closed to a full run, never to a silent pass: a missing
 or unverifiable note, a key the author has not registered with GitHub, a seal
@@ -236,9 +243,9 @@ that does not verify (tampered, produced by a different release, or carrying
 an active test seam), a binding mismatch, or a stale base all mean the
 reviewers simply execute. The run records why as a `run.attestation-fallback`
 event, and the sticky comment surfaces the same reason as a line under the
-headline, so the author is not left guessing. Replay itself is recorded as a
-single `run.attested` event covering every replayed reviewer, and each
-replayed reviewer's own `reviewer.resolved` event carries `replayed: true`.
+headline. Replay itself is recorded as a single `run.attested` event covering
+every replayed reviewer, and each replayed reviewer's own `reviewer.resolved`
+event carries `replayed: true`.
 
 ### The adopter's two workflow requirements
 

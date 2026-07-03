@@ -396,6 +396,15 @@ pub async fn execute_with(
 /// parsed fails closed exactly like a crashed fresh execution would, and an
 /// advisor replay fails open the same way, so a broken replay degrades no
 /// differently than a broken backend.
+///
+/// The same rule applies to a *parseable but inconsistent* event: fresh
+/// execution never reaches [`resolve`] with a `pass` that also carries a
+/// blocking finding, because [`backend::extract_verdict`] and the Claude Code
+/// backend's own extraction both reject that shape before it ever becomes a
+/// [`ReviewOutcome`] (see [`Verdict::is_consistent`]). A signed bundle is
+/// attacker-shaped input just like an agent's raw output, so a replayed event
+/// gets the identical check: reconstruct the [`Verdict`] the event claims and
+/// require it to be consistent before trusting its decision.
 fn resolve_replayed(replay: &ReplayedReviewer) -> Resolved {
     let is_gate = replay.reviewer.mode == Mode::Gate;
     match serde_json::from_value::<RunEvent>(replay.event.clone()) {
@@ -406,19 +415,35 @@ fn resolve_replayed(replay: &ReplayedReviewer) -> Resolved {
             usage,
             duration_ms,
             ..
-        }) => Resolved {
-            reviewer: replay.reviewer.clone(),
-            decision: verdict,
-            summary,
-            findings,
-            usage,
-            // There is no local transcript in the CI store: the bundle carries
-            // only the resolved event, never the transcript file.
-            transcript: None,
-            duration: Duration::from_millis(duration_ms),
-            counts_as_gate: is_gate,
-            replayed: true,
-        },
+        }) => {
+            let claimed = Verdict {
+                decision: verdict,
+                summary: summary.clone(),
+                findings: findings.clone(),
+            };
+            if !claimed.is_consistent() {
+                return fail(
+                    &replay.reviewer,
+                    is_gate,
+                    "the attested reviewer.resolved event was internally inconsistent \
+                     (a pass carrying a blocking finding, or a block with none)",
+                    Duration::from_millis(duration_ms),
+                );
+            }
+            Resolved {
+                reviewer: replay.reviewer.clone(),
+                decision: verdict,
+                summary,
+                findings,
+                usage,
+                // There is no local transcript in the CI store: the bundle carries
+                // only the resolved event, never the transcript file.
+                transcript: None,
+                duration: Duration::from_millis(duration_ms),
+                counts_as_gate: is_gate,
+                replayed: true,
+            }
+        }
         Ok(_) | Err(_) => fail(
             &replay.reviewer,
             is_gate,
@@ -728,6 +753,79 @@ mod tests {
     /// guard is held across an `.await`, which clippy's `await_holding_lock`
     /// correctly refuses for a blocking mutex.
     static SEAM_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// The four env vars [`crate::seal::seams_active`] reads, gathered in one
+    /// place so a test can force them all to a known state.
+    const SEAM_ENV_VARS: [&str; 4] = [
+        crate::backend::claude_code::PROGRAM_ENV,
+        crate::backend::codex::PROGRAM_ENV,
+        crate::backend::pi::PROGRAM_ENV,
+        crate::backend::container::ENGINE_ENV,
+    ];
+
+    /// Forces every seam env var [`crate::seal::seams_active`] reads to a known
+    /// state (unset by default, or set via [`Self::set`]) for the guard's
+    /// lifetime, restoring each var's prior value on drop.
+    ///
+    /// `seams_active()` reads the real, process-global environment, so any test
+    /// whose outcome depends on it (directly, by asserting `seal.seams`, or
+    /// indirectly, by sealing a run and reading it back) must not merely assume
+    /// the ambient environment is clean: a developer or CI sandbox that already
+    /// has `BASTION_CODEX_BIN` (or any of the other three) set would otherwise
+    /// flip `seams_active()` to `true` out from under the test, exactly the
+    /// failure this guard exists to prevent. Construct it only while already
+    /// holding [`SEAM_ENV_LOCK`]: mutating process env from a parallel test
+    /// would otherwise race.
+    struct SeamEnvGuard {
+        prior: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl SeamEnvGuard {
+        /// Clear every seam env var, remembering each prior value to restore on
+        /// drop.
+        fn cleared() -> Self {
+            // Safety: the caller holds `SEAM_ENV_LOCK` for the guard's whole
+            // lifetime, so no other test can observe or mutate these vars
+            // concurrently.
+            let prior = SEAM_ENV_VARS
+                .iter()
+                .map(|name| {
+                    let prior = std::env::var_os(name);
+                    unsafe {
+                        std::env::remove_var(name);
+                    }
+                    (*name, prior)
+                })
+                .collect();
+            Self { prior }
+        }
+
+        /// Clear every seam env var, then set exactly `name` to `value`. Used by
+        /// the one test that asserts a *present* seam is recorded.
+        fn cleared_except(name: &'static str, value: &str) -> Self {
+            let guard = Self::cleared();
+            // Safety: see `cleared`'s safety note; the lock is still held.
+            unsafe {
+                std::env::set_var(name, value);
+            }
+            guard
+        }
+    }
+
+    impl Drop for SeamEnvGuard {
+        fn drop(&mut self) {
+            // Safety: see `cleared`'s safety note; the lock is still held for
+            // the guard's whole lifetime, including this restoration.
+            for (name, value) in &self.prior {
+                unsafe {
+                    match value {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        }
+    }
 
     fn reviewer(name: &str, mode: Mode) -> Reviewer {
         Reviewer {
@@ -1133,9 +1231,11 @@ mod tests {
     #[tokio::test]
     async fn a_run_with_seal_bindings_produces_a_verifiable_seal_on_disk() {
         // Sealing reads the real process environment (`seams_active()`); hold
-        // the lock so this scenario cannot interleave with the test that
-        // mutates a seam env var (see `SEAM_ENV_LOCK`'s doc comment).
-        let _seam_guard = SEAM_ENV_LOCK.lock().await;
+        // the lock and force every seam var to unset so the assertion below is
+        // deterministic regardless of what the ambient environment carries (see
+        // `SeamEnvGuard`'s doc comment).
+        let _seam_lock = SEAM_ENV_LOCK.lock().await;
+        let _seam_guard = SeamEnvGuard::cleared();
         let g1 = reviewer("g1", Mode::Gate);
         let reviewers = [&g1];
         let mut ctx = ctx(&reviewers);
@@ -1176,7 +1276,8 @@ mod tests {
 
     #[tokio::test]
     async fn perturbing_a_persisted_resolved_event_breaks_seal_verification() {
-        let _seam_guard = SEAM_ENV_LOCK.lock().await;
+        let _seam_lock = SEAM_ENV_LOCK.lock().await;
+        let _seam_guard = SeamEnvGuard::cleared();
         let g1 = reviewer("g1", Mode::Gate);
         let reviewers = [&g1];
         let mut ctx = ctx(&reviewers);
@@ -1214,7 +1315,8 @@ mod tests {
         // A user-level-only reviewer (not in `repo_reviewers`) must not be sealed:
         // its events are excluded, and if it is the only reviewer that ran, no
         // seal is written at all.
-        let _seam_guard = SEAM_ENV_LOCK.lock().await;
+        let _seam_lock = SEAM_ENV_LOCK.lock().await;
+        let _seam_guard = SeamEnvGuard::cleared();
         let a1 = reviewer("a1", Mode::Gate);
         let reviewers = [&a1];
         let mut ctx = ctx(&reviewers);
@@ -1248,34 +1350,26 @@ mod tests {
     async fn seams_active_is_recorded_on_the_seal_when_a_backend_seam_env_is_set() {
         // `seams_active()` reads real process env vars, which are process-global
         // and unsafe to mutate from parallel tests; this test is the one place in
-        // the suite allowed to touch `BASTION_CLAUDE_BIN` for that reason. It holds
-        // `SEAM_ENV_LOCK` for the whole window (the env var is set before, and
-        // cleared after, `run_scenario_with_ctx`'s own internal acquisition), so no
-        // other seal-touching scenario can observe this env var.
-        let _seam_guard = SEAM_ENV_LOCK.lock().await;
+        // the suite allowed to set `BASTION_CLAUDE_BIN` for that reason. It holds
+        // `SEAM_ENV_LOCK` for the whole window and forces every *other* seam var
+        // unset via `SeamEnvGuard`, so the outcome depends only on the one var
+        // this test sets, never on whatever the ambient environment carries.
+        let _seam_lock = SEAM_ENV_LOCK.lock().await;
+        let _seam_guard =
+            SeamEnvGuard::cleared_except(crate::backend::claude_code::PROGRAM_ENV, "/bin/true");
 
         let g1 = reviewer("g1", Mode::Gate);
         let reviewers = [&g1];
         let mut ctx = ctx(&reviewers);
         ctx.seal = Some(seal_bindings(&["g1"]));
 
-        // Safety: this test owns the env var for its duration (under the lock
-        // above) and clears it immediately after driving the scenario, before
-        // any assertion that could panic and skip the cleanup.
-        unsafe {
-            std::env::set_var(crate::backend::claude_code::PROGRAM_ENV, "/bin/true");
-        }
-        let result = run_scenario_with_ctx(
+        let (_decision, _events, layout) = run_scenario_with_ctx(
             &reviewers,
             ctx,
             responses(vec![("g1", Response::Outcome(pass("ok")))]),
         )
         .await;
-        unsafe {
-            std::env::remove_var(crate::backend::claude_code::PROGRAM_ENV);
-        }
 
-        let (_decision, _events, layout) = result;
         let run = RunId("r-exec".into());
         let seal = crate::store::read_seal(&layout, &run).unwrap().unwrap();
         assert!(
@@ -1506,6 +1600,151 @@ mod tests {
             !events
                 .iter()
                 .any(|e| matches!(e, RunEvent::AttestationReplayed { .. }))
+        );
+    }
+
+    /// Build a `reviewer.resolved` event that is internally inconsistent: a `pass`
+    /// verdict that nonetheless carries a blocking finding. Fresh execution can
+    /// never produce this shape (the backends reject it before it becomes an
+    /// outcome), so this simulates a malformed or tampered attestation bundle.
+    fn inconsistent_pass_event(name: &str) -> serde_json::Value {
+        let event = RunEvent::ReviewerResolved {
+            run: RunId("r-attested-elsewhere".into()),
+            reviewer: name.into(),
+            verdict: Decision::Pass,
+            summary: "claims to pass".into(),
+            findings: vec![Finding {
+                kind: FindingKind::Blocking,
+                path: "a.rs".into(),
+                line_start: 1,
+                line_end: 1,
+                detail: "actually blocks".into(),
+            }],
+            usage: None,
+            duration_ms: 1,
+            has_transcript: true,
+            replayed: false,
+        };
+        serde_json::to_value(&event).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_replayed_gate_event_with_pass_and_a_blocking_finding_blocks_the_run() {
+        // An inconsistent replayed gate event (pass + a blocking finding) must not
+        // launder into a passing gate: it routes through the same fail-closed path
+        // a crashed fresh execution would.
+        let g1 = reviewer("g1", Mode::Gate);
+        let mut ctx = ctx(&[&g1]);
+        ctx.replayed.insert(
+            "g1".to_string(),
+            ReplayedReviewer {
+                reviewer: g1.clone(),
+                event: inconsistent_pass_event("g1"),
+            },
+        );
+        ctx.attestation = Some(AttestationAudit {
+            public_key: "ssh-ed25519 AAAA".into(),
+            attested_at: "2026-07-01T00:00:00Z".into(),
+        });
+
+        let (decision, events, _layout) = run_scenario_with_ctx(&[], ctx, responses(vec![])).await;
+        assert_eq!(
+            decision,
+            Decision::Block,
+            "an inconsistent replayed gate must fail closed"
+        );
+
+        let resolved = events
+            .iter()
+            .find(|e| matches!(e, RunEvent::ReviewerResolved { .. }))
+            .expect("a resolved event exists");
+        match resolved {
+            RunEvent::ReviewerResolved {
+                verdict, summary, ..
+            } => {
+                assert_eq!(*verdict, Decision::Block);
+                assert!(
+                    summary.contains("inconsistent") || summary.contains("did not produce"),
+                    "summary should explain the fail-closed reason: {summary}"
+                );
+            }
+            other => panic!("expected reviewer.resolved, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_consistent_replayed_pass_still_passes() {
+        // The straightforward happy path stays intact: a replayed pass with no
+        // blocking findings still passes the run.
+        let g1 = reviewer("g1", Mode::Gate);
+        let mut ctx = ctx(&[&g1]);
+        ctx.replayed.insert(
+            "g1".to_string(),
+            ReplayedReviewer {
+                reviewer: g1.clone(),
+                event: attested_event("g1", Decision::Pass, "replayed pass"),
+            },
+        );
+        ctx.attestation = Some(AttestationAudit {
+            public_key: "ssh-ed25519 AAAA".into(),
+            attested_at: "2026-07-01T00:00:00Z".into(),
+        });
+
+        let (decision, events, _layout) = run_scenario_with_ctx(&[], ctx, responses(vec![])).await;
+        assert_eq!(decision, Decision::Pass);
+
+        let resolved = events
+            .iter()
+            .find(|e| matches!(e, RunEvent::ReviewerResolved { .. }))
+            .expect("a resolved event exists");
+        match resolved {
+            RunEvent::ReviewerResolved {
+                verdict, replayed, ..
+            } => {
+                assert_eq!(*verdict, Decision::Pass);
+                assert!(*replayed);
+            }
+            other => panic!("expected reviewer.resolved, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_inconsistent_replayed_advisor_stays_fail_open() {
+        // Mirror the fresh-execution advisor policy exactly: a broken/inconsistent
+        // result never blocks the run for an advisor, only a gate. This mirrors
+        // `fail`'s advisor branch, which resolves to `Decision::Pass` and does not
+        // count toward the gate tally.
+        let a1 = reviewer("a1", Mode::Advisor);
+        let mut ctx = ctx(&[&a1]);
+        ctx.replayed.insert(
+            "a1".to_string(),
+            ReplayedReviewer {
+                reviewer: a1.clone(),
+                event: inconsistent_pass_event("a1"),
+            },
+        );
+        ctx.attestation = Some(AttestationAudit {
+            public_key: "ssh-ed25519 AAAA".into(),
+            attested_at: "2026-07-01T00:00:00Z".into(),
+        });
+
+        let (decision, events, _layout) = run_scenario_with_ctx(&[], ctx, responses(vec![])).await;
+        assert_eq!(
+            decision,
+            Decision::Pass,
+            "an advisor never blocks the aggregate, even on a broken replay"
+        );
+
+        let gates = events
+            .iter()
+            .find_map(|e| match e {
+                RunEvent::RunCompleted { gates, .. } => Some(*gates),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            gates.total, 0,
+            "a failed advisor replay does not count as a gate"
         );
     }
 }

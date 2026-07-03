@@ -82,8 +82,10 @@ The event types:
 | --- | --- |
 | `run.started` | The run began; lists the reviewers that matched and will run. |
 | `reviewer.started` | One reviewer was dispatched. |
-| `reviewer.resolved` | One reviewer finished; carries its `verdict`, `summary`, `findings`, `usage`, and a `has_transcript` flag. |
+| `reviewer.resolved` | One reviewer finished; carries its `verdict`, `summary`, `findings`, `usage`, and a `has_transcript` flag. Carries `replayed: true` when the verdict came from a verified attestation instead of a fresh execution. |
 | `run.completed` | The aggregate decision and the gate tally, plus the run's wall-clock `duration_ms` and the usage totals (`tokens_in`, `tokens_out`, `cache_read`, `cost_usd`) summed across reviewers. |
+| `run.attested` | A signed local run was replayed; carries the replayed `reviewers`, the attesting `public_key`, and `attested_at`. |
+| `run.attestation-fallback` | Attestation was attempted but not honored; carries the `reason` (a missing note, an unregistered key, a stale binding, and so on). |
 
 How an agent should consume it:
 
@@ -253,6 +255,10 @@ bastion review --base main   # ends green
 bastion attest                # signs the run that just finished
 git push origin refs/notes/bastion
 ```
+
+`bastion attest [RUN]` takes an optional run id positional; omit it and it signs
+the latest recorded run, which is what you want right after `bastion review`.
+Pass one explicitly (`bastion attest r-0f3a`) to attest an older run instead.
 
 `bastion attest` re-checks that your repository has not moved on since the
 review (the same tree, the same diff, the same effective reviewer config) and

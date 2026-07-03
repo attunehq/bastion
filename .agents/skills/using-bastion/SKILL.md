@@ -72,10 +72,10 @@ Signing uses your SSH key (`git config user.signingkey`, or `--key <path>`) and
 may prompt for presence (a hardware token or keychain confirmation). That
 prompt is expected, not a hang; wait for it.
 
-`bastion attest` refuses a run it cannot stand behind: one run through a test
-seam, a run store edited after the fact, or a repository that has moved on
-(a new commit, a changed registry) since the review. Do not work around a
-refusal. Re-run `bastion review` and attest that fresh run instead.
+`bastion attest` refuses runs it cannot verify: a run through a test seam, a
+run store edited after the fact, or a repository that has moved on (a new
+commit, a changed registry) since the review. Do not work around a refusal.
+Re-run `bastion review` and attest that fresh run instead.
 
 Attesting is optional even when the registry allows it: skip these two
 commands and CI just runs every reviewer fresh, and the PR report says why the

@@ -130,6 +130,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0          # full history; reviewers diff against the base
+          # The PR head, not the default merge commit: attestation replay binds
+          # to the head tree the author attested, which a merge commit never matches.
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      # actions/checkout does not fetch notes by default. Tolerant of the ref
+      # being absent: attestation is optional, so most PRs will not carry a note.
+      - name: Fetch the attestation notes ref
+        run: git fetch origin +refs/notes/bastion:refs/notes/bastion || true
 
       # 1. Install a published bastion release (not built from the PR).
       # 2. For native reviewers: install your backend CLI (claude, codex, or pi) on
@@ -298,8 +306,7 @@ When attestation replaces execution, the sticky comment opens with a callout
 naming which reviewers replayed, the key that attested, and when; each
 replayed reviewer's check-run summary says so too. When it does not (a missing
 note, an unregistered key, a stale base, or any other mismatch), CI simply
-executes every reviewer as usual and the comment says why the attestation was
-not honored, so you are never left guessing.
+executes every reviewer as usual and the comment includes the fallback reason.
 
 A reviewer can opt out of ever being replayed with `attestation: never` on that
 reviewer, for a gate your team wants CI to execute unconditionally regardless

@@ -69,10 +69,19 @@ jobs:
           # author attested; the merge-commit view would never match it.
           ref: ${{ github.event.pull_request.head.sha }}
 
-      # actions/checkout does not fetch notes by default. Tolerant of the ref being
-      # absent: attestation is optional, so most PRs will not carry a note.
+      # actions/checkout does not fetch notes by default. Tolerant only of the
+      # expected case (most PRs carry no attestation note, so the ref does not
+      # exist on the remote yet): probe for the ref first and fetch only when it
+      # is present, so a genuinely unreachable remote still fails the step
+      # instead of being swallowed by a blanket `|| true`.
       - name: Fetch the attestation notes ref
-        run: git fetch origin +refs/notes/bastion:refs/notes/bastion || true
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code origin refs/notes/bastion >/dev/null; then
+            git fetch origin +refs/notes/bastion:refs/notes/bastion
+          else
+            echo "::notice::no refs/notes/bastion on origin yet; skipping attestation notes fetch"
+          fi
 
       - name: Install the bastion release
         env:

@@ -335,7 +335,7 @@ impl Config {
 
     /// A stable, lowercase-hex SHA-256 hash of this config's "effective"
     /// reviewer set: [`Config::attestations`] plus every reviewer with each
-    /// file's `defaults` already applied ([`Config::apply_defaults`] runs during
+    /// file's `defaults` already applied (`Config::apply_defaults` runs during
     /// `from_yaml`/`load`, before this is ever called).
     ///
     /// Field order in the hashed struct (`attestations` then `reviewers`) is

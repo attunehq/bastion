@@ -34,6 +34,11 @@ reviewers:
       ...
 ```
 
+An optional top-level `attestations: true` (default off) opts the repository
+into letting CI verify and replay a signed local run instead of re-executing
+every reviewer; see [Attesting a run so CI can
+replay it](./continuous-integration.md#attesting-a-run-so-ci-can-replay-it).
+
 Reviewer **names must be unique** within the file; a duplicate name is a load
 error. A name also has to work as a directory name in the run store, so a name that
 reduces to an empty, `.`, or `..` component is rejected, as are two names that
@@ -226,6 +231,19 @@ heavy end-to-end checks:
 
 ```yaml
 timeout: 15m
+```
+
+### `attestation`
+
+Set to `never` to opt a reviewer out of ever being replayed from a signed local
+run, even when the repository sets `attestations: true`. Absent means
+replayable: CI may replay this reviewer's verdict from an attested run instead
+of executing it fresh. Use `never` for a gate your team wants CI to execute
+unconditionally regardless of what was attested locally. See [Attesting a run
+so CI can replay it](./continuous-integration.md#attesting-a-run-so-ci-can-replay-it).
+
+```yaml
+attestation: never
 ```
 
 ### `env`
