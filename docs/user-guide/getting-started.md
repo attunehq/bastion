@@ -259,10 +259,14 @@ bastion --data-dir /tmp/bastion-scratch review --base main
 
 The same override is available as the `BASTION_DATA_DIR` environment variable.
 
-Note that `bastion review` always runs your reviewers on a real backend: there is
-no built-in mode that fabricates verdicts without an agent, so a review still costs
-a model call. To keep cost down while iterating, start with one cheap, fast
-reviewer and a tight `timeout`.
+Note that `bastion review` never fabricates a verdict: a reviewer that executes
+runs on a real backend and costs a model call. What a re-run *can* do is skip
+execution entirely for a reviewer that already passed and whose inputs are
+unchanged, carrying the prior verdict forward at zero token cost (see
+[the local workflow](./local-workflow.md#re-runs-are-incremental)), so the loop's
+cost concentrates on first runs and on the reviewers your fixes touch. To keep
+cost down while iterating, start with one cheap, fast reviewer and a tight
+`timeout`.
 
 ## When something goes wrong
 
