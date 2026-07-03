@@ -587,14 +587,35 @@ fn stale_skills_warning(cwd: &Path) -> Option<skills::DriftWarning> {
         .flatten()
 }
 
+/// The skills-freshness advisory a local `bastion review` should surface, or `None`
+/// when it should stay silent.
+///
+/// This gates [`stale_skills_warning`] on the repository having *adopted* Bastion: a
+/// repository-level registry is present ([`crate::config::locate_kind`] resolves one).
+/// A purely local review that merged in only the author's user-level reviewers has no
+/// repo registry, and nudging that author to install skills into a project that has not
+/// configured Bastion would be misdirected. Only the local surface is gated this way;
+/// CI always has a repo registry, so the warning [`github_report`] folds into the
+/// sticky comment is unaffected.
+fn local_skills_warning(repo_root: &Path) -> Option<skills::DriftWarning> {
+    // No repo registry (or an unreadable candidate): stay silent. The skills nudge is
+    // meaningful only once the project itself has adopted Bastion, and a failed
+    // presence check must never be the thing this advisory surfaces.
+    if !matches!(crate::config::locate_kind(repo_root), Ok(Some(_))) {
+        return None;
+    }
+    stale_skills_warning(repo_root)
+}
+
 /// Print the skills-freshness advisory to stderr, where the agent driving
-/// `bastion review` sees it alongside the run. Silent when the skills are current.
+/// `bastion review` sees it alongside the run. Silent when the skills are current or
+/// the repository has not adopted Bastion (see [`local_skills_warning`]).
 ///
 /// stderr keeps it out of the `--format jsonl` event stream on stdout (so a parsing
 /// agent's input stays clean) while still landing somewhere both a human and an
 /// agent read, matching how the GitHub-context notice is surfaced.
 fn warn_on_stale_skills(repo_root: &Path) {
-    if let Some(warning) = stale_skills_warning(repo_root) {
+    if let Some(warning) = local_skills_warning(repo_root) {
         // Fail open on the write itself. This advisory runs before any reviewer, so a
         // failed stderr write (a broken pipe, say) must not abort an otherwise-passing
         // review the way `eprintln!` would by panicking; swallow the result instead.
@@ -642,6 +663,36 @@ mod tests {
             stale_skills_warning(root).is_none(),
             "an assessment error should swallow to no warning, not surface"
         );
+    }
+
+    #[test]
+    fn local_skills_warning_is_silent_without_a_repo_registry() {
+        // A purely local review against a repo that has not adopted Bastion (no
+        // `.bastion.yaml`) merges in only the author's user-level reviewers. Warning
+        // there would tell the author to install skills into a project that has not
+        // configured Bastion, which is misdirected. Even with every skill missing, the
+        // local surface stays silent.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        assert!(
+            local_skills_warning(root).is_none(),
+            "no repo registry should suppress the local skills advisory"
+        );
+    }
+
+    #[test]
+    fn local_skills_warning_fires_once_the_repo_adopts_bastion() {
+        // With a repository registry present, the repo has adopted Bastion, so a stale
+        // (here entirely missing) skills tree is worth flagging to the driving agent.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(
+            root.join(crate::config::REGISTRY_FILE),
+            "reviewers:\n  - name: r\n    trigger: [x]\n    mode: gate\n    prompt: p\n",
+        )
+        .unwrap();
+        let warning = local_skills_warning(root).expect("a repo registry enables the advisory");
+        assert!(warning.plain().contains("missing or out of date"));
     }
 
     #[test]

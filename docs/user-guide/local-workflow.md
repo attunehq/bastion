@@ -127,6 +127,14 @@ advisory, so it never adds an event to the stream and never changes the exit sta
 `block` still comes only from a reviewer. Run `bastion skills install` (add `--force`
 to overwrite a file you edited) and commit the result to clear it.
 
+The notice appears only when this repository has adopted Bastion, meaning a repo-level
+reviewer registry is present: a `.bastion.yaml`, its `.bastion.yml` spelling, or the
+deprecated `bastion/reviewers.yaml`, the same registry discovery a review already does.
+If your review is running solely on your own
+[user-level reviewers](./authoring-reviewers.md#user-level-reviewers) in a repo that
+has not configured Bastion, the notice stays silent: installing skills into a project
+that has not adopted Bastion would be beside the point.
+
 ### Money is dollars
 
 Cost fields (`cost_usd`) serialize as dollars (`0.21`) even though Bastion tracks

@@ -47,7 +47,9 @@ missing or have drifted from the reporting binary, the same comparison
 headline, naming each affected file and pointing at `bastion skills install`. It is
 advisory only, so it never changes a check-run conclusion or the `bastion` gate; it
 tells you to refresh stale skills without failing the build. The local `bastion review`
-prints the same notice to stderr.
+prints the same notice to stderr when the repository has adopted Bastion (a repo-level
+reviewer registry is present); a review running on user-level reviewers alone stays
+silent. In CI the repository always has a registry, so this advisory is unaffected.
 
 The local-to-GitHub mapping is one-to-one for the repository's reviewers: the JSONL
 events a CI or `bastion review --repo/--pr` run produces are the same decisions GitHub
