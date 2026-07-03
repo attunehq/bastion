@@ -312,7 +312,8 @@ pub async fn review(
     match git::merge_base(&repo_root, base) {
         Ok(merge_base) => {
             for reviewer in &matched {
-                match crate::carry::scope_digest(&repo_root, &merge_base, reviewer, &changed) {
+                match crate::carry::scope_digest(&repo_root, base, &merge_base, reviewer, &changed)
+                {
                     Ok(digest) => {
                         scope_digests.insert(reviewer.name.clone(), digest);
                     }
@@ -327,6 +328,7 @@ pub async fn review(
             // finish, so a tree that changed mid-run cannot leave a stale
             // digest behind for a later run to carry from.
             digest_probe = Some(runner::DigestProbe {
+                base: base.to_string(),
                 merge_base,
                 changed: changed.clone(),
             });

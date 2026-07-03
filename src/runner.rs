@@ -168,6 +168,8 @@ pub struct ExecContext {
 /// [`ExecContext::digest_probe`]).
 #[derive(Debug, Clone)]
 pub struct DigestProbe {
+    /// The base branch the run reviewed against (the diff the prompt names).
+    pub base: String,
     /// The merge-base commit the run's diffs are taken against.
     pub merge_base: String,
     /// The full changed-file set the run routed on.
@@ -382,14 +384,20 @@ pub async fn execute_with(
 
     // Reviewers judge the live working tree, so a digest sampled before
     // execution can go stale while they run. Re-derive each stamped digest now
-    // and keep it only when it still matches; a mismatch (or a failed
-    // recompute) drops the stamp, which fails safe: the next run simply cannot
-    // carry from this one.
+    // and keep it only when it still matches. A mismatch on a *fresh* verdict
+    // drops the stamp, which fails safe: the reviewer judged the tree it saw,
+    // and the next run simply cannot carry from this one. A mismatch on a
+    // *carried* verdict is worse: the prior pass was reused precisely because
+    // the digest matched at plan time, so if the scoped content changed
+    // mid-run, that pass no longer describes the tree this run reports on.
+    // The verdict itself is untrustworthy, so it fails closed (gate) or is
+    // skipped (advisor), same as any reviewer that could not produce one.
     if let Some(probe) = &ctx.digest_probe {
         for item in &mut resolved {
             if let Some(pre) = item.scope_digest.take() {
                 let now = crate::carry::scope_digest(
                     &ctx.repo_root,
+                    &probe.base,
                     &probe.merge_base,
                     &item.reviewer,
                     &probe.changed,
@@ -397,6 +405,20 @@ pub async fn execute_with(
                 .ok();
                 if now.as_deref() == Some(pre.as_str()) {
                     item.scope_digest = Some(pre);
+                } else if item.carried {
+                    tracing::warn!(
+                        reviewer = %item.reviewer.name,
+                        "the scoped content changed while this run executed; \
+                         its carried verdict no longer describes the tree and fails closed"
+                    );
+                    *item = fail(
+                        &item.reviewer,
+                        item.counts_as_gate,
+                        "the working tree content this reviewer's carried verdict was \
+                         scoped to changed while the run executed; re-run to review the \
+                         current content",
+                        Duration::ZERO,
+                    );
                 } else {
                     tracing::warn!(
                         reviewer = %item.reviewer.name,
@@ -528,7 +550,11 @@ fn resolve_replayed(replay: &ReplayedReviewer) -> Resolved {
                 summary: summary.clone(),
                 findings: findings.clone(),
             };
-            if !claimed.is_consistent() {
+            // Consistency is a *gate* invariant: an advisor's persisted row is
+            // legitimately a clamped pass that keeps its blocking findings as
+            // advice, so checking it here would discard exactly the advice the
+            // replay exists to preserve.
+            if is_gate && !claimed.is_consistent() {
                 return fail(
                     &replay.reviewer,
                     is_gate,
@@ -592,7 +618,10 @@ fn resolve_carried(carry: &crate::carry::Carried) -> Resolved {
                 summary: summary.clone(),
                 findings: findings.clone(),
             };
-            if !claimed.is_consistent() {
+            // As in [`resolve_replayed`]: consistency is a gate invariant; an
+            // advisor's persisted row is legitimately a clamped pass that keeps
+            // its blocking findings as advice.
+            if is_gate && !claimed.is_consistent() {
                 return fail(
                     &carry.reviewer,
                     is_gate,
@@ -1593,6 +1622,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_carried_gate_whose_digest_went_stale_mid_run_fails_closed() {
+        // The carry decision was made against a pre-run digest; if the scoped
+        // content changes while the run executes, the carried pass no longer
+        // describes the tree this run reports on, so it must not tally as a
+        // pass. The stale stamp here stands in for that mid-run change.
+        let (tmp, merge_base, changed) = probe_repo();
+        let g1 = reviewer("g1", Mode::Gate);
+        let reviewers = [&g1];
+        let mut ctx = ctx(&reviewers);
+        ctx.repo_root = tmp.path().to_path_buf();
+        ctx.carried.insert(
+            "g2".into(),
+            carried_entry("g2", Decision::Pass, "stale-plan-time-digest"),
+        );
+        ctx.digest_probe = Some(DigestProbe {
+            base: "base".into(),
+            merge_base,
+            changed,
+        });
+
+        let (decision, events, _layout) = run_scenario_with_ctx(
+            &reviewers,
+            ctx,
+            responses(vec![("g1", Response::Outcome(pass("ok")))]),
+        )
+        .await;
+
+        assert_eq!(decision, Decision::Block, "a stale carry must fail closed");
+        let g2 = events
+            .iter()
+            .find_map(|e| match e {
+                RunEvent::ReviewerResolved {
+                    reviewer, verdict, ..
+                } if reviewer == "g2" => Some(*verdict),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(g2, Decision::Block);
+    }
+
+    #[tokio::test]
+    async fn a_carried_advisor_keeps_its_clamped_pass_and_blocking_findings() {
+        // An advisor's persisted row is legitimately a clamped pass that keeps
+        // blocking findings as advice; carrying it must preserve that advice,
+        // not fail it as inconsistent.
+        let a1 = reviewer("a1", Mode::Advisor);
+        let mut entry = carried_entry("a2", Decision::Pass, "digest-1");
+        entry.reviewer = reviewer("a2", Mode::Advisor);
+        if let RunEvent::ReviewerResolved { findings, .. } = &mut entry.event {
+            findings.push(crate::verdict::Finding {
+                kind: crate::verdict::FindingKind::Blocking,
+                path: "src/a.rs".into(),
+                line_start: 1,
+                line_end: 1,
+                detail: "still worth fixing".into(),
+            });
+        }
+        let reviewers = [&a1];
+        let mut ctx = ctx(&reviewers);
+        ctx.carried.insert("a2".into(), entry);
+
+        let (decision, events, _layout) = run_scenario_with_ctx(
+            &reviewers,
+            ctx,
+            responses(vec![("a1", Response::Outcome(pass("ok")))]),
+        )
+        .await;
+
+        assert_eq!(decision, Decision::Pass, "advisors never gate");
+        let (verdict, findings) = events
+            .iter()
+            .find_map(|e| match e {
+                RunEvent::ReviewerResolved {
+                    reviewer,
+                    verdict,
+                    findings,
+                    ..
+                } if reviewer == "a2" => Some((*verdict, findings.clone())),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(verdict, Decision::Pass);
+        assert_eq!(findings.len(), 1, "the advisory finding must survive carry");
+    }
+
+    #[tokio::test]
     async fn a_carried_reviewer_counts_toward_the_gate_without_executing() {
         let g1 = reviewer("g1", Mode::Gate);
         let reviewers = [&g1];
@@ -1740,13 +1855,15 @@ mod tests {
     async fn the_digest_probe_keeps_a_digest_the_tree_still_matches() {
         let (tmp, merge_base, changed) = probe_repo();
         let g1 = reviewer("g1", Mode::Gate);
-        let real = crate::carry::scope_digest(tmp.path(), &merge_base, &g1, &changed).unwrap();
+        let real =
+            crate::carry::scope_digest(tmp.path(), "base", &merge_base, &g1, &changed).unwrap();
 
         let reviewers = [&g1];
         let mut ctx = ctx(&reviewers);
         ctx.repo_root = tmp.path().to_path_buf();
         ctx.scope_digests.insert("g1".into(), real.clone());
         ctx.digest_probe = Some(DigestProbe {
+            base: "base".into(),
             merge_base,
             changed,
         });
@@ -1783,6 +1900,7 @@ mod tests {
         ctx.scope_digests
             .insert("g1".into(), "stale-pre-run-digest".into());
         ctx.digest_probe = Some(DigestProbe {
+            base: "base".into(),
             merge_base,
             changed,
         });

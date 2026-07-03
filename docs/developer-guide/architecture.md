@@ -103,11 +103,13 @@ Following one review top to bottom touches most of the crate:
     purely local review skips this step entirely. See [Attestation](./attestation.md).
 5b. **Plan carry** (`carry.rs`, purely local runs only). Every reviewer about to run
     gets a trigger-scoped diff digest: its own effective definition, the merge-base
-    commit, the diff of the changed files its trigger matched (untracked matched
-    files encoded by kind, executable bit, and content), and the scoped commit
-    messages that touched those files. The runner re-derives each digest after the
-    reviewers finish and stamps it onto `reviewer.resolved` only when it still
-    matches, so a tree that changed mid-run leaves nothing to carry from. On a
+    commit, the diffs of the changed files its trigger matched against both the
+    merge base and the base tip (untracked matched files encoded by kind,
+    executable bit, and content), and the scoped commit messages that touched
+    those files. The runner re-derives each digest after the reviewers finish and
+    stamps it onto `reviewer.resolved` only when it still matches, so a tree that
+    changed mid-run leaves nothing to carry from; a carried verdict in that
+    situation fails closed. On a
     re-run of the same branch, a reviewer whose prior verdict was a pass with an
     identical digest is *carried*: its verdict folds into the run without a
     backend executing. A repository reviewer carries only from a prior run whose

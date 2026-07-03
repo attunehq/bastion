@@ -125,9 +125,10 @@ version:
   `bastion review --reviewer`, is never sealed).
 - `src/carry.rs`: incremental re-review for purely local runs. Every resolved
   reviewer is stamped with a trigger-scoped diff digest (`scope_digest`: its
-  effective definition, the merge-base commit, the diff of the changed files its
-  trigger matched, and the scoped commit messages; the runner re-derives it
-  post-execution and drops a stamp the tree no longer matches);
+  effective definition, the merge-base commit, the diffs of the changed files its
+  trigger matched against both the merge base and the base tip, and the scoped
+  commit messages; the runner re-derives it post-execution, drops a fresh stamp
+  the tree no longer matches, and fails a carried one closed);
   on a re-run of the same branch, a prior *pass* with an identical digest is
   carried forward (`carried: true` on `reviewer.resolved`, no backend dispatch,
   still counted in the gate tally) while blocks and changed-scope reviewers

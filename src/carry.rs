@@ -86,6 +86,13 @@ struct DigestInput<'a> {
     /// `git diff <merge-base> -- <files>` over the working tree: the tracked
     /// slice of the changeset this reviewer's verdict judged.
     diff: &'a str,
+    /// The same scoped diff taken against the base branch's *current* tip
+    /// (`git diff <base> -- <files>`), which is the diff the reviewer's prompt
+    /// actually instructs it to review. The two coincide until the base
+    /// advances; if the base then moves on a file this trigger covers, the
+    /// merge-base diff can stay textually identical while what the reviewer
+    /// would see changes, and this field is what invalidates the carry.
+    base_diff: &'a str,
     /// The commit messages on `merge_base..HEAD` that touched the matched
     /// files: the trigger-scoped slice of the stated intent the reviewer's
     /// prompt carries. Rewording a commit that touched this reviewer's files
@@ -139,9 +146,10 @@ fn untracked_descriptor(repo_root: &Path, path: &str) -> std::io::Result<String>
 
 /// Compute the scope digest for one triggered reviewer: a lowercase-hex
 /// SHA-256 over the reviewer's effective definition, the merge-base commit,
-/// the diff of the changed files its trigger matched (working tree against
-/// `merge_base`, untracked matched files encoded by kind, mode, and content),
-/// and the `merge_base..HEAD` commit messages that touched those files.
+/// the diffs of the changed files its trigger matched (working tree against
+/// both `merge_base` and `base`'s current tip; untracked matched files encoded
+/// by kind, mode, and content), and the `merge_base..HEAD` commit messages
+/// that touched those files.
 ///
 /// `changed` is the full changed-file set the run routed on
 /// ([`git::changed_files`]); the trigger scoping happens here so the digest and
@@ -154,6 +162,7 @@ fn untracked_descriptor(repo_root: &Path, path: &str) -> std::io::Result<String>
 /// file cannot be read.
 pub fn scope_digest(
     repo_root: &Path,
+    base: &str,
     merge_base: &str,
     reviewer: &Reviewer,
     changed: &[String],
@@ -185,6 +194,13 @@ pub fn scope_digest(
         )
     })?;
 
+    let base_diff = git::scoped_diff(repo_root, base, &files).wrap_err_with(|| {
+        format!(
+            "diffing the files reviewer '{}' is scoped to against the base tip",
+            reviewer.name
+        )
+    })?;
+
     let intent =
         git::scoped_commit_messages(repo_root, merge_base, &files).wrap_err_with(|| {
             format!(
@@ -211,6 +227,7 @@ pub fn scope_digest(
         merge_base,
         files: &files,
         diff: &diff,
+        base_diff: &base_diff,
         intent: &intent,
         untracked: &untracked,
     };
@@ -427,20 +444,20 @@ mod tests {
         let changed = git::changed_files(dir, "base").unwrap();
 
         let src = reviewer("src-only", &["src/**"]);
-        let first = scope_digest(dir, &merge_base, &src, &changed).unwrap();
-        let second = scope_digest(dir, &merge_base, &src, &changed).unwrap();
+        let first = scope_digest(dir, "base", &merge_base, &src, &changed).unwrap();
+        let second = scope_digest(dir, "base", &merge_base, &src, &changed).unwrap();
         assert_eq!(first, second, "the digest must be reproducible");
 
         // Editing a file *outside* the trigger leaves the digest unchanged...
         std::fs::write(dir.join("docs/guide.md"), "guide, edited again\n").unwrap();
         let changed = git::changed_files(dir, "base").unwrap();
-        let after_docs_edit = scope_digest(dir, &merge_base, &src, &changed).unwrap();
+        let after_docs_edit = scope_digest(dir, "base", &merge_base, &src, &changed).unwrap();
         assert_eq!(first, after_docs_edit);
 
         // ...while editing a matched file changes it.
         std::fs::write(dir.join("src/a.rs"), "fn a() { /* different */ }\n").unwrap();
         let changed = git::changed_files(dir, "base").unwrap();
-        let after_src_edit = scope_digest(dir, &merge_base, &src, &changed).unwrap();
+        let after_src_edit = scope_digest(dir, "base", &merge_base, &src, &changed).unwrap();
         assert_ne!(first, after_src_edit);
     }
 
@@ -453,12 +470,12 @@ mod tests {
         let changed = git::changed_files(dir, "base").unwrap();
 
         let src = reviewer("src-only", &["src/**"]);
-        let first = scope_digest(dir, &merge_base, &src, &changed).unwrap();
+        let first = scope_digest(dir, "base", &merge_base, &src, &changed).unwrap();
 
         // The file is untracked, so `git diff` cannot see it; only the content
         // hash in the digest can. Changing its content must change the digest.
         std::fs::write(dir.join("src/new.rs"), "fn new_one() { /* edited */ }\n").unwrap();
-        let second = scope_digest(dir, &merge_base, &src, &changed).unwrap();
+        let second = scope_digest(dir, "base", &merge_base, &src, &changed).unwrap();
         assert_ne!(first, second);
     }
 
@@ -474,8 +491,8 @@ mod tests {
         let mut reworded = original.clone();
         reworded.prompt = "an entirely different concern".into();
 
-        let a = scope_digest(dir, &merge_base, &original, &changed).unwrap();
-        let b = scope_digest(dir, &merge_base, &reworded, &changed).unwrap();
+        let a = scope_digest(dir, "base", &merge_base, &original, &changed).unwrap();
+        let b = scope_digest(dir, "base", &merge_base, &reworded, &changed).unwrap();
         assert_ne!(a, b, "editing the reviewer must invalidate its carry");
     }
 
@@ -612,6 +629,37 @@ mod tests {
     }
 
     #[test]
+    fn digest_changes_when_only_the_merge_base_moves() {
+        // Two comparison points with byte-identical trees produce identical
+        // scoped diffs; the digest must still differ, because a new merge base
+        // is a new starting point for the changeset even when the text
+        // coincides.
+        let tmp = repo();
+        let dir = tmp.path();
+        std::fs::write(dir.join("src/a.rs"), "fn a() { /* edit */ }\n").unwrap();
+        let merge_base = git::merge_base(dir, "base").unwrap();
+        // An empty commit on top of `base`: same tree, different commit id.
+        let other = String::from_utf8(
+            std::process::Command::new("git")
+                .args(["commit-tree", &format!("{merge_base}^{{tree}}")])
+                .args(["-p", &merge_base, "-m", "empty"])
+                .current_dir(dir)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        let changed = git::changed_files(dir, "base").unwrap();
+        let src = reviewer("src-only", &["src/**"]);
+
+        let a = scope_digest(dir, "base", &merge_base, &src, &changed).unwrap();
+        let b = scope_digest(dir, "base", &other, &src, &changed).unwrap();
+        assert_ne!(a, b, "a moved merge base must invalidate the carry");
+    }
+
+    #[test]
     fn digest_changes_when_a_scoped_commit_message_is_reworded() {
         let tmp = repo();
         let dir = tmp.path();
@@ -621,12 +669,12 @@ mod tests {
         let merge_base = git::merge_base(dir, "base").unwrap();
         let changed = git::changed_files(dir, "base").unwrap();
         let src = reviewer("src-only", &["src/**"]);
-        let first = scope_digest(dir, &merge_base, &src, &changed).unwrap();
+        let first = scope_digest(dir, "base", &merge_base, &src, &changed).unwrap();
 
         // Rewording the commit that touched the matched files changes the
         // stated intent the reviewer's prompt carries, so the digest changes.
         git(dir, &["commit", "--amend", "-m", "src: entirely reworded"]);
-        let reworded = scope_digest(dir, &merge_base, &src, &changed).unwrap();
+        let reworded = scope_digest(dir, "base", &merge_base, &src, &changed).unwrap();
         assert_ne!(first, reworded);
 
         // A later commit that touches only unmatched files leaves this
@@ -635,7 +683,7 @@ mod tests {
         git(dir, &["add", "."]);
         git(dir, &["commit", "-m", "docs: unrelated note"]);
         let changed = git::changed_files(dir, "base").unwrap();
-        let after_docs = scope_digest(dir, &merge_base, &src, &changed).unwrap();
+        let after_docs = scope_digest(dir, "base", &merge_base, &src, &changed).unwrap();
         assert_eq!(reworded, after_docs);
     }
 
@@ -649,13 +697,13 @@ mod tests {
         let merge_base = git::merge_base(dir, "base").unwrap();
         let changed = git::changed_files(dir, "base").unwrap();
         let src = reviewer("src-only", &["src/**"]);
-        let plain = scope_digest(dir, &merge_base, &src, &changed).unwrap();
+        let plain = scope_digest(dir, "base", &merge_base, &src, &changed).unwrap();
 
         let path = dir.join("src/run.rs");
         let mut perms = std::fs::metadata(&path).unwrap().permissions();
         perms.set_mode(perms.mode() | 0o111);
         std::fs::set_permissions(&path, perms).unwrap();
-        let executable = scope_digest(dir, &merge_base, &src, &changed).unwrap();
+        let executable = scope_digest(dir, "base", &merge_base, &src, &changed).unwrap();
         assert_ne!(plain, executable, "a chmod must invalidate the carry");
     }
 
@@ -668,13 +716,13 @@ mod tests {
         let merge_base = git::merge_base(dir, "base").unwrap();
         let changed = git::changed_files(dir, "base").unwrap();
         let src = reviewer("src-only", &["src/**"]);
-        let first = scope_digest(dir, &merge_base, &src, &changed).unwrap();
+        let first = scope_digest(dir, "base", &merge_base, &src, &changed).unwrap();
 
         // Retargeting the symlink changes the digest, the same way git would
         // record a different blob for it.
         std::fs::remove_file(dir.join("src/link.rs")).unwrap();
         std::os::unix::fs::symlink("../docs/guide.md", dir.join("src/link.rs")).unwrap();
-        let retargeted = scope_digest(dir, &merge_base, &src, &changed).unwrap();
+        let retargeted = scope_digest(dir, "base", &merge_base, &src, &changed).unwrap();
         assert_ne!(first, retargeted);
     }
 

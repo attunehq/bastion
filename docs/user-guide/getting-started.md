@@ -170,7 +170,10 @@ bastion review --base main
 ```
 
 Bastion computes the files that differ from `main`, selects the reviewers whose
-triggers match, runs them in parallel, and renders progress and verdicts. A blocked
+triggers match, runs them in parallel, and renders progress and verdicts. (On a
+re-run of the same branch, a reviewer that already passed and whose triggered
+files are unchanged carries its pass forward instead of executing again; see
+[the local workflow](./local-workflow.md#re-runs-are-incremental).) A blocked
 review exits non-zero; a clean one exits zero. That exit code is what lets an agent
 (or a shell loop) know whether to keep working:
 
