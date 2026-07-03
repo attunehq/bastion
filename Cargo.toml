@@ -13,6 +13,10 @@ categories = ["command-line-utilities", "development-tools"]
 clap = { version = "4.6.1", features = ["derive", "env"] }
 color-eyre = "0.6.5"
 directories = "6.0.0"
+# `bastion update` unpacks the release `.tar.gz`. flate2's default `miniz_oxide`
+# backend is pure Rust (no zlib/C), so the updater adds no system dependency and
+# keeps every cross target building as cleanly as the rest of Bastion does.
+flate2 = "1"
 globset = "0.4.18"
 hex = "0.4.3"
 hmac = "0.12.1"
@@ -21,10 +25,23 @@ humantime = "2.3.0"
 # REST API. Default features keep the platform-native TLS (SChannel on Windows,
 # OpenSSL on the Linux CI runner) so the build needs no extra C toolchain.
 reqwest = { version = "0.13.4", features = ["json"] }
+# `bastion update` swaps the running binary for a freshly downloaded release. A
+# live executable cannot simply be overwritten on Windows; self-replace
+# encapsulates the platform split (an atomic rename on Unix, the
+# move-aside-and-clean-up dance on Windows) so the updater does not hand-roll it.
+self-replace = "1"
+# Compare the running version against the latest release tag in `bastion update`.
+# Bastion tags are `vX.Y.Z`; dev builds carry a `git describe` suffix that is not
+# a clean release, so the updater parses with semver and treats anything else as a
+# development build to reinstall.
+semver = "1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 serde_yaml_ng = "0.10.0"
 sha2 = "0.10.9"
+# `bastion update` unpacks the `bastion` binary out of the release tarball's
+# `bastion-<target>/` directory. Pure Rust, so it adds no system dependency.
+tar = "0.4"
 tokio = { version = "1.52.3", features = [
     "macros",
     "process",

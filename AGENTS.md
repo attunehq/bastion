@@ -122,6 +122,8 @@ bastion skills install
 bastion skills check
 bastion skills list
 bastion attest
+bastion update
+bastion update --check
 ```
 
 ## Architecture map
@@ -134,9 +136,10 @@ version:
 
 - `build.rs`: derives `BASTION_VERSION` from `git describe --always --tags
   --dirty=-dirty`, with a `BASTION_VERSION` env override and a `Cargo.toml`
-  fallback; also resolves the run-seal secret (`BASTION_SEAL_SECRET` env
-  override, else a generated secret cached under `OUT_DIR`) that `src/seal.rs`
-  embeds at build time.
+  fallback; bakes the rustc target triple as `BASTION_TARGET` (so `bastion
+  update` names the release asset it was built from); also resolves the run-seal
+  secret (`BASTION_SEAL_SECRET` env override, else a generated secret cached
+  under `OUT_DIR`) that `src/seal.rs` embeds at build time.
 - `src/main.rs`: thin binary entrypoint; wires the tokio runtime to
   `bastion::run`.
 - `src/lib.rs`: library root; installs `color_eyre` + `tracing` and dispatches.
@@ -311,6 +314,22 @@ version:
   `.claude/skills/` (Claude Code's native path), kept as exact copies so every
   skill is available through either surface; `tests/skills_mirror.rs` fails the
   build if the two trees drift.
+- `src/update.rs`: the native self-updater behind `bastion update`. `Updater`
+  resolves the latest release from the `releases/latest` redirect (not
+  `api.github.com`, whose unauthenticated rate limit 403s shared NATs, matching
+  the install scripts), downloads the `bastion-<target>.tar.gz` for
+  `BASTION_TARGET` over the same `reqwest` client the GitHub adapter links,
+  verifies it against `checksums.txt`, extracts the binary (`flate2` + `tar`), and
+  swaps it over the running executable (`self-replace`, which owns the Windows
+  move-aside dance). `status`/`Status` compare the running version to the latest
+  with `semver`, treating a dev build or prerelease as `Development` (always
+  offered the reinstall). The module also drives the passive out-of-date nag
+  (`warn_if_outdated`): `cli::run` calls it on every command except `update` and
+  the hidden `__update-check`, it prints to stderr only for an interactive release
+  build with `BASTION_NO_UPDATE_CHECK` unset, and it refreshes a day-TTL cache
+  (under the platform cache dir) in a detached `bastion __update-check` process so
+  the check never blocks or fails the command that ran. `BASTION_REPO` and
+  `BASTION_BASE_URL` override the source (tests point them at a local server).
 - `tests/integration/`: the end-to-end suite (one `integration` test target).
   `main.rs` holds the scenarios; the reusable support is split into sibling modules
   (`fakes.rs` for the `rustc`-compiled fake agent and fake container engine,
