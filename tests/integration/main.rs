@@ -2499,11 +2499,12 @@ fn attest_refuses_an_unsealed_run() {
 }
 
 /// A CI-path review (`--repo`/`--pr`) with `attestations: true` but no note on
-/// HEAD falls back to a full run: the reviewers still execute for real, a
-/// `run.attestation-fallback` event carries a reason naming the missing note, and
-/// that reason is both in the persisted run and printed to stderr.
+/// HEAD runs every reviewer fresh *silently*: a missing note is not a refusal, so
+/// no `run.attestation-fallback` event is recorded, nothing about attestation is
+/// printed, and the report has no line to draw. Only an attestation that was
+/// offered and refused warrants surfacing.
 #[test]
-fn ci_review_without_a_note_falls_back_and_says_why() {
+fn ci_review_without_a_note_runs_fresh_silently() {
     let Some(fake) = tooling() else { return };
 
     let repo = TestRepo::new(&registry_with_attestations(&[Reviewer::new(
@@ -2511,9 +2512,9 @@ fn ci_review_without_a_note_falls_back_and_says_why() {
     )
     .behavior("pass")]));
     // Commit the fixture's dirty tree: a dirty CI checkout falls back before any
-    // note lookup, and this scenario pins the missing-note reason specifically.
-    // The branch marks where the changeset started, since committing on main
-    // would otherwise leave nothing to diff against.
+    // note lookup, and this scenario pins the missing-note (silent) path
+    // specifically. The branch marks where the changeset started, since committing
+    // on main would otherwise leave nothing to diff against.
     repo.branch("basemark");
     repo.commit_all("head");
 
@@ -2536,27 +2537,27 @@ fn ci_review_without_a_note_falls_back_and_says_why() {
     assert_eq!(run.started_count(), 1);
     assert_eq!(run.resolved_count(), 1);
 
-    // The fallback event is in the JSONL stream, names the missing note, and its
-    // reason was also printed to stderr.
-    let reason = run
-        .attestation_fallback_reason()
-        .expect("a run.attestation-fallback event in the jsonl stream");
-    assert!(reason.contains("no attestation note"), "reason: {reason}");
+    // No fallback event: a missing note is silent, not a refusal.
     assert!(
-        run.stderr.contains(reason),
-        "the fallback reason should also be on stderr; stderr:\n{}",
+        run.attestation_fallback_reason().is_none(),
+        "a missing note must not emit a fallback event"
+    );
+    assert!(
+        !run.stderr.to_lowercase().contains("attestation"),
+        "stderr should never mention attestation for a merely un-attested commit; stderr:\n{}",
         run.stderr
     );
 
-    // ...and it persisted in run.jsonl, not just the live stream.
+    // ...and nothing persisted in run.jsonl either.
     let layout = repo.layout();
     let run_id = &store::list_runs(&layout).unwrap()[0].run;
     let persisted = store::read_run(&layout, run_id).unwrap();
-    let persisted_reason = persisted.iter().find_map(|e| match e {
-        RunEvent::AttestationFallback { reason, .. } => Some(reason.clone()),
-        _ => None,
-    });
-    assert_eq!(persisted_reason.as_deref(), Some(reason));
+    assert!(
+        !persisted
+            .iter()
+            .any(|e| matches!(e, RunEvent::AttestationFallback { .. })),
+        "no attestation-fallback event should persist for a missing note"
+    );
 }
 
 /// With `attestations` absent (the default), a CI-path review never looks up a
@@ -2706,7 +2707,9 @@ fn validate_accepts_attestation_schema() {
 }
 
 /// `bastion github report` folds the attestation-fallback notice into the sticky
-/// comment when the run it reports carried one.
+/// comment as a `[!WARNING]` block when the run it reports refused an offered
+/// attestation. Here the refusal is a dirty CI checkout (the fixture leaves the
+/// tree dirty), a genuine rejection rather than a merely absent note.
 #[test]
 fn github_report_carries_the_fallback_notice() {
     let Some(fake) = tooling() else { return };
@@ -2759,8 +2762,9 @@ fn github_report_carries_the_fallback_notice() {
         .find(|r| r.method == "POST" && r.path == "/repos/acme/app/issues/7/comments")
         .expect("a POST creating the sticky comment");
     assert!(
-        comment.body.to_lowercase().contains("attest"),
-        "the sticky comment should carry the fallback notice: {}",
+        comment.body.contains("> [!WARNING]")
+            && comment.body.contains("Attestation was not honored:"),
+        "the sticky comment should carry the fallback notice as a warning block: {}",
         comment.body
     );
 }

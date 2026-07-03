@@ -176,7 +176,7 @@ For the repository's reviewers, the local and GitHub surfaces carry the same dat
 | The aggregate `bastion` check and the sticky PR comment           | `run.completed` event                             |
 | Transcript in the uploaded run artifact                           | saved on disk, `bastion transcript`               |
 | The `[!NOTE]` replay callout and replayed check-run summary lines | `run.attested`; `replayed` on `reviewer.resolved` |
-| A sticky-comment line naming why attestation was not honored      | `run.attestation-fallback` event                  |
+| A sticky-comment `[!WARNING]` block naming why a *refused* attestation was not honored | `run.attestation-fallback` event      |
 
 `bastion github report` runs after `bastion review` finishes, so the per-reviewer checks are created already completed, and the aggregate check and the sticky comment are written once. The local stream additionally carries `run.started` and `reviewer.started` for an agent reacting as the run goes; those have no separate GitHub surface. For the repository's reviewers the data each surface carries is the same; only the local stream is finer-grained than the post-hoc GitHub rendering.
 

@@ -363,12 +363,15 @@ fetching the notes ref (`git fetch origin +refs/notes/bastion:refs/notes/bastion
 
 When attestation replaces execution, the sticky comment opens with a callout
 naming which reviewers replayed, the key that attested, and when; each
-replayed reviewer's check-run summary says so too. When it does not (a missing
-note, an unregistered key, a stale base, or any other mismatch), CI falls back to
-resolving each reviewer the ordinary way and the comment includes the fallback
-reason: a reviewer whose content is unchanged from the branch's previous CI run is
-still carried, and the rest execute fresh. Attestation short-circuits the note
-lookup, not carry.
+replayed reviewer's check-run summary says so too. When an attestation is offered
+but *refused* (an unreadable or unverifiable note, an unregistered key, a stale
+base, a dirty checkout, or any other mismatch), CI falls back to resolving each
+reviewer the ordinary way and the comment carries a `> [!WARNING]` block naming
+the reason: a reviewer whose content is unchanged from the branch's previous CI
+run is still carried, and the rest execute fresh. A PR that simply carries no note
+is not a refusal: CI runs every reviewer fresh and says nothing about attestation,
+so an un-attested PR is never nagged. Attestation short-circuits the note lookup,
+not carry.
 
 A reviewer can opt out of ever being replayed with `attestation: never` on that
 reviewer, for a gate your team wants CI to execute unconditionally regardless

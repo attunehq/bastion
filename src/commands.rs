@@ -304,7 +304,13 @@ pub async fn review(
                 matched,
             )
         }
-        None => (std::collections::BTreeMap::new(), None, None, matched),
+        // No note was offered (`NotAttested`), or attestation was never attempted
+        // (`None`): either way there is nothing to tell the author, so run every
+        // matched reviewer fresh with no event and no stderr line. Surfacing a
+        // "no attestation note found" notice here would nag every un-attested PR.
+        Some(crate::attest::AttestationOutcome::NotAttested) | None => {
+            (std::collections::BTreeMap::new(), None, None, matched)
+        }
     };
 
     // Trigger-scoped digests for everything about to run, stamped onto each
@@ -546,18 +552,18 @@ where
     B: FnOnce() -> Result<C>,
 {
     // Look up the note before deriving CI's own bindings: the ordinary case for
-    // most commits is simply "no note", which is a fallback in its own right and
-    // has nothing to do with whether bindings re-derive cleanly. Deriving
-    // bindings first would record a `could not re-derive CI bindings` fallback
-    // even when there was never a note to replay against, burying the real
-    // "no attestation note found" reason under irrelevant noise.
+    // most commits is simply "no note", which is not a rejection and has nothing
+    // to do with whether bindings re-derive cleanly. Deriving bindings first
+    // would record a `could not re-derive CI bindings` fallback even when there
+    // was never a note to replay against, surfacing a warning for what is really
+    // the unremarkable "this author did not attest" case. A missing note yields
+    // `NotAttested` (silent, run fresh); only a note that was offered and refused
+    // becomes a surfaced `Fallback`.
     let head_sha = gathered.and_then(|g| g.head_sha.as_deref());
     let note = match crate::attest::note_for_review(repo_root, "HEAD", head_sha) {
         Ok(Some(note)) => note,
         Ok(None) => {
-            return Some(crate::attest::AttestationOutcome::Fallback {
-                reason: "no attestation note found on HEAD".to_string(),
-            });
+            return Some(crate::attest::AttestationOutcome::NotAttested);
         }
         Err(err) => {
             return Some(crate::attest::AttestationOutcome::Fallback {
@@ -1488,9 +1494,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plan_attestation_replay_falls_back_with_no_attestation_note_reason_when_absent() {
-        // The ordinary case: no note at all. This must stay the "no attestation
-        // note found" fallback, not get shadowed by an unrelated bindings failure.
+    async fn plan_attestation_replay_is_not_attested_when_note_absent() {
+        // The ordinary case: no note at all. This must resolve to `NotAttested`
+        // (silent, run fresh), not a surfaced fallback, and it must win over an
+        // unrelated bindings failure rather than getting shadowed by it: the
+        // missing-note check runs before `derive_ci_bindings`, so even an
+        // unresolvable base cannot turn "this author did not attest" into a
+        // "could not re-derive CI bindings" warning.
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         git(dir, &["init"]);
@@ -1501,16 +1511,14 @@ mod tests {
         let outcome =
             plan_attestation_replay(dir, "nonexistent-base", &attestation_enabled(), None, &[])
                 .await;
-        match outcome {
-            Some(crate::attest::AttestationOutcome::Fallback { reason }) => {
-                assert!(
-                    reason.contains("no attestation note found"),
-                    "a missing note must report its own reason even when the base is also \
-                     unresolvable, got: {reason}"
-                );
-            }
-            other => panic!("expected a fallback, got: {other:?}"),
-        }
+        assert!(
+            matches!(
+                outcome,
+                Some(crate::attest::AttestationOutcome::NotAttested)
+            ),
+            "a missing note must resolve to NotAttested even when the base is also \
+             unresolvable, got: {outcome:?}"
+        );
     }
 
     #[tokio::test]

@@ -162,9 +162,10 @@ struct RunDigest {
     /// recorded: the reviewers replayed, the attesting key, and when it was
     /// signed. `None` when nothing was replayed.
     attested: Option<AttestedSummary>,
-    /// Why an enabled attestation was not honored, when a
-    /// `run.attestation-fallback` event was recorded. `None` when attestation
-    /// either replayed or was never attempted.
+    /// Why an offered attestation was refused, when a `run.attestation-fallback`
+    /// event was recorded. `None` when attestation replayed, was never attempted,
+    /// or was simply never offered on this commit (a missing note is not a refusal
+    /// and records no event), so an un-attested PR draws no attestation line.
     attestation_fallback: Option<String>,
     /// Whether the run was narrowed to a subset of the triggered reviewers
     /// (`bastion review --reviewer`). A partial verdict must never read as a
@@ -340,7 +341,8 @@ fn comment_body(
         out.push('\n');
     }
     if let Some(reason) = &digest.attestation_fallback {
-        out.push_str(&format!("\n_Attestation was not honored: {reason}._\n\n"));
+        out.push_str(&attestation_fallback_callout(reason));
+        out.push('\n');
     }
 
     if digest.rows.is_empty() {
@@ -444,6 +446,17 @@ fn attestation_callout(attested: &AttestedSummary) -> String {
         truncate_key(&attested.public_key),
         attested.attested_at,
     )
+}
+
+/// The `[!WARNING]` callout drawn when an attestation was offered on HEAD but
+/// not honored, so CI executed every reviewer fresh. Only a rejected attestation
+/// reaches here: a commit that simply carries no note produces `NotAttested`
+/// upstream (`src/attest/replay.rs`), records no `run.attestation-fallback`
+/// event, and so draws nothing. Uses GitHub's `> [!WARNING]` alert, matching the
+/// skills-drift block, so a refused attestation is prominent rather than an
+/// easily missed italic aside.
+fn attestation_fallback_callout(reason: &str) -> String {
+    format!("> [!WARNING]\n> Attestation was not honored: {reason}\n")
 }
 
 /// A truncated rendering of an SSH public key line for display: the key type
@@ -1403,14 +1416,21 @@ mod tests {
     }
 
     #[test]
-    fn comment_notes_a_fallback_reason_in_one_unobtrusive_line() {
+    fn comment_warns_on_a_refused_attestation() {
+        // A `run.attestation-fallback` event is only recorded when an attestation
+        // was offered and rejected (a missing note produces `NotAttested`, no
+        // event), so the report surfaces it prominently: a `[!WARNING]` block, not
+        // an easily missed aside.
         let mut events = sample_events();
         events.push(RunEvent::AttestationFallback {
             run: RunId("r-1".into()),
-            reason: "no attestation note found on HEAD".into(),
+            reason: "the attestation signature does not verify against grace's registered SSH signing keys".into(),
         });
         let body = comment_body(&digest(&events), false, None);
-        assert!(body.contains("no attestation note found on HEAD"));
+        assert!(body.contains("> [!WARNING]"));
+        assert!(
+            body.contains("Attestation was not honored: the attestation signature does not verify")
+        );
         assert!(!body.contains("[!NOTE]"), "a fallback is not a replay");
     }
 

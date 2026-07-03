@@ -269,7 +269,11 @@ the ordinary way through carry or fresh execution, since a dirty working tree's
 reviewers see content no attestation's committed bindings name. Given a clean checkout, it looks up the note on HEAD
 first, falling back to the PR's head SHA when HEAD carries none (CI's
 checkout can be a merge commit, so the note the author actually attested may
-hang off the PR's own head commit instead). Given a note, it verifies the
+hang off the PR's own head commit instead). When *neither* carries a note, no
+attestation was offered: this is not a refusal, so the run resolves to
+`AttestationOutcome::NotAttested`, records no `run.attestation-fallback` event,
+runs every reviewer fresh, and says nothing about attestation on any surface (an
+un-attested PR is the ordinary case and must not be nagged). Given a note, it verifies the
 author's signature against the PR author's GitHub-registered signing keys
 (`GET /users/{username}/ssh_signing_keys`), verifies the run seal with its own
 embedded secret, and checks every binding (head tree, merge-base tree,
@@ -296,16 +300,20 @@ satisfied by an attested local run, who attested it, and which note on the head
 commit backs it.
 
 Every failure is fail-closed to ordinary reviewer resolution, never to a silent
-pass: a dirty CI checkout (checked before note lookup even runs), a missing or
+pass: a dirty CI checkout (checked before note lookup even runs), an unreadable or
 unverifiable note, a key the author has not registered with GitHub, a seal that
 does not verify (tampered, produced by a different release, or carrying an active
 test seam), a binding mismatch, or a stale base all skip replay. The affected
 reviewers then resolve the ordinary way: an eligible unchanged prior pass may
-still carry, and the rest execute. The run records why as a
-`run.attestation-fallback` event, and the sticky comment surfaces the same reason
-as a line under the headline. Replay itself is recorded as a single `run.attested` event covering
-every replayed reviewer, and each replayed reviewer's own `reviewer.resolved`
-event carries `replayed: true`.
+still carry, and the rest execute. Each of these is an attestation that was
+*offered and refused*: the run records why as a `run.attestation-fallback` event,
+and the sticky comment surfaces the reason in a `[!WARNING]` block (the same alert
+mechanism as the skills-drift warning) so a rejected attestation reads as the
+notable event it is. A commit that simply carries no note is *not* on this list:
+it offered nothing to refuse, so it is silent (see above), and only a refusal
+draws the warning. Replay itself is recorded as a single `run.attested` event
+covering every replayed reviewer, and each replayed reviewer's own
+`reviewer.resolved` event carries `replayed: true`.
 
 ### The adopter's two workflow requirements
 

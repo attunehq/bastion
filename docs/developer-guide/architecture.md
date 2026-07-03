@@ -100,8 +100,12 @@ Following one review top to bottom touches most of the crate:
     the run seal, and check every binding against CI's own re-derived values,
     before the runner fans anything out. A routed reviewer the bundle covers and
     that has not opted out replays; everything else continues to carry planning
-    (step 5b), which carries an eligible prior pass or executes it fresh. Every
-    failure degrades the affected reviewers to that same path; a
+    (step 5b), which carries an eligible prior pass or executes it fresh. An
+    attestation that was offered and *refused* (an unreadable or unverifiable note,
+    a seal or binding mismatch, a dirty checkout) degrades the affected reviewers to
+    that same path and records a `run.attestation-fallback` event the report surfaces
+    as a `[!WARNING]`. A commit that offered *no* note is not a refusal: it resolves
+    to `NotAttested`, records no event, and says nothing about attestation. A
     purely local review skips this step entirely. See [Attestation](./attestation.md).
 5b. **Plan carry** (`carry.rs`, both surfaces). Every reviewer about to run
     gets, best effort, a trigger-scoped diff digest (a digest that fails to
