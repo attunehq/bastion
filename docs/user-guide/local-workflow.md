@@ -42,7 +42,7 @@ verdict, with no backend dispatch and no timeout; everything else executes as us
 - `--pr <number>`: the pull request whose description and discussion the reviewers read as context. Requires a repository, from `--repo` or `$GITHUB_REPOSITORY`; passing `--pr` with no repository is an error.
 - `--config-dir <path>`: the user-level config directory to merge personal reviewers from (env `BASTION_CONFIG_DIR`). Defaults to your platform config directory (`~/.config/bastion` on Linux, `~/Library/Application Support/bastion` on macOS, `%APPDATA%\bastion` on Windows). The user-level layer is applied only to a purely local review; a review carrying `--repo`/`--pr` uses the repository's reviewers alone.
 - `--reviewer <name>` (repeatable; alias `--only`): run only these triggered reviewers. An unknown or untriggered name is an error. Excluding a triggered reviewer makes the run *partial* (see below).
-- `--fresh`: execute every triggered reviewer, disabling the incremental carry below.
+- `--fresh`: disable the incremental carry below, so no reviewer reuses a prior local pass. It does not affect attestation replay: a `--repo`/`--pr` run still replays reviewers a verified attestation covers.
 
 ### Re-runs are incremental
 
@@ -75,8 +75,10 @@ never reuses an unsigned prior run.
 ### Running a subset by hand
 
 `--reviewer <name>` narrows the run to reviewers you name, for iterating on one
-stubborn gate without waiting on the rest. The named reviewers always execute
-fresh. When the selection excludes at least one triggered reviewer, the run is
+stubborn gate without waiting on the rest. The named reviewers never carry
+a prior local pass (asking for a reviewer by name means asking for it to run);
+on a `--repo`/`--pr` run, a verified attestation can still replay a selected
+reviewer. When the selection excludes at least one triggered reviewer, the run is
 marked **partial** everywhere it is recorded: the `run.started`/`run.completed`
 events carry `"partial": true`, the human output and `bastion runs` say so, and
 the run cannot be attested. (Naming every triggered reviewer is a full run: the
@@ -128,7 +130,7 @@ The event types:
 
 | Event | Meaning |
 | --- | --- |
-| `run.started` | The run began; lists the reviewers in the plan: each executes, replays from a verified attestation, or (locally) carries from the branch's previous run. Under `--reviewer` the list holds only the selected reviewers, and the event carries `partial: true`. |
+| `run.started` | The run began; lists the reviewers in the plan: each executes, replays from a verified attestation, or (locally) carries from the branch's previous run. Under `--reviewer` the list holds only the selected reviewers, and the event carries `partial: true` when that selection excludes at least one triggered reviewer. |
 | `reviewer.started` | One reviewer began: dispatched to its backend, reconstructed from a verified attestation bundle, or carried from the branch's previous local run; the latter two dispatch no backend. |
 | `reviewer.resolved` | One reviewer finished; carries its `verdict`, `summary`, `findings`, `usage`, and a `has_transcript` flag. Carries `replayed: true` when the verdict came from a verified attestation, and `carried: true` when it was carried forward from the branch's previous local run, instead of a fresh execution. A local run also stamps `scope_digest`, a hash of everything the verdict was keyed to (the reviewer's definition plus its trigger-scoped diffs, commit messages, and untracked content); a later run carries this verdict only when its own digest is identical. |
 | `run.completed` | The aggregate decision and the gate tally, plus the run's wall-clock `duration_ms` and the usage totals (`tokens_in`, `tokens_out`, `cache_read`, `cost_usd`) summed across reviewers. Carries `partial: true` (as does `run.started`) when `--reviewer` narrowed the run. |
