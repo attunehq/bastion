@@ -1,17 +1,18 @@
 //! The run seal: tamper evidence for a persisted run.
 //!
-//! A verdict is a judgment about a changeset under a policy, so a persisted run
-//! is trustworthy only if it demonstrably reviewed what it claims to. The seal is
-//! an HMAC-SHA256, keyed by a secret embedded in the binary at build time, over a
-//! canonical digest of the committed HEAD tree, the merge-base tree, the
-//! `base..HEAD` patch-id, the effective config hash, the seam and dirty flags, and
-//! the resolved reviewer events. See `docs/developer-guide/attestation.md` (the run
-//! seal) for the full design; this module implements the seal.
+//! A verdict is a judgment about a changeset under a policy, so CI can reuse a
+//! persisted run only if the run proves it reviewed the claimed changeset under
+//! the claimed policy. The seal is an HMAC-SHA256, keyed by a secret embedded in
+//! the binary at build time, over a canonical digest of the committed HEAD tree,
+//! the merge-base tree, the `base..HEAD` patch-id, the effective config hash, the
+//! seam and dirty flags, and the resolved reviewer events. See
+//! `docs/developer-guide/attestation.md` (the run seal) for the full design; this
+//! module implements the seal.
 //!
 //! A dirty run (uncommitted or untracked changes present when it ran) is sealed
-//! honestly, with `dirty: true`, but `src/attest.rs` refuses to attest it: a
-//! green review over content that never landed in a commit says nothing about the
-//! committed tree the seal otherwise binds.
+//! with `dirty: true`, but attestation refuses to attest it: a green review over
+//! content that never landed in a commit says nothing about the committed tree
+//! the seal otherwise binds.
 //!
 //! A keyed MAC rather than an asymmetric signature is deliberate: the sealer and
 //! the verifier are the same binary on both ends (the local `bastion` that sealed
@@ -61,8 +62,8 @@ struct SealInput<'a> {
     seams: bool,
     /// Whether the working tree carried uncommitted or untracked changes when the
     /// run reviewed it. Placed next to `seams`: both are process-state flags the
-    /// seal binds so a run that exercised the binary under non-ordinary
-    /// conditions is recorded honestly and later refused by `bastion attest`.
+    /// seal binds so a run under non-ordinary conditions is recorded and later
+    /// refused by `bastion attest`.
     dirty: bool,
     /// The sealed `reviewer.resolved` events, sorted by reviewer name so the
     /// digest does not depend on completion order.
@@ -145,9 +146,9 @@ pub fn embedded_secret() -> &'static [u8] {
 /// ([`crate::backend::container::ENGINE_ENV`]).
 ///
 /// A run that used any of these exercised the binary for real, but not a real
-/// review: `bastion attest` refuses to attest such a run. This
-/// only *records* whether a seam was active on the sealer's box; it says nothing
-/// about whether the reviewer itself behaved honestly.
+/// review: `bastion attest` refuses to attest such a run. This only records
+/// whether a seam was active on the sealer's box; it says nothing about the
+/// reviewer process beyond that environment fact.
 #[must_use]
 pub fn seams_active() -> bool {
     seams_active_from(|name| std::env::var_os(name).is_some())

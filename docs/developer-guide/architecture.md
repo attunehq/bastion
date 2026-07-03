@@ -85,14 +85,17 @@ Following one review top to bottom touches most of the crate:
    context. Empty context leaves every reviewer's prompt unchanged.
 5a. **Verify and plan attestation replay** (`attest/replay.rs`, GitHub CI only). When the
     repository registry sets `attestations: true` and the run carries a GitHub
-    source (`--repo`/`--pr`), `commands::review` looks up the note on HEAD (falling
-    back to the PR's head SHA), verifies its signature against the PR author's
-    GitHub-registered SSH signing keys, verifies the run seal, and checks every
-    binding against CI's own re-derived values, before the runner fans anything
-    out. A routed reviewer the bundle covers and that has not opted out replays;
-    everything else executes fresh in the next step. Every failure degrades to a
-    full run for the affected reviewers; a purely local review skips this step
-    entirely. See [Attestation](./attestation.md).
+    source (`--repo`/`--pr`), `commands::review` first checks whether the CI
+    checkout is dirty (uncommitted tracked changes or untracked files). A dirty
+    checkout skips note lookup entirely: it records a `run.attestation-fallback`
+    event and every reviewer executes fresh. Only a clean checkout proceeds to
+    look up the note on HEAD (falling back to the PR's head SHA), verify its
+    signature against the PR author's GitHub-registered SSH signing keys, verify
+    the run seal, and check every binding against CI's own re-derived values,
+    before the runner fans anything out. A routed reviewer the bundle covers and
+    that has not opted out replays; everything else executes fresh in the next
+    step. Every failure degrades to a full run for the affected reviewers; a
+    purely local review skips this step entirely. See [Attestation](./attestation.md).
 6. **Run** (`runner.rs`). `execute` spawns every matched, non-replayed reviewer onto
    a `JoinSet`, bounds each by its `timeout` (default 15m), and emits
    `reviewer.started` up front (including for a replayed reviewer, so the plan reads

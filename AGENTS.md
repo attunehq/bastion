@@ -139,7 +139,8 @@ version:
   signing-key resolution, and `replay.rs` the CI-side verify-and-replay
   planner (`plan`, `AttestationOutcome`) plus note lookup, which
   `commands::review` calls when the registry sets `attestations: true` and the
-  run carries a GitHub source.
+  run carries a GitHub source, short-circuiting to a fallback (every reviewer
+  fresh, no note lookup) when the CI checkout is dirty.
 - `src/backend/`: the agent execution boundary. `mod.rs` defines the `Backend`
   trait, the deterministic `MockBackend`, `dispatch`, and the shared prompt helpers
   (including the fenced-YAML `SCHEMA_INSTRUCTION`/`extract_verdict` that the Codex

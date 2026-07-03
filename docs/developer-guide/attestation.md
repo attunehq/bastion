@@ -230,11 +230,16 @@ otherwise complete, just unattestable.
 
 `bastion review` in CI attempts a replay only when the repository config sets
 `attestations: true` and the run carries a GitHub source (`--repo`/`--pr`); a
-purely local review never attempts it. It looks up the note on HEAD first,
-falling back to the PR's head SHA when HEAD carries none (CI's checkout can be
-a merge commit, so the note the author actually attested may hang off the
-PR's own head commit instead). Given a note, it verifies the author's
-signature against the PR author's GitHub-registered signing keys
+purely local review never attempts it. It first checks whether the CI
+checkout is dirty (uncommitted tracked changes or untracked files). A dirty
+checkout never reaches note lookup: `commands::review` records a
+`run.attestation-fallback` event with the reason and executes every reviewer
+fresh, since a dirty working tree's reviewers see content no attestation's
+committed bindings name. Given a clean checkout, it looks up the note on HEAD
+first, falling back to the PR's head SHA when HEAD carries none (CI's
+checkout can be a merge commit, so the note the author actually attested may
+hang off the PR's own head commit instead). Given a note, it verifies the
+author's signature against the PR author's GitHub-registered signing keys
 (`GET /users/{username}/ssh_signing_keys`), verifies the run seal with its own
 embedded secret, and checks every binding (head tree, merge-base tree,
 patch-id, config hash) against its own re-derived values. Then, per routed
@@ -258,11 +263,12 @@ does for the drift advisory. Anyone reading the PR can see that the gate was
 satisfied by an attested local run, who attested it, and which note on the head
 commit backs it.
 
-Every failure is fail-closed to a full run, never to a silent pass: a missing
-or unverifiable note, a key the author has not registered with GitHub, a seal
-that does not verify (tampered, produced by a different release, or carrying
-an active test seam), a binding mismatch, or a stale base all mean the
-reviewers simply execute. The run records why as a `run.attestation-fallback`
+Every failure is fail-closed to a full run, never to a silent pass: a dirty CI
+checkout (checked before note lookup even runs), a missing or unverifiable
+note, a key the author has not registered with GitHub, a seal that does not
+verify (tampered, produced by a different release, or carrying an active test
+seam), a binding mismatch, or a stale base all mean the reviewers simply
+execute. The run records why as a `run.attestation-fallback`
 event, and the sticky comment surfaces the same reason as a line under the
 headline. Replay itself is recorded as a single `run.attested` event covering
 every replayed reviewer, and each replayed reviewer's own `reviewer.resolved`
