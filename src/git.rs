@@ -48,6 +48,10 @@ fn run_git_with_stdin(cwd: &Path, args: &[&str], stdin_bytes: &[u8]) -> Result<S
         .wrap_err("failed to invoke git; is it installed and on PATH?")?;
 
     // The child's stdin handle is always present for a `Stdio::piped()` spawn.
+    #[expect(
+        clippy::expect_used,
+        reason = "stdin is present on a Stdio::piped() spawn"
+    )]
     child
         .stdin
         .take()

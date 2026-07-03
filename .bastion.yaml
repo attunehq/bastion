@@ -13,6 +13,18 @@
 # reviewer runs on the Codex backend, billed to the maintainer's ChatGPT
 # subscription; see the authentication notes in
 # docs/developer-guide/github-adapter.md. Adapt it to your repository.
+#
+# The registry is deliberately small. An LLM reviewer runs on every matched
+# changeset forever, so each one has to earn its tokens: a reviewer exists here
+# only when the defect it catches is real, recurring, and needs judgment. A
+# defect a deterministic check can catch belongs in a lint, not here:
+# unwrap/expect discipline and `# Errors` docs are clippy lints in Cargo.toml,
+# Unicode-dash policy is `nudge check`, user-guide frontmatter and link
+# integrity is `tests/user_guide_integrity.rs`, and the skills mirror is
+# `tests/skills_mirror.rs`. Broad code-quality concerns (module boundaries,
+# parse-don't-validate, test coverage) are enforced at write time by the
+# repo-local skills under `.agents/skills/` rather than at review time, where
+# each opinion costs a full review cycle.
 
 # Let CI replay a signed `bastion attest` run instead of re-executing
 # reviewers; see docs/developer-guide/attestation.md.
@@ -22,41 +34,34 @@ attestations: true
 # itself (an explicit field on a reviewer wins). Every reviewer below pins
 # `backend: codex`, which satisfies the rule that an inherited model needs a
 # pinned backend (a model under `backend: any` is a load error). The Codex backend
-# forwards `model` as `-m` and `effort` as `model_reasoning_effort`, so this
-# registry pins Codex's `gpt-5.5` at high effort. See
+# forwards `model` as `-m` and `effort` as `model_reasoning_effort`. Medium
+# effort is the default; only the trust-boundary gate below opts up to high,
+# because it is the one reviewer whose misses ship real bugs. See
 # docs/user-guide/authoring-reviewers.md#registry-wide-defaults.
 defaults:
   model: gpt-5.5
-  effort: high
+  effort: medium
 
 reviewers:
-  - name: single-responsibility
-    trigger: [src/**/*.rs]
-    mode: gate
-    backend: codex
-    prompt: |
-      Review the changeset to determine whether any one file concentrates too
-      many unrelated responsibilities. If a file has clearly taken on multiple
-      distinct concerns that should be separate modules, block the PR and name
-      the file(s) and the concerns; otherwise approve it. A single large but
-      cohesive module (everything in it serving one concern) is not a violation.
-
-  - name: error-handling
-    trigger: [src/**/*.rs]
-    mode: gate
-    backend: codex
-    prompt: |
-      Review the changeset for error-handling discipline: no `.unwrap()` or
-      `.expect()` on recoverable errors in non-test code, errors propagated with
-      `?` and given context, and gates that fail closed. Block the PR if you find
-      a recoverable error that can panic in production; otherwise approve it.
-      Panics in `#[cfg(test)]` code and in genuinely-unreachable invariants that
-      are documented as such are acceptable.
-
+  # The one reviewer with a proven record of catching shipping bugs (the
+  # dirty-worktree attestation hole, the seal-time TOCTOU), so it keeps high
+  # effort. Its trigger is the trust boundary its prompt already declares as
+  # its scope, not all of src/: the modules where a verdict is produced live,
+  # aggregated, sealed, and attested. A change elsewhere cannot violate the
+  # invariant, so it should not pay for this reviewer.
   - name: fail-closed-gates
-    trigger: [src/**/*.rs]
+    trigger:
+      [
+        src/runner.rs,
+        src/backend/**,
+        src/verdict.rs,
+        src/commands.rs,
+        src/seal.rs,
+        src/attest/**,
+      ]
     mode: gate
     backend: codex
+    effort: high
     prompt: |
       Bastion's core safety invariant is that gates fail closed, advisors fail
       open, and every verdict is internally consistent. That invariant is
@@ -97,41 +102,6 @@ reviewers:
       block, advisors never gate, and any rendering surface faithfully reflects the
       recorded decision without turning a block into a pass.
 
-  - name: parse-dont-validate
-    trigger: [src/**/*.rs]
-    mode: advisor
-    backend: codex
-    prompt: |
-      This repo follows parse-don't-validate: data crossing a boundary (config
-      files, CLI arguments, git output, subprocess output, agent responses) should
-      be parsed once into a precise type (a newtype or enum that makes invalid
-      states unrepresentable) rather than carried around stringly-typed and
-      re-checked at each use. As an advisor, report as optional findings any new
-      boundary that validates-then-passes-through raw strings or integers where a
-      parsed type would remove a class of bugs, or any code that re-validates data
-      that was already parsed upstream. Do not block.
-
-  - name: test-coverage
-    trigger: [src/**/*.rs]
-    mode: advisor
-    backend: codex
-    prompt: |
-      Check whether new or changed behavior in this changeset is covered by
-      tests. This is advisory: report uncovered behavior as optional findings so
-      the author can decide, but do not block.
-
-  - name: public-api-docs
-    trigger: [src/**/*.rs]
-    mode: advisor
-    backend: codex
-    prompt: |
-      This crate sets `#![warn(missing_docs)]` and documents fallible public
-      functions with a `# Errors` section. As an advisor, check that new or
-      changed public items (modules, types, struct fields, functions, trait
-      methods) carry a doc comment, and that public functions returning `Result`
-      describe their failure conditions under a `# Errors` heading. Report gaps as
-      optional findings; do not block.
-
   - name: release-surface-robustness
     trigger:
       [
@@ -142,8 +112,8 @@ reviewers:
     mode: gate
     backend: codex
     prompt: |
-      Review changes to the public install and release path for robustness: the
-      install scripts and the release/installer workflows. Block the PR
+      Review changes to the public install and release path (the install
+      scripts and the release/installer workflows) for robustness. Block the PR
       if any of the following hold; otherwise approve it.
 
       - An installer downloads a release artifact without verifying its SHA-256
@@ -160,26 +130,6 @@ reviewers:
         names, default install locations, or fail-closed behavior; or either
         installer's archive names and platform targets disagree with what the
         release workflow's build matrix actually produces.
-
-  - name: shell-script-footguns
-    trigger: [scripts/**, ".github/workflows/**"]
-    mode: advisor
-    backend: codex
-    prompt: |
-      As an advisor, review shell and PowerShell code (standalone scripts under
-      scripts/ and inline `run:` steps in workflows) for portability footguns
-      that tend to fail silently or only in CI. Report these as optional findings;
-      do not block.
-
-      - bash that does not run under `set -euo pipefail`, or unquoted variable
-        expansions that break on spaces or globbing.
-      - PowerShell that captures a command's output by assignment or `| Out-String`
-        while the producing code emits via `Write-Host`. `Write-Host` writes to the
-        information stream, which success-stream capture misses, so the variable
-        ends up empty; the fix is `Write-Output`/`return` or an explicit `6>&1`
-        redirect when capturing.
-      - Reliance on interactive-only behavior (prompts, paging, a TTY) in a
-        non-interactive CI shell.
 
   - name: embedded-asset-line-endings
     trigger: [skills/**, src/skills.rs, .gitattributes]
@@ -216,46 +166,29 @@ reviewers:
       source edits, prose-only asset wording changes, or comparisons that already
       normalize newlines are not violations, so approve them.
 
-  - name: user-guide-integrity
-    trigger: [docs/user-guide/**]
-    mode: gate
-    backend: codex
-    prompt: |
-      The user guide under docs/user-guide is single-sourced: the same markdown
-      is published at bastion.jessica.black/guide, where the site build sorts and
-      routes chapters by their frontmatter and rewrites their relative `.md`
-      links to `/guide/*` routes (links that leave the guide are rewritten to
-      GitHub URLs). A change that is fine to read on GitHub can therefore break
-      the published site. You are running in the repository, so inspect the
-      actual files under docs/user-guide and the link targets directly.
-
-      Block the PR if any of the following is definitely true for a changed file;
-      otherwise approve it. When you cannot confirm a problem, approve.
-
-      - A chapter is missing required frontmatter: every file must have a YAML
-        frontmatter block with `title` (string), `summary` (string), and `order`
-        (number). A new chapter without it will not render.
-      - Two chapters share the same `order` value (the site sorts by it, so a
-        collision makes navigation order undefined).
-      - An in-guide relative link (e.g. `./concepts.md` or
-        `./concepts.md#a-heading`) points to a docs/user-guide file that does not
-        exist, or to a `#heading` anchor that does not exist in the target
-        chapter. Once rewritten to a `/guide` route it would 404.
-      - A relative link that leaves the guide (e.g. `../developer-guide/x.md`,
-        `../../.bastion.yaml`) resolves to a repository path that does
-        not exist. The build turns these into GitHub links, so a dead path is a
-        dead link.
-
+  # The docs gate. Its code-side trigger is the user-visible surface (the CLI
+  # tree, the handlers, the registry schema, the verdict/event schema), not all
+  # of src/: an internal change to the runner or a backend cannot make the user
+  # guide wrong, so it does not trigger a docs review.
   - name: user-docs-in-sync
-    trigger: [src/**/*.rs, docs/user-guide/**]
+    trigger:
+      [
+        src/cli.rs,
+        src/commands.rs,
+        src/config.rs,
+        src/reviewer.rs,
+        src/verdict.rs,
+        src/event.rs,
+        docs/user-guide/**,
+      ]
     mode: gate
     backend: codex
     prompt: |
       The user guide under docs/user-guide is the end-user documentation for
-      Bastion: it describes the CLI a user runs and the policy they author:
-      commands and subcommands, their flags and defaults, exit-code semantics,
+      Bastion: it describes the CLI a user runs and the policy they author
+      (commands and subcommands, their flags and defaults, exit-code semantics,
       the reviewer/registry schema, configuration, and example JSONL event/verdict
-      output. It must stay truthful about how the shipped tool behaves. You are
+      output). It must stay truthful about how the shipped tool behaves. You are
       running in the repository, so read the relevant user-guide chapters and the
       changed code directly.
 
@@ -279,64 +212,22 @@ reviewers:
       matching docs were updated (or already cover it), approve. When you block,
       name the exact command, flag, or field and the chapter that must change.
 
-  - name: contributor-docs-in-sync
-    trigger:
-      [src/**/*.rs, build.rs, docs/developer-guide/**, AGENTS.md, CONTRIBUTING.md]
-    mode: gate
-    backend: codex
-    prompt: |
-      The contributor documentation, meaning docs/developer-guide/ (architecture,
-      the backend boundary, conventions, and the design references), AGENTS.md,
-      and CONTRIBUTING.md, describes how Bastion is built for people working ON it:
-      the module map and the life of a review, the Backend trait and the
-      subprocess seam, the data/store layout, the verdict/event schema, version
-      derivation and the build flow, and the release runbook. It must stay
-      truthful about the actual code and process. You are running in the
-      repository, so read the relevant developer-guide sections (and AGENTS.md /
-      CONTRIBUTING.md) and the changed code directly.
-
-      This is a gate. Block the PR if either of the following holds; otherwise
-      approve it.
-
-      - CONTRADICTION: this change alters something the contributor docs describe
-        (the module/architecture map, the backend boundary or dispatch, the
-        runner, the data-directory/store layout, the verdict/event schema, the
-        version-derivation or build flow, or a stated convention) in a way that
-        makes an existing statement in docs/developer-guide, AGENTS.md, or
-        CONTRIBUTING.md now wrong, and that documentation was not updated to match.
-      - OMISSION: this change adds a new architectural element those docs are
-        meant to cover (a new module or subsystem, a new backend, a new CLI
-        surface in the architecture map, a new persisted artifact, a changed
-        build or release step) and the contributor docs were not updated to
-        describe it.
-
-      Judge against what the contributor docs actually claim. A change that does
-      not touch anything they describe (an internal edit fully contained within
-      an already-documented module, a test-only change, a typo fix) does not
-      require a docs update, so approve it. When the relevant docs were updated
-      (or already cover the change), approve. When you block, name the exact code
-      element and the doc section that must change.
-
-  # Prose voice. Keeps first-party copy free of AI-register "slop": the marketing
-  # site, the guides, the developer docs, and the top-level project markdown. The
-  # tells are structural, not lexical, so the prompt spells them out and the
-  # reviewer is self-contained on any backend. The companion `stop-slop` skill
-  # (.claude/skills/stop-slop) holds the full reference and before/after examples;
-  # the prompt below is self-contained, so it works without that skill loaded. Once
-  # the `skills` capability is provisioned, this reviewer can opt into `stop-slop`
-  # to load that reference into the agent's context (see
-  # docs/developer-guide/design.md). A gate: prose voice is a judgment call, but
-  # this project treats slop in user-facing prose as a merge blocker. The prompt
-  # demands confidence before a flag: each false block costs the author a full
-  # review cycle, so borderline constructions pass.
+  # Prose quality, one pass. This gate carries two checklists that used to be
+  # separate reviewers reading the same files: AI-register "slop" (structural
+  # tells, not vocabulary) and snapshot discipline (docs describe the shipped
+  # release in plain present tense and never advertise unbuilt features). The
+  # trigger covers first-party user-facing prose only; repository-internal
+  # markdown (AGENTS.md, .github templates) is the maintainer's own surface and
+  # is not worth a review pass. Unicode-dash policy is not in this prompt at
+  # all: `nudge check` enforces it mechanically. A gate: each false block costs
+  # the author a full review cycle, so the prompt demands confidence before a
+  # flag and borderline constructions pass.
   #
-  # The trigger covers first-party authored markdown (the roots are enumerated
-  # because trigger globs are OR-combined with no negation). For skills, only the
-  # bundled source under skills/** is reviewed: that is what `bastion skills install`
-  # ships into a consuming repo. The top-level skill dirs (.agents/skills/** and
-  # .claude/skills/**, kept as exact mirrors; see tests/skills_mirror.rs) are not
-  # reviewed: they hold installed copies and vendored upstream trees this project
-  # does not police.
+  # For skills, only the bundled source under skills/** is reviewed: that is
+  # what `bastion skills install` ships into a consuming repo. The top-level
+  # skill dirs (.agents/skills/** and .claude/skills/**, kept as exact mirrors;
+  # see tests/skills_mirror.rs) hold installed copies and vendored upstream
+  # trees this project does not police.
   - name: prose-anti-slop
     trigger:
       [
@@ -344,41 +235,36 @@ reviewers:
         docs/**/*.md,
         site/**/*.md,
         skills/**/*.md,
-        ".github/**/*.md",
         README.md,
         CONTRIBUTING.md,
         SECURITY.md,
         CODE_OF_CONDUCT.md,
-        AGENTS.md,
-        CLAUDE.md,
       ]
     mode: gate
     backend: codex
     prompt: |
-      As a gate, review only the user-facing PROSE in the changed files for
-      AI-register "slop": the structural tics that make copy read as machine-
-      written. The tells are structural, not vocabulary, so do not just hunt for
-      buzzwords.
+      As a gate, review only the user-facing PROSE in the changed files, on two
+      axes: AI-register "slop" (the structural tics that make copy read as
+      machine-written) and, for files under docs/, snapshot discipline (the docs
+      describe the shipped release as it is). You are running in the repository,
+      so you can check whether something a doc describes actually exists in the
+      code.
 
       Decision:
 
-      - If the changed prose carries one or more slop tells from the list below,
-        return verdict: block. Enumerate EVERY instance across all changed prose in
+      - If the changed prose carries one or more of the defects below, return
+        verdict: block. Enumerate EVERY instance across all changed prose in
         this single pass: emit one blocking finding per instance, each naming the
-        file, the line or sentence, which tell it is, and a shorter rewrite that
-        keeps every fact. Do not stop after the first tell or once you have enough
-        to block. A partial list costs the author another full review cycle per
-        remaining tell, so scan every changed prose file and report the complete
-        set before you finish.
+        file, the line or sentence, which defect it is, and the fix (a shorter
+        rewrite that keeps every fact, a present-tense rewrite, or a deletion).
+        Do not stop after the first one; a partial list costs the author another
+        full review cycle per remaining defect.
       - If the changed prose is clean, return verdict: pass.
-      - Flag a construction only when you are confident it is a tell, not merely
-        when it resembles one. A false block costs the author a full review
-        cycle, so a sentence that could read either way passes. Slop worth
-        blocking is unambiguous: the sentence is doing rhetorical work and
-        carries no fact that would survive the rewrite. Flag slop, not every
-        stylistic choice.
+      - Flag a construction only when you are confident it is a defect, not
+        merely when it resembles one. A false block costs the author a full
+        review cycle, so a sentence that could read either way passes.
 
-      Flag these:
+      SLOP TELLS (all changed prose):
 
       - Virtue or character framing: prose that asserts the product is honest,
         trustworthy, principled, humble, or "knows its edges" instead of stating
@@ -408,16 +294,37 @@ reviewers:
         terminal period). Suggest varying them; some can be plain noun phrases.
       - The meta-pattern: every sentence doing rhetorical work. Real copy is
         lumpier and lets some sentences be flat and informational.
-      - Em dashes or en dashes, and the literal "--" used as a dash, in prose:
-        this project writes plain ASCII, so recast with a comma, a colon, or
-        parentheses. Ignore "--flag" forms inside commands and code.
+
+      SNAPSHOT DEFECTS (changed files under docs/ only). Documentation is
+      reference material read on a specific version, so it must not narrate
+      against a moving present or advertise features that do not exist:
+
+      - Temporal framing of current behavior: "X now ships / is now / just
+        landed", "recently", "newly", floating "today" or "currently" meaning
+        "in this version", change-tracking headers ("What ships today"). The fix
+        is plain present tense.
+      - Speculative future features: a named artifact that is not shipped (a
+        packaged GitHub Action, a GitHub App), a described behavior the code
+        does not do (live progress, a rendering marked "target" or "when it
+        lands"), or a roadmap list. The fix is to DELETE it, not soften it: a
+        doc should not advertise what was never built.
+      - The one allowed exception (do NOT flag): a short present-tense note
+        about incomplete behavior that hangs off a configuration or schema
+        option a user can already set (a `capabilities` flag, a `backend`
+        value, a registry key): "you can set X, but today it fails closed"
+        prevents a surprise, so it stays. The test is whether the note is tied
+        to a real user-settable surface, not whether it mentions the future.
+      - Do NOT flag temporal words that are not about Bastion's feature
+        evolution: "the latest run", "recent runs" (the run index), tutorial
+        narration to the reader ("you now have a working reviewer"), or general
+        statements about the world rather than the product.
 
       Discipline:
 
       - Touch only prose. Leave code blocks, YAML, CLI examples, command flags,
         tables, and quoted or third-party material exactly as they are.
       - Do not over-correct. Flat, fragment-phobic, antithesis-phobic prose is its
-        own tell; one beat of personality per section is fine. Block slop, not
+        own tell; one beat of personality per section is fine. Block defects, not
         every stylistic choice.
       - Apply the test: if a fact survives the rewrite and the copy got shorter,
         the cut was slop. If a rewrite would drop information, do not suggest it.
@@ -427,245 +334,69 @@ reviewers:
       - If the `stop-slop` skill is available in your context, use it for the full
         reference and the before/after examples.
 
-  # Documentation as a snapshot. The guides under docs/ are reference material for
-  # one release, not a changelog or a roadmap: a reader on any version should see the
-  # tool described as it is. Two defects break that. (1) Temporal framing of current
-  # behavior: "X now ships", "currently", "recently added", floating "today", which
-  # reads as wrong the moment a later release lands; the fix is plain present tense.
-  # (2) Speculative future features: prose describing things that do not exist (a
-  # packaged action, a GitHub App, live progress, a planned rendering, a marketplace,
-  # anything labeled "forward-looking" or "the target shape"); the fix is to DELETE
-  # it, not soften it, because a doc should not advertise what was never built. The
-  # one legitimate forward-reference is a "not implemented / fails closed" note for a
-  # CONFIG or SCHEMA surface a reader can actually set but that does not work yet (the
-  # `pi` backend, the `mcp` and `skills` capabilities, network scoping): the config
-  # implies behavior that silently does not happen, so the note keeps a user from
-  # being burned. A gate, like the prose-voice one above: a false block is cheap to
-  # override, and both defects are recurring, mechanical tells.
-  - name: docs-as-snapshot
-    trigger: [docs/**/*.md]
-    mode: gate
-    backend: codex
-    prompt: |
-      As a gate, review the changed documentation prose so that it reads as a
-      snapshot of the shipped release: it describes the tool as it is, does not
-      narrate functionality against a moving present, and does not advertise features
-      that do not exist. Documentation is reference material read on a specific
-      version. You are running in the repository, so you can check whether something
-      a doc describes actually exists in the code.
-
-      Decision:
-
-      - If the changed prose has one or more of the defects below, return verdict:
-        block. Enumerate EVERY instance across all changed docs in this single pass:
-        emit one blocking finding per instance, each naming the file, the line or
-        sentence, which defect it is, and the fix (a present-tense rewrite, or a
-        deletion). Do not stop after the first one.
-      - If the changed prose is clean, return verdict: pass.
-      - Bias toward catching it: a false block is cheap to override. Still keep the
-        gate signal, not noise, by respecting the "do not flag" list below.
-
-      Defect 1, temporal framing of current behavior. Flag wording that dates a
-      statement about what Bastion does against an unstated clock, and rewrite it in
-      plain present tense:
-
-      - Moving-present verbs: "X now ships / now posts / now does / now supports",
-        "is now", "as of today", "these days", "nowadays".
-      - Recency or novelty: "recently", "newly", "just added / just landed / just
-        shipped", "the latest addition".
-      - Floating "today" / "currently" meaning "in this version" while describing
-        behavior ("currently resolves to", "today it posts").
-      - Change-tracking headers that bake the clock into the structure ("What ships
-        today", "Shipped today").
-
-      Defect 2, speculative future features. Flag prose that describes functionality
-      that does not exist in this release as if it were designed, coming, or the
-      intended shape, and say to REMOVE it (do not soften it to present tense, since
-      the feature is not real):
-
-      - A named artifact that is not shipped (for example a packaged GitHub Action, a
-        GitHub App, a `review-action`), including example code that uses it.
-      - A described behavior that the code does not do: live progress, spinners, a
-        live-updating aggregate table, inline diff review comments, a rendering or
-        layout marked "target" / "forward-looking" / "when it lands" / "would".
-      - A roadmap or "future" list of features that might be built later.
-
-      The one allowed exception (do NOT flag): a note about future or incomplete
-      behavior that hangs off a configuration or schema option a user can already
-      set. When a reader can write the field today (a `capabilities` flag like
-      `network` / `mcp` / `skills`, a `backend` value, a `runner` block, any registry
-      key), a short note that it is not yet implemented, fails closed, or will behave
-      differently later prevents a surprise, so it is allowed even though it points
-      forward. The test is whether the prose is tied to a real, user-facing surface
-      the doc is documenting, not whether it mentions the future: "you can set X, but
-      today it fails closed / is unscoped / does nothing" is fine; "a packaged action
-      / GitHub App / live progress is coming" is not, because there is no option a
-      reader can set behind it. Keep the allowed note short and present tense (one
-      line: "settable, but not implemented / fails closed / changes later"), never a
-      roadmap or a dated promise.
-
-      Also do NOT flag:
-
-      - Temporal words that are not about Bastion's feature evolution: "the latest
-        run", "recent runs", "what ran recently" (the run index), the changeset
-        definition (uncommitted/untracked edits), tutorial narration to the reader
-        ("you now have a working reviewer"), dates in frontmatter, and general
-        statements about the world or industry rather than the product.
-      - Honest present-tense scope or non-goal statements ("the adapter does not
-        integrate with merge queues", "out of scope for the current design") that
-        state a boundary without promising future work.
-      - Anything inside code blocks, YAML, CLI examples, command flags, reviewer-
-        prompt example text, quoted error strings, or other quoted or third-party
-        material. Touch only prose.
-
-      When you block, name the file and the exact phrase, and give the fix. When the
-      changed prose reads as a clean snapshot of the release, approve.
-
-  # Table markup. A header-plus-rows tabular view must share one set of column
-  # tracks (a real <table>, or one grid container whose rows are subgrids or use
-  # display:contents), never a separate CSS grid per row. Independent per-row
-  # grids recompute their tracks from each row's own content, so a wider cell in
-  # one row (a badge, a longer label) silently shifts that row's later columns
-  # out of alignment with the rows above. This is a gate because column drift is
-  # a visible rendering bug and the structural fix is mechanical.
-  - name: table-column-alignment
-    trigger: [site/src/**/*.astro]
-    mode: gate
-    backend: codex
-    prompt: |
-      As a gate, review changed Astro components for tabular, column-aligned
-      views built as a separate CSS grid per row instead of as one table. A
-      tabular view here means a column header row plus repeating data rows whose
-      cells are meant to line up into shared columns (a registry, a ledger, a
-      results grid).
-
-      The bug this catches: when the header and each row are their own element,
-      each with its own `display: grid; grid-template-columns: ...`, the column
-      tracks are recomputed per row from that row's own content. Any
-      content-sized (`auto`) or flexible (`fr`) track then resolves to a
-      different width on a row whose content is wider (a badge, a longer label),
-      so that row's later columns drift out of alignment with the rows above it.
-      A real table, or one grid container the header and rows share, computes the
-      tracks once, so the columns cannot drift.
-
-      Block the PR if a changed file introduces or keeps a tabular,
-      column-aligned view whose header and data rows each declare their own
-      `grid-template-columns`, rather than one of:
-
-        - a real `<table>` (`thead`/`tbody`/`tfoot`) with one set of column
-          widths (for example via a `<colgroup>`), or
-        - a single grid container whose header and rows are subgrids or use
-          `display: contents`, so every row resolves against the same tracks.
-
-      When you block, name the file, the header and row classes, and which of the
-      two approaches fits.
-
-      Otherwise approve. Do not block these:
-
-        - Non-tabular layouts: page and section grids, two-up card layouts, a
-          connector between panels, anything where sibling rows are not meant to
-          share columns.
-        - Independent cards or list items that use grid internally but do not
-          need to align column-for-column with their siblings.
-        - A per-row grid whose every track is a fixed length (no `auto`, no
-          `fr`): fixed tracks resolve identically on every row, so they cannot
-          drift. A shared table is still cleaner, but this is not a block.
-        - Markdown tables and any existing `<table>`, which already share tracks.
-
-  # Deploy trigger coverage. The site is single-sourced: the Astro content
-  # collection in site/src/content.config.ts globs markdown from outside site/
-  # (today ../docs/user-guide), so the built site depends on files the "Deploy
-  # site" workflow does not sit next to. If that workflow's push `paths:` filter
-  # does not list every directory the build reads, a docs-only change merges
-  # without redeploying and the published site silently goes stale. This is a
-  # gate because a stale deploy is a real, user-visible regression and the fix
-  # (widen the filter) is mechanical.
-  - name: deploy-trigger-coverage
-    trigger: [".github/workflows/site.yml", "site/src/content.config.ts"]
-    mode: gate
-    backend: codex
-    prompt: |
-      The marketing site in site/ is single-sourced: site/src/content.config.ts
-      loads guide content with a glob whose `base` points outside site/ (today
-      ../docs/user-guide). The "Deploy site" workflow (.github/workflows/site.yml)
-      only redeploys on a push that matches its `paths:` filter, so every external
-      directory the content config reads must appear in that filter, or a change to
-      those files merges without redeploying and the live site goes stale. You are
-      running in the repository, so read both files directly.
-
-      This is a gate. Block the PR if the following is definitely true for the
-      change; otherwise approve it. When you cannot confirm a problem, approve.
-
-      - After this change, site/src/content.config.ts globs content from a
-        directory outside site/ (a `base` that escapes site/, for example
-        ../docs/...) that is NOT covered by the push `paths:` filter in
-        .github/workflows/site.yml, AND that filter is restrictive (it declares
-        `paths:` at all rather than matching every push to the branch). A glob
-        base that stays under site/ is already covered by the existing `site/**`
-        entry, so it is not a violation.
-
-      When you block, name the content-collection base directory that is read and
-      the `paths:` entry that must be added to cover it. Judge only deploy-trigger
-      coverage for the site build. Unrelated workflow edits, or content-config
-      changes that stay within already-covered directories, are not violations, so
-      approve them.
-
-  # Open Graph card sync. The social-preview image at site/public/og.png is not
-  # authored by hand: site/scripts/og-gen.mjs holds an HTML template with the
-  # card's headline, tag line, brand wordmark, and domain hard-coded as strings,
-  # and renders that template to the PNG. Those strings duplicate the site's own
-  # copy, which is single-sourced elsewhere: the hero headline in
-  # site/src/components/Hero.astro, the default title/og:title in
-  # site/src/layouts/Base.astro, and the footer tag line and domain in
-  # site/src/components/Footer.astro. When the site's copy changes but the
-  # generator template does not, the card advertises a headline the site no longer
-  # uses; when the template changes but the rendered PNG is not regenerated, the
-  # committed image drifts from the template it claims to come from. A gate,
-  # because a stale social card is a real, user-visible regression and the fix
-  # (edit the template, or rerun `node scripts/og-gen.mjs`) is mechanical.
-  - name: og-card-in-sync
+  # Site integrity, one pass. Three narrow mechanical concerns that share a
+  # surface (the Astro site), merged so a site-touching change runs one
+  # reviewer instead of three: column alignment in tabular views, deploy-
+  # trigger coverage for externally-sourced content, and the generated Open
+  # Graph card staying in sync with the site copy it mirrors. Each concern
+  # only applies when its files are in the changeset; the others pass silently.
+  - name: site-integrity
     trigger:
       [
+        site/src/**/*.astro,
+        site/src/content.config.ts,
         site/scripts/og-gen.mjs,
         site/public/og.png,
-        site/src/components/Hero.astro,
-        site/src/layouts/Base.astro,
-        site/src/components/Footer.astro,
+        ".github/workflows/site.yml",
       ]
     mode: gate
     backend: codex
     prompt: |
-      The Open Graph card at site/public/og.png is the social-preview image for
-      bastion.jessica.black. It is generated, not hand-drawn: site/scripts/og-gen.mjs
-      holds an HTML template whose headline (its `<h1>`), tag line (its `.tag`), and
-      footer domain are hard-coded strings, rendered to the PNG by `node
-      scripts/og-gen.mjs`. Those strings restate copy the site already owns
-      elsewhere: the hero headline in site/src/components/Hero.astro, the default
-      `<title>` / og:title in site/src/layouts/Base.astro, and the footer tag line
-      and domain in site/src/components/Footer.astro. You are running in the
-      repository, so read the generator template and the site source directly.
+      As a gate, review the changed site files for three mechanical defects. You
+      are running in the repository, so read the referenced files directly. Each
+      concern applies only when the changeset touches its files; when you cannot
+      confirm a problem, approve. Block the PR if any of the following is
+      definitely true; otherwise approve it.
 
-      This is a gate. Block the PR if either of the following is definitely true
-      after this change; otherwise approve it. When you cannot confirm a problem,
-      approve.
+      CONCERN 1, table column drift (changed .astro components). A tabular,
+      column-aligned view (a column header row plus repeating data rows whose
+      cells are meant to line up: a registry, a ledger, a results grid) must
+      share one set of column tracks. When the header and each row are their own
+      element, each with its own `display: grid; grid-template-columns: ...`,
+      any content-sized (`auto`) or flexible (`fr`) track resolves per row, so a
+      row with wider content (a badge, a longer label) silently drifts out of
+      alignment with the rows above it. Block a changed file that introduces or
+      keeps such a per-row grid rather than one of: a real `<table>`
+      (`thead`/`tbody`, one set of column widths), or a single grid container
+      whose header and rows are subgrids or use `display: contents`. Do NOT
+      block: non-tabular layouts (page grids, card layouts), independent cards
+      that need no cross-row alignment, per-row grids whose every track is a
+      fixed length (fixed tracks cannot drift), markdown tables, and existing
+      `<table>` markup. When you block, name the file, the header and row
+      classes, and which fix fits.
 
-      - CONTRADICTION: this change edits the site copy the card mirrors (the hero
-        headline in Hero.astro, the default title / og:title in Base.astro, or the
-        footer tag line or domain in Footer.astro) so that the matching hard-coded
-        string in site/scripts/og-gen.mjs (its `<h1>`, its `.tag`, or its footer
-        domain) now states something the site no longer says, and the generator
-        template was not updated to match.
-      - STALE RENDER: this change edits a hard-coded copy string in
-        site/scripts/og-gen.mjs (the `<h1>`, the `.tag`, or the footer text) but the
-        changeset does not also modify site/public/og.png, so the committed image
-        cannot reflect the edited template. Rerunning `node scripts/og-gen.mjs` to
-        regenerate the PNG is the fix.
+      CONCERN 2, deploy-trigger coverage (content.config.ts or site.yml
+      changed). The site is single-sourced: site/src/content.config.ts loads
+      guide content with a glob whose `base` points outside site/ (today
+      ../docs/user-guide), and the "Deploy site" workflow only redeploys on a
+      push matching its `paths:` filter. Block if, after this change,
+      content.config.ts globs content from a directory outside site/ that is
+      NOT covered by the push `paths:` filter in .github/workflows/site.yml
+      while that filter is restrictive (declares `paths:` at all). A glob base
+      under site/ is covered by the existing `site/**` entry. When you block,
+      name the base directory that is read and the `paths:` entry to add.
 
-      Judge only whether the card's text is in sync with the site's copy. The card
-      need not reproduce the headline word for word: a deliberately shorter card
-      line that still states the same thing the site states is fine, so block only
-      on a real contradiction of fact, not a wording or emphasis difference. Styling,
-      layout, color, font, or grid-background changes to either file, and edits to
-      site copy the card does not mirror, are not violations, so approve them. When
-      you block, name the file and string that drifted and the generator string that
-      must change.
+      CONCERN 3, Open Graph card sync (og-gen.mjs, og.png, Hero.astro,
+      Base.astro, or Footer.astro changed). The card at site/public/og.png is
+      generated by site/scripts/og-gen.mjs, whose template hard-codes strings
+      that restate site copy: the hero headline (site/src/components/Hero.astro),
+      the default title / og:title (site/src/layouts/Base.astro), and the footer
+      tag line and domain (site/src/components/Footer.astro). Block on either:
+      CONTRADICTION, the change edits mirrored site copy so a generator string
+      now states something the site no longer says, and the template was not
+      updated; or STALE RENDER, the change edits a hard-coded copy string in
+      og-gen.mjs but does not also modify site/public/og.png (rerunning `node
+      scripts/og-gen.mjs` is the fix). The card need not match word for word: a
+      deliberately shorter card line stating the same fact is fine, so block
+      only on a real contradiction, not a wording difference. Styling, layout,
+      color, or font changes to either file are not violations.
