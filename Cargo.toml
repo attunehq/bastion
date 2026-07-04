@@ -22,9 +22,16 @@ hex = "0.4.3"
 hmac = "0.13.0"
 humantime = "2.3.0"
 # The GitHub adapter posts the PR comment and per-reviewer check runs over the
-# REST API. Default features keep the platform-native TLS (SChannel on Windows,
-# OpenSSL on the Linux CI runner) so the build needs no extra C toolchain.
-reqwest = { version = "0.13.4", features = ["json"] }
+# REST API. reqwest's default TLS is rustls (its `rustls-platform-verifier`
+# checks certs against the OS trust store), which needs no OpenSSL and keeps the
+# musl static targets building cleanly. `http2` is dropped: the adapter makes a
+# handful of REST calls and GitHub serves them fine over HTTP/1.1, so the `h2`
+# stack is dead weight in the binary.
+reqwest = { version = "0.13.4", default-features = false, features = [
+    "json",
+    "system-proxy",
+    "default-tls",
+] }
 # `bastion update` swaps the running binary for a freshly downloaded release. A
 # live executable cannot simply be overwritten on Windows; self-replace
 # encapsulates the platform split (an atomic rename on Unix, the
