@@ -2,6 +2,7 @@
 
 use super::skills::warn_on_stale_skills;
 use crate::config::Config;
+use crate::context::PriorFinding;
 use crate::context::ReviewContext;
 use crate::event::ReviewerRef;
 use crate::event::RunEvent;
@@ -168,8 +169,18 @@ pub async fn review(
         return Ok(Decision::Pass);
     }
 
+    // Resolve the branch's most recent prior run once and share it: the
+    // prior-findings recall here and carry planning further down both want exactly
+    // this run, and each would otherwise rescan and reparse the whole run history
+    // independently ([`store::latest_run_on_branch`]).
+    let prior_run = store::latest_run_on_branch(layout, &branch);
+    let prior_findings = prior_run
+        .as_ref()
+        .map(|(_, events)| store::findings_from_events(events))
+        .unwrap_or_default();
+
     let (context, gathered_github) =
-        assemble_context(&repo_root, base, &branch, layout, github.as_ref()).await;
+        assemble_context(&repo_root, base, github.as_ref(), prior_findings).await;
 
     let seal = derive_seal_bindings(&repo_root, base, &repo_attestation);
     // A dirty working tree is a first-class seal input, not merely a caveat: a
@@ -241,7 +252,9 @@ pub async fn review(
     // run) and only unless `--fresh` opted out.
     let carried = plan_carry(
         layout,
-        &branch,
+        prior_run
+            .as_ref()
+            .map(|(summary, events)| (&summary.run, events.as_slice())),
         &matched,
         &scope_digests,
         &repo_attestation.reviewers,
@@ -375,8 +388,8 @@ fn select_reviewers<'a>(
 
 /// Assemble the review context every reviewer sees beyond the diff: the author's
 /// stated intent (the PR body when reviewing one, otherwise this branch's commit
-/// messages), this branch's prior findings recalled from the run store, and the
-/// surrounding discussion (GitHub only).
+/// messages), this branch's `prior_findings` (already recalled from the run store
+/// by the caller), and the surrounding discussion (GitHub only).
 ///
 /// GitHub gathering is best effort: a failure to reach it is logged and the
 /// review proceeds on the local context alone. The returned
@@ -386,9 +399,8 @@ fn select_reviewers<'a>(
 async fn assemble_context(
     repo_root: &Path,
     base: &str,
-    branch: &str,
-    layout: &Layout,
     github: Option<&GithubSource>,
+    prior_findings: Vec<PriorFinding>,
 ) -> (
     ReviewContext,
     Option<crate::github::context::GatheredContext>,
@@ -396,7 +408,7 @@ async fn assemble_context(
     let mut context = ReviewContext {
         intent: git::commit_messages(repo_root, base),
         comments: Vec::new(),
-        prior_findings: store::prior_findings(layout, branch),
+        prior_findings,
     };
     let Some(source) = github else {
         return (context, None);
@@ -570,13 +582,18 @@ fn plan_scope_digests(
 
 /// Plan which prior passes carry forward this run ([`crate::carry`]).
 ///
+/// `prior_run` is the branch's most recent prior run (its id and events),
+/// resolved once by the caller ([`store::latest_run_on_branch`]) and shared with
+/// the prior-findings recall so the history is scanned only once per review;
+/// `None` is a branch with no prior run.
+///
 /// Carry runs only for the full triggered set and only when the author did not
 /// opt out: `--fresh` disables it, and an explicit `--reviewer` selection asks
 /// for those reviewers to run, so a non-empty `only` disables it too. A reviewer
 /// with no computed scope digest is not a carry candidate.
 fn plan_carry(
     layout: &Layout,
-    branch: &str,
+    prior_run: Option<(&RunId, &[RunEvent])>,
     matched: &[&crate::reviewer::Reviewer],
     scope_digests: &std::collections::BTreeMap<String, String>,
     repo_reviewers: &std::collections::BTreeSet<String>,
@@ -596,7 +613,7 @@ fn plan_carry(
         .collect();
     crate::carry::plan(
         layout,
-        branch,
+        prior_run,
         &candidates,
         repo_reviewers,
         crate::seal::embedded_secret(),

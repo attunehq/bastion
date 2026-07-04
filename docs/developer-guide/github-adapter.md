@@ -34,7 +34,7 @@ The adapter is the GitHub *producer* of the review context. It maps GitHub's fie
 
 Two parts of the context need state that a single CI run does not have on its own:
 
-- **Prior-findings memory** is recalled from the local run store (`store::prior_findings`), and a fresh Actions runner starts with an empty store. So for a reviewer to recall what it raised on the last push, the workflow must persist the run store between runs and restore the previous run before `bastion review`. The self-hosted example below does this by uploading the run as an artifact and downloading the prior one; without that step, the GitHub surface still gets the PR's intent and discussion (gathered fresh each run), just not cross-run finding memory.
+- **Prior-findings memory** is recalled from the local run store (`store::findings_from_events`, over the branch's latest run), and a fresh Actions runner starts with an empty store. So for a reviewer to recall what it raised on the last push, the workflow must persist the run store between runs and restore the previous run before `bastion review`. The self-hosted example below does this by uploading the run as an artifact and downloading the prior one; without that step, the GitHub surface still gets the PR's intent and discussion (gathered fresh each run), just not cross-run finding memory.
 - **Reply routing** (a reply attached to the specific finding it answers) is wired through `FindingId`: a review-comment reply whose thread root carries a Bastion finding marker resolves back to that finding. The reporter posts one sticky comment and check runs, so PR comments reach reviewers as general discussion (visible to every reviewer) rather than routed to a single finding.
 
 ---

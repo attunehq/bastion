@@ -162,6 +162,35 @@ pub fn list_runs(layout: &Layout) -> Result<Vec<RunSummary>> {
         .collect())
 }
 
+/// The most recent persisted run recorded on `branch`, with its full event
+/// stream and one-line [`RunSummary`], or `None` when the branch has no prior
+/// run (or the run history cannot be read).
+///
+/// [`collect_runs`] is already most-recent-first, so this stops at the first run
+/// whose recorded branch matches and never reads the older runs behind it: the
+/// single most-recent match is all either consumer wants. A review resolves this
+/// once and threads it into both the prior-findings recall
+/// ([`findings_from_events`]) and carry planning ([`crate::carry::plan`]), which
+/// would otherwise each rescan and reparse the whole run history independently.
+///
+/// This does not exclude any run id. A review assembles its context and plans
+/// carry *before* the runner persists the current run, so the current run is not
+/// yet in the store; the most-recent prior run is exactly what both want,
+/// including a previous invocation at the same `HEAD` (a local rerun on a dirty
+/// working tree reuses the same run id and overwrites it only at the end, so
+/// consulting it first is correct).
+#[must_use]
+pub fn latest_run_on_branch(layout: &Layout, branch: &str) -> Option<(RunSummary, Vec<RunEvent>)> {
+    for (id, _) in collect_runs(layout).ok()? {
+        let events = read_run(layout, &id).unwrap_or_default();
+        let summary = summarize_events(&id, &events);
+        if summary.branch.as_deref() == Some(branch) {
+            return Some((summary, events));
+        }
+    }
+    None
+}
+
 /// Prune persisted runs, keeping the `keep` most recent and/or removing any
 /// older than `older_than`. Returns the ids that were removed.
 ///
@@ -194,36 +223,17 @@ pub fn prune(
     Ok(removed)
 }
 
-/// Recall the findings every reviewer raised on the most recent prior run of
-/// `branch`, so a re-review can be reminded of what it already said.
+/// Recall the substantive findings a prior run's reviewers raised, one
+/// [`PriorFinding`] per recorded finding keyed by its reviewer, so a re-review
+/// can be reminded of what it already said.
 ///
-/// Looks back at the latest persisted run on the same branch and returns one
-/// [`PriorFinding`] per recorded finding, keyed by reviewer. The synthetic fail-closed
-/// crash finding (an empty path) is skipped: "the reviewer failed to complete" is not a
-/// substantive prior finding to re-evaluate. Returns an empty vec on the first review of
-/// a branch, or when the history cannot be read, so recall never fails a review.
-///
-/// The caller assembles its context *before* the runner persists the current run, so the
-/// current run is not yet in the store at recall time. That is why this does not exclude
-/// any run id: the most recent prior run is exactly what we want, including a previous
-/// invocation at the same `HEAD` (a local rerun on a dirty working tree reuses the same
-/// run id and overwrites it only at the end, so recalling it first is correct).
+/// The synthetic fail-closed crash finding (an empty path) is skipped: "the
+/// reviewer failed to complete" is not a substantive prior finding to
+/// re-evaluate. The caller passes the events of the branch's latest run
+/// ([`latest_run_on_branch`]); an absent prior run recalls nothing, so recall
+/// never fails a review.
 #[must_use]
-pub fn prior_findings(layout: &Layout, branch: &str) -> Vec<PriorFinding> {
-    let Ok(runs) = list_runs(layout) else {
-        return Vec::new();
-    };
-    // `list_runs` is most-recent-first, so the first match is the latest prior run.
-    let Some(prior) = runs
-        .into_iter()
-        .find(|run| run.branch.as_deref() == Some(branch))
-    else {
-        return Vec::new();
-    };
-    let Ok(events) = read_run(layout, &prior.run) else {
-        return Vec::new();
-    };
-
+pub fn findings_from_events(events: &[RunEvent]) -> Vec<PriorFinding> {
     let mut findings = Vec::new();
     for event in events {
         if let RunEvent::ReviewerResolved {
@@ -232,11 +242,11 @@ pub fn prior_findings(layout: &Layout, branch: &str) -> Vec<PriorFinding> {
             ..
         } = event
         {
-            for finding in &resolved {
+            for finding in resolved {
                 if finding.path.is_empty() {
                     continue;
                 }
-                findings.push(PriorFinding::from_finding(&reviewer, finding));
+                findings.push(PriorFinding::from_finding(reviewer, finding));
             }
         }
     }
@@ -269,12 +279,18 @@ fn collect_runs(layout: &Layout) -> Result<Vec<(RunId, SystemTime)>> {
     Ok(runs)
 }
 
-/// Build a [`RunSummary`] from a run's recorded events.
+/// Build a [`RunSummary`] from a run's recorded events, reading them from disk.
 ///
 /// A run whose `run.jsonl` is missing or malformed degrades to a summary with
 /// only its id, rather than failing the whole listing.
 fn summarize(layout: &Layout, id: &RunId) -> RunSummary {
-    let events = read_run(layout, id).unwrap_or_default();
+    summarize_events(id, &read_run(layout, id).unwrap_or_default())
+}
+
+/// Fold a run's events into its one-line summary. Split from [`summarize`] so a
+/// caller that already holds the events (see [`latest_run_on_branch`]) does not
+/// re-read the file just to summarize what it already parsed.
+fn summarize_events(id: &RunId, events: &[RunEvent]) -> RunSummary {
     let mut summary = RunSummary {
         run: id.clone(),
         branch: None,
@@ -292,12 +308,12 @@ fn summarize(layout: &Layout, id: &RunId) -> RunSummary {
                 partial,
                 ..
             } => {
-                summary.branch = Some(branch);
-                summary.base = Some(base);
+                summary.branch = Some(branch.clone());
+                summary.base = Some(base.clone());
                 summary.reviewers = u32::try_from(reviewers.len()).unwrap_or(u32::MAX);
-                summary.partial = partial;
+                summary.partial = *partial;
             }
-            RunEvent::RunCompleted { verdict, .. } => summary.verdict = Some(verdict),
+            RunEvent::RunCompleted { verdict, .. } => summary.verdict = Some(*verdict),
             _ => {}
         }
     }
@@ -496,6 +512,15 @@ mod tests {
         ]
     }
 
+    /// Resolve `branch`'s latest run and extract its recalled findings, exactly
+    /// as `review` composes [`latest_run_on_branch`] and [`findings_from_events`]
+    /// to fill the review context. Absent prior run recalls nothing.
+    fn recalled_findings(layout: &Layout, branch: &str) -> Vec<PriorFinding> {
+        latest_run_on_branch(layout, branch)
+            .map(|(_, events)| findings_from_events(&events))
+            .unwrap_or_default()
+    }
+
     #[test]
     fn prior_findings_recalls_the_latest_run_on_the_branch_and_skips_synthetic() {
         use crate::verdict::{Finding, FindingKind};
@@ -543,14 +568,14 @@ mod tests {
         )
         .unwrap();
 
-        let recalled = prior_findings(&layout, "feat/x");
+        let recalled = recalled_findings(&layout, "feat/x");
         assert_eq!(recalled.len(), 1);
         assert_eq!(recalled[0].reviewer, "perf");
         assert_eq!(recalled[0].detail, "O(n^2) append");
         assert_eq!(recalled[0].path, "src/p.rs");
 
         // The first review of a branch (no prior run) recalls nothing.
-        assert!(prior_findings(&layout, "brand-new").is_empty());
+        assert!(recalled_findings(&layout, "brand-new").is_empty());
     }
 
     #[test]
@@ -583,7 +608,7 @@ mod tests {
         )
         .unwrap();
 
-        let recalled = prior_findings(&layout, "feat/x");
+        let recalled = recalled_findings(&layout, "feat/x");
         assert_eq!(recalled.len(), 1);
         assert_eq!(recalled[0].detail, "new finding");
     }
@@ -618,8 +643,56 @@ mod tests {
 
         // The about-to-be-written run shares the id, yet recall (which runs first) finds
         // the earlier invocation's findings.
-        let recalled = prior_findings(&layout, "feat/x");
+        let recalled = recalled_findings(&layout, "feat/x");
         assert_eq!(recalled.len(), 1);
         assert_eq!(recalled[0].detail, "still slow");
+    }
+
+    #[test]
+    fn latest_run_on_branch_pairs_the_newest_matching_runs_summary_with_its_events() {
+        use crate::verdict::Finding;
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = Layout::with_root(tmp.path().to_path_buf());
+
+        let finding = |detail: &str| Finding {
+            kind: crate::verdict::FindingKind::Blocking,
+            path: "src/p.rs".into(),
+            line_start: 1,
+            line_end: 1,
+            detail: detail.into(),
+        };
+        // Two runs on the branch (newest wins) plus one on another branch (ignored).
+        write_run(
+            &layout,
+            &RunId("r-1".into()),
+            &run_with_findings("r-1", "feat/x", "perf", vec![finding("old")]),
+        )
+        .unwrap();
+        write_run(
+            &layout,
+            &RunId("r-2".into()),
+            &run_with_findings("r-2", "feat/x", "perf", vec![finding("new")]),
+        )
+        .unwrap();
+        write_run(
+            &layout,
+            &RunId("r-other".into()),
+            &run_with_findings("r-other", "feat/y", "perf", vec![finding("elsewhere")]),
+        )
+        .unwrap();
+
+        // The summary and the events are the *same* run, resolved once: the newest
+        // run recorded on the branch, most-recent-first tie broken by descending id.
+        let (summary, events) = latest_run_on_branch(&layout, "feat/x").expect("a prior run");
+        assert_eq!(summary.run, RunId("r-2".into()));
+        assert_eq!(summary.branch.as_deref(), Some("feat/x"));
+        assert_eq!(
+            findings_from_events(&events),
+            recalled_findings(&layout, "feat/x")
+        );
+        assert_eq!(findings_from_events(&events)[0].detail, "new");
+
+        // A branch with no run resolves to nothing.
+        assert!(latest_run_on_branch(&layout, "brand-new").is_none());
     }
 }

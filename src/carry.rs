@@ -58,7 +58,7 @@ use globset::{Glob, GlobSetBuilder};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::event::RunEvent;
+use crate::event::{RunEvent, RunId};
 use crate::git;
 use crate::paths::Layout;
 use crate::reviewer::{AttestationPolicy, Reviewer};
@@ -246,8 +246,10 @@ pub fn scope_digest(
     Ok(hex::encode(Sha256::digest(&bytes)))
 }
 
-/// Decide which of `candidates` carry their verdict forward from the most
-/// recent prior run of `branch`, keyed by reviewer name.
+/// Decide which of `candidates` carry their verdict forward from `prior_run`,
+/// the branch's most recent prior run (its id and event stream, resolved once by
+/// [`store::latest_run_on_branch`] and shared with the prior-findings recall),
+/// keyed by reviewer name. `None` is a branch with no prior run: nothing carries.
 ///
 /// Each candidate pairs a triggered reviewer with its current scope digest. A
 /// candidate carries when all of the following hold; anything short of that
@@ -269,7 +271,7 @@ pub fn scope_digest(
 #[must_use]
 pub fn plan(
     layout: &Layout,
-    branch: &str,
+    prior_run: Option<(&RunId, &[RunEvent])>,
     candidates: &[(&Reviewer, String)],
     repo_reviewers: &BTreeSet<String>,
     secret: &[u8],
@@ -279,19 +281,19 @@ pub fn plan(
         return carried;
     }
 
-    let Some((prior_run, events)) = prior_run_on_branch(layout, branch) else {
+    let Some((prior_run, events)) = prior_run else {
         return carried;
     };
 
     // Verify the prior seal once, lazily reusable for every repo candidate.
     // `None` means "no verified seal": every repo reviewer then executes fresh.
-    let sealed_names = verified_seal_reviewers(layout, &prior_run, &events, secret);
+    let sealed_names = verified_seal_reviewers(layout, prior_run, events, secret);
 
     for (reviewer, digest) in candidates {
         if reviewer.attestation == Some(AttestationPolicy::Never) {
             continue;
         }
-        let Some(event) = resolved_pass_with_digest(&events, &reviewer.name, digest) else {
+        let Some(event) = resolved_pass_with_digest(events, &reviewer.name, digest) else {
             continue;
         };
         // A repo reviewer may carry only when the prior seal actually covered it; an
@@ -317,28 +319,13 @@ pub fn plan(
     carried
 }
 
-/// The most recent persisted run on `branch`, with its events. Mirrors
-/// [`store::prior_findings`]'s recall: the latest run on the branch, including
-/// a same-id run from an earlier invocation at the same HEAD.
-fn prior_run_on_branch(
-    layout: &Layout,
-    branch: &str,
-) -> Option<(crate::event::RunId, Vec<RunEvent>)> {
-    let runs = store::list_runs(layout).ok()?;
-    let prior = runs
-        .into_iter()
-        .find(|run| run.branch.as_deref() == Some(branch))?;
-    let events = store::read_run(layout, &prior.run).ok()?;
-    Some((prior.run, events))
-}
-
 /// The prior run's seal-covered reviewer names, when the seal exists, records
 /// no test seam, and verifies over the run's own persisted resolved events.
 /// `None` when any of that fails, which disqualifies carry for every
 /// repository reviewer.
 fn verified_seal_reviewers(
     layout: &Layout,
-    run: &crate::event::RunId,
+    run: &RunId,
     events: &[RunEvent],
     secret: &[u8],
 ) -> Option<BTreeSet<String>> {
@@ -595,6 +582,29 @@ mod tests {
         (tmp, layout)
     }
 
+    /// Resolve `branch`'s prior run through the store, then plan carry against it,
+    /// exactly as `review` composes [`store::latest_run_on_branch`] and [`plan`].
+    /// Production threads a pre-resolved prior run in; these tests exercise the
+    /// whole branch-to-carry path, so they resolve it the same way here.
+    fn plan_on_branch(
+        layout: &Layout,
+        branch: &str,
+        candidates: &[(&Reviewer, String)],
+        repo_reviewers: &BTreeSet<String>,
+        secret: &[u8],
+    ) -> BTreeMap<String, Carried> {
+        let prior = store::latest_run_on_branch(layout, branch);
+        plan(
+            layout,
+            prior
+                .as_ref()
+                .map(|(summary, events)| (&summary.run, events.as_slice())),
+            candidates,
+            repo_reviewers,
+            secret,
+        )
+    }
+
     #[test]
     fn a_repo_reviewer_carries_only_from_a_verified_seal() {
         let (_tmp, layout) = layout();
@@ -602,7 +612,7 @@ mod tests {
         let g1 = reviewer("g1", &["src/**"]);
         let repo_set: BTreeSet<String> = ["g1".to_string()].into_iter().collect();
 
-        let carried = plan(
+        let carried = plan_on_branch(
             &layout,
             "feat",
             &[(&g1, "digest-1".to_string())],
@@ -613,7 +623,7 @@ mod tests {
 
         // The same store checked under a different secret (a different build)
         // must refuse: the chain of custody breaks at the seal.
-        let refused = plan(
+        let refused = plan_on_branch(
             &layout,
             "feat",
             &[(&g1, "digest-1".to_string())],
@@ -633,7 +643,7 @@ mod tests {
         let g1 = reviewer("g1", &["src/**"]);
         let repo_set: BTreeSet<String> = ["g1".to_string()].into_iter().collect();
 
-        let carried = plan(
+        let carried = plan_on_branch(
             &layout,
             "feat",
             &[(&g1, "digest-1".to_string())],
@@ -780,7 +790,7 @@ mod tests {
         let g1 = reviewer("g1", &["src/**"]);
 
         let repo_set: BTreeSet<String> = ["g1".to_string()].into_iter().collect();
-        let refused = plan(
+        let refused = plan_on_branch(
             &layout,
             "feat",
             &[(&g1, "digest-1".to_string())],
@@ -792,7 +802,7 @@ mod tests {
         // The same reviewer treated as user-level (outside the repo set)
         // carries on the digest alone: it is never sealed and never gates
         // anyone else's PR.
-        let carried = plan(
+        let carried = plan_on_branch(
             &layout,
             "feat",
             &[(&g1, "digest-1".to_string())],
@@ -811,7 +821,7 @@ mod tests {
 
         // Different digest: the scoped content changed, so no carry.
         assert!(
-            plan(
+            plan_on_branch(
                 &layout,
                 "feat",
                 &[(&g1, "digest-2".to_string())],
@@ -825,7 +835,7 @@ mod tests {
         let mut fresh_always = g1.clone();
         fresh_always.attestation = Some(AttestationPolicy::Never);
         assert!(
-            plan(
+            plan_on_branch(
                 &layout,
                 "feat",
                 &[(&fresh_always, "digest-1".to_string())],
@@ -837,7 +847,7 @@ mod tests {
 
         // A different branch's run is never consulted.
         assert!(
-            plan(
+            plan_on_branch(
                 &layout,
                 "other-branch",
                 &[(&g1, "digest-1".to_string())],
@@ -898,7 +908,7 @@ mod tests {
         store::write_run(&layout, &run, &events).unwrap();
 
         let g1 = reviewer("g1", &["src/**"]);
-        let carried = plan(
+        let carried = plan_on_branch(
             &layout,
             "feat",
             &[(&g1, "digest-1".to_string())],
@@ -943,7 +953,7 @@ mod tests {
         let g1 = reviewer("g1", &["src/**"]);
         let repo_set: BTreeSet<String> = ["g1".to_string()].into_iter().collect();
         assert!(
-            plan(
+            plan_on_branch(
                 &layout,
                 "feat",
                 &[(&g1, "digest-1".to_string())],

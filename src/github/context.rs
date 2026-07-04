@@ -18,7 +18,7 @@
 //!   raised it.
 //!
 //! The prior-findings half of a [`ReviewContext`](crate::context::ReviewContext) is recalled from the local run store
-//! (`crate::store::prior_findings`), the same way regardless of transport, and merged in
+//! (`crate::store::findings_from_events`, over the branch's latest run), the same way regardless of transport, and merged in
 //! by the caller; this module supplies only the intent and the discussion.
 //!
 //! Comments are authored by the gate's subject and by bystanders. The mapping preserves
