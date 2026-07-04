@@ -42,8 +42,7 @@
 //! that error into a fail-closed `block` for gates; this backend never invents a
 //! verdict.
 
-use std::ffi::{OsStr, OsString};
-use std::path::Path;
+use std::ffi::OsString;
 
 use color_eyre::eyre::{Result, bail, eyre};
 use serde::Deserialize;
@@ -52,9 +51,7 @@ use crate::reviewer::{self};
 use crate::verdict::{Money, Usage, Verdict};
 
 use super::command::{CommandRunner, CommandSpec, resolve_program};
-use super::{
-    Backend, REPROMPT_SUFFIX, ReviewOutcome, ReviewRequest, SCHEMA_INSTRUCTION, extract_verdict,
-};
+use super::{Backend, ReviewOutcome, ReviewRequest, SCHEMA_INSTRUCTION, extract_verdict};
 
 /// Environment variable that overrides the `pi` program path (tests point this at a
 /// fake executable; deployments can pin a specific binary).
@@ -238,10 +235,7 @@ impl<R: CommandRunner> Backend for PiBackend<R> {
         // resuming, the new turn is only the reprompt suffix (the session already
         // holds the review). Without a session id we fall back to a fresh session
         // and must re-send the full prompt.
-        let reprompt_text = match session.session_id.as_deref() {
-            Some(_) => REPROMPT_SUFFIX.to_string(),
-            None => format!("{prompt}\n\n{REPROMPT_SUFFIX}"),
-        };
+        let reprompt_text = super::reprompt_text(&prompt, session.session_id.is_some());
         let retry = self.reprompt_spec(request, session.session_id.as_deref(), &reprompt_text);
         let retry_session = self.run_once(&retry).await?;
 
@@ -275,12 +269,8 @@ impl<R: CommandRunner> Backend for PiBackend<R> {
 /// disjoint and their usage is summed rather than max'd.
 fn outcome(verdict: Verdict, session: PiSession, prior: Option<&PiSession>) -> ReviewOutcome {
     let usage = sum_usage(prior.and_then(PiSession::usage), session.usage());
-    let transcript = match prior {
-        Some(prior) if !prior.transcript.is_empty() => {
-            format!("{}\n{}", prior.transcript.trim_end(), session.transcript)
-        }
-        _ => session.transcript,
-    };
+    let transcript =
+        super::stitch_transcript(prior.map(|p| p.transcript.as_str()), session.transcript);
     ReviewOutcome {
         verdict,
         usage,
@@ -304,19 +294,10 @@ fn sum_usage(first: Option<Usage>, second: Option<Usage>) -> Option<Usage> {
     }
 }
 
-/// Build the full prompt handed to Pi for `request`: the shared changeset preamble
-/// (how to see the diff against the base branch), the interpolated review
-/// instruction, the untrusted review-context block (intent, discussion, and this
-/// reviewer's prior findings, when a producer supplied any), the shared
-/// exhaustive-findings instruction (report every issue in one pass), and the shared
-/// schema instruction (end with a fenced YAML verdict).
+/// Build the full prompt handed to Pi for `request`: the [shared review
+/// body](super::review_prompt) closed with the fenced-YAML [`SCHEMA_INSTRUCTION`].
 fn build_prompt(request: &ReviewRequest<'_>) -> String {
-    let reviewer = request.reviewer;
-    let preamble = super::changeset_preamble(request.base);
-    let interpolated = super::interpolate(&reviewer.prompt, &reviewer.inputs);
-    let context = super::context_segment(request);
-    let exhaustive = super::EXHAUSTIVE_FINDINGS_INSTRUCTION;
-    format!("{preamble}\n\n{interpolated}\n\n{context}{exhaustive}\n\n{SCHEMA_INSTRUCTION}")
+    super::review_prompt(request, SCHEMA_INSTRUCTION)
 }
 
 /// A parsed Pi `--mode json` session: the reconstructed transcript, the final
@@ -570,36 +551,14 @@ struct PiCost {
     total: f64,
 }
 
-/// Whether `program` resolves to an executable on `PATH` or as a direct path.
-///
-/// Used by real-binary tests to detect-and-skip when the Pi CLI is absent.
-#[must_use]
-pub fn program_available(program: impl AsRef<OsStr>) -> bool {
-    let program = program.as_ref();
-    let path = Path::new(program);
-    if path.is_absolute() || path.components().count() > 1 {
-        return path.is_file();
-    }
-    let Some(paths) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&paths).any(|dir| {
-        let candidate = dir.join(program);
-        candidate.is_file()
-            || candidate.with_extension("exe").is_file()
-            || candidate.with_extension("cmd").is_file()
-            || candidate.with_extension("bat").is_file()
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
-    use crate::backend::command::{CommandOutput, SystemCommandRunner};
+    use crate::backend::command::{CommandOutput, SystemCommandRunner, program_available};
     use crate::event::RunId;
     use crate::reviewer::{Capabilities, Mode, Reviewer};
     use crate::verdict::{Decision, FindingKind};
@@ -1305,11 +1264,6 @@ findings:
         assert_eq!(usage.tokens_in, 11);
         assert_eq!(usage.tokens_out, 3);
         assert_eq!(usage.cost_usd, Money::from_cents(2));
-    }
-
-    #[test]
-    fn program_available_detects_missing_binary() {
-        assert!(!program_available("definitely-not-a-real-program-xyz123"));
     }
 
     // -- Real-subprocess test against a fake executable on disk ----------------

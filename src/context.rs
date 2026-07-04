@@ -83,10 +83,7 @@ impl FindingId {
     /// Compute the id for `finding` as raised by the reviewer named `reviewer`.
     #[must_use]
     pub fn for_finding(reviewer: &str, finding: &Finding) -> Self {
-        let kind = match finding.kind {
-            FindingKind::Blocking => "blocking",
-            FindingKind::Optional => "optional",
-        };
+        let kind = finding.kind.as_str();
         // A NUL separator between fields so distinct field splits cannot collide
         // (e.g. reviewer "a" + path "bc" vs reviewer "ab" + path "c").
         let mut hasher = Fnv1a::new();
@@ -272,10 +269,7 @@ impl ReviewContext {
                  raised\" as \"already resolved\".\n",
             );
             for finding in &mine {
-                let kind = match finding.kind {
-                    FindingKind::Blocking => "blocking",
-                    FindingKind::Optional => "optional",
-                };
+                let kind = finding.kind.as_str();
                 // A prior finding's path and detail are a prior run's *model output*,
                 // which can echo attacker-influenced text copied out of the code or the
                 // discussion. Render each on a single line (collapsing any newlines) so a
@@ -324,7 +318,7 @@ fn render_comment(comment: &ContextComment, mine: &[&PriorFinding]) -> String {
         .as_ref()
         .and_then(|id| mine.iter().find(|f| &f.id == id))
         .map(|f| {
-            let subject = truncate(&inline(&f.detail), 80);
+            let subject = crate::text::truncate(&inline(&f.detail), 80);
             format!(" replying to your finding \"{subject}\"")
         })
         .unwrap_or_default();
@@ -359,15 +353,6 @@ fn quote(text: &str) -> String {
 /// heading, a list, a fence) on its own line and pose as prompt structure.
 fn inline(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Truncate `text` to at most `max` characters, adding an ASCII ellipsis when cut.
-fn truncate(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    let kept: String = text.chars().take(max.saturating_sub(3)).collect();
-    format!("{}...", kept.trim_end())
 }
 
 /// A minimal FNV-1a 64-bit hasher, used so [`FindingId`] is stable across releases

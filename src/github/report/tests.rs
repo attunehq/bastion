@@ -1036,15 +1036,15 @@ fn find_marker_comment_matches_only_bastions_own() {
         {"id": 1, "body": "a human comment"},
         {"id": 2, "body": format!("{MARKER}\n## Bastion review")},
     ]);
-    assert_eq!(find_marker_comment(&list).unwrap(), Some(2));
+    assert_eq!(find_marker_comment(list).unwrap(), Some(2));
 
     let none = serde_json::json!([{"id": 1, "body": "no marker here"}]);
-    assert_eq!(find_marker_comment(&none).unwrap(), None);
+    assert_eq!(find_marker_comment(none).unwrap(), None);
 
     // A malformed body (not the expected array) fails closed rather than
     // reporting "none found", which would post a duplicate comment.
     let malformed = serde_json::json!({"message": "Not Found"});
-    assert!(find_marker_comment(&malformed).is_err());
+    assert!(find_marker_comment(malformed).is_err());
 }
 
 #[tokio::test]
@@ -1232,13 +1232,4 @@ async fn report_fails_closed_on_a_rejected_request() {
         .unwrap_err();
     assert!(err.to_string().contains("returned 403"));
     assert!(err.to_string().contains("Resource not accessible"));
-}
-
-#[test]
-fn truncate_caps_and_marks_overflow() {
-    assert_eq!(truncate("short", 110), "short");
-    let long = "x".repeat(200);
-    let cut = truncate(&long, 110);
-    assert_eq!(cut.chars().count(), 110);
-    assert!(cut.ends_with("..."));
 }

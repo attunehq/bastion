@@ -212,6 +212,13 @@ impl std::fmt::Display for ImageReference {
     }
 }
 
+/// A runner field's trimmed value, or `None` when it is absent or blank. Both image
+/// sources treat a whitespace-only field as unset, so a stray newline from a YAML
+/// block scalar never becomes part of a path or image reference.
+fn non_blank(field: &Option<String>) -> Option<&str> {
+    field.as_deref().map(str::trim).filter(|v| !v.is_empty())
+}
+
 /// The provenance of a reviewer's container image, parsed from its `runner` block.
 ///
 /// Exactly one source, with `dockerfile` taking precedence over `image` (per the
@@ -237,12 +244,7 @@ impl ImageSource {
     /// reference begins with `-` (it becomes a `docker run` argument, where a leading
     /// dash would be parsed as an option rather than the image).
     fn resolve(runner: &RunnerSpec) -> Result<Self> {
-        if let Some(dockerfile) = runner
-            .dockerfile
-            .as_deref()
-            .map(str::trim)
-            .filter(|d| !d.is_empty())
-        {
+        if let Some(dockerfile) = non_blank(&runner.dockerfile) {
             let path = Path::new(dockerfile);
             if path.is_absolute()
                 || path
@@ -262,12 +264,7 @@ impl ImageSource {
             }
             return Ok(Self::Dockerfile(path.to_path_buf()));
         }
-        if let Some(image) = runner
-            .image
-            .as_deref()
-            .map(str::trim)
-            .filter(|i| !i.is_empty())
-        {
+        if let Some(image) = non_blank(&runner.image) {
             if image.starts_with('-') {
                 bail!(
                     "`runner.image` must be an image reference, but `{image}` begins with `-`; \

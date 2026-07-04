@@ -27,12 +27,12 @@
 
 use std::num::NonZeroU64;
 
-use color_eyre::eyre::{Context, Result, bail};
+use color_eyre::eyre::{Context, Result};
 use serde::Deserialize;
 
 use crate::context::{ContextComment, FindingId, Standing};
 
-use super::client::{ApiRequest, GitHubApi};
+use super::client::{ApiRequest, GitHubApi, send_checked};
 
 /// The hidden marker carrying a finding's [`FindingId`] on a comment. A reply whose
 /// thread root carries this marker resolves back to that [`FindingId`] and reaches the
@@ -83,11 +83,19 @@ pub async fn gather<A: GitHubApi + ?Sized>(
     repo: &str,
     pr: u64,
 ) -> Result<GatheredContext> {
-    let pull: PullRequest = get_json(api, &pull_request_request(owner, repo, pr)).await?;
-    let issue_comments: Vec<RawComment> =
-        get_json(api, &issue_comments_request(owner, repo, pr)).await?;
-    let review_comments: Vec<RawComment> =
-        get_json(api, &review_comments_request(owner, repo, pr)).await?;
+    // The three reads are independent, so drive them concurrently: one round-trip's
+    // latency instead of three in series. try_join! short-circuits on the first error,
+    // preserving the fail-on-any-error contract. The requests are bound first so they
+    // outlive the borrows the join holds across its awaits.
+    let pull_req = pull_request_request(owner, repo, pr);
+    let issue_req = issue_comments_request(owner, repo, pr);
+    let review_req = review_comments_request(owner, repo, pr);
+    let (pull, issue_comments, review_comments): (PullRequest, Vec<RawComment>, Vec<RawComment>) =
+        tokio::try_join!(
+            get_json(api, &pull_req),
+            get_json(api, &issue_req),
+            get_json(api, &review_req),
+        )?;
 
     let intent = pull
         .body
@@ -183,24 +191,15 @@ fn review_comments_request(owner: &str, repo: &str, pr: u64) -> ApiRequest {
     ))
 }
 
-/// Send a `GET` and deserialize its body, failing on a non-2xx status the way the
-/// reporting half does, so a rejected gather is a real error the caller can log.
-/// Shared with [`super::signing`], the other GET-shaped consumer of the seam.
+/// Send a `GET` through [`send_checked`] and deserialize its body, so a rejected
+/// gather is a real error the caller can log. Shared with [`super::signing`], the
+/// other GET-shaped consumer of the seam.
 pub(super) async fn get_json<A, T>(api: &A, req: &ApiRequest) -> Result<T>
 where
     A: GitHubApi + ?Sized,
     T: serde::de::DeserializeOwned,
 {
-    let resp = api.send(req).await?;
-    if !resp.is_success() {
-        bail!(
-            "GitHub {} {} returned {}: {}",
-            req.method.as_str(),
-            req.path,
-            resp.status,
-            resp.error_message().unwrap_or("(no message)"),
-        );
-    }
+    let resp = send_checked(api, req).await?;
     serde_json::from_value(resp.body).wrap_err_with(|| {
         format!(
             "parsing the response to {} {}",

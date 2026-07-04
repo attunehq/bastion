@@ -202,29 +202,42 @@ pub fn plan(
         );
     }
 
-    if bundle.seal.head_tree != ci.head_tree {
-        return fallback(format!(
-            "the attested head tree does not match CI's checkout (attested {}, CI has {})",
-            bundle.seal.head_tree, ci.head_tree
-        ));
-    }
-    if bundle.seal.base_tree != ci.base_tree {
-        return fallback(format!(
-            "the attested base tree does not match CI's merge base (attested {}, CI has {}); the base may have moved since the local review",
-            bundle.seal.base_tree, ci.base_tree
-        ));
-    }
-    if bundle.seal.patch_id != ci.patch_id {
-        return fallback(format!(
-            "the attested patch id does not match CI's diff (attested {}, CI has {})",
-            bundle.seal.patch_id, ci.patch_id
-        ));
-    }
-    if bundle.seal.config_hash != ci.config_hash {
-        return fallback(format!(
-            "the attested reviewer config does not match CI's (attested {}, CI has {}); the registry has changed since the local review",
-            bundle.seal.config_hash, ci.config_hash
-        ));
+    // Each content binding ties the attested seal to CI's own view of the same
+    // surface; the first mismatch means it moved between the local review and CI, so
+    // the run cannot be replayed as sealed. Formatted lazily, so only the failing
+    // binding builds its message.
+    let bindings = [
+        (
+            &bundle.seal.head_tree,
+            &ci.head_tree,
+            "head tree does not match CI's checkout",
+            "",
+        ),
+        (
+            &bundle.seal.base_tree,
+            &ci.base_tree,
+            "base tree does not match CI's merge base",
+            "; the base may have moved since the local review",
+        ),
+        (
+            &bundle.seal.patch_id,
+            &ci.patch_id,
+            "patch id does not match CI's diff",
+            "",
+        ),
+        (
+            &bundle.seal.config_hash,
+            &ci.config_hash,
+            "reviewer config does not match CI's",
+            "; the registry has changed since the local review",
+        ),
+    ];
+    for (attested, actual, what, note) in bindings {
+        if attested != actual {
+            return fallback(format!(
+                "the attested {what} (attested {attested}, CI has {actual}){note}"
+            ));
+        }
     }
 
     // Every binding matched: decide, per routed reviewer, whether it replays.
@@ -247,23 +260,25 @@ pub fn plan(
             reviewer.attestation,
             Some(crate::reviewer::AttestationPolicy::Never)
         );
-        match bundle.events.get(*name) {
-            Some(_) if never_replay => executed_fresh.push((*name).to_string()),
-            Some(event) => match serde_json::from_value::<RunEvent>(event.clone()) {
-                Ok(ref parsed @ RunEvent::ReviewerResolved { ref reviewer, .. })
-                    if reviewer == name =>
-                {
-                    replay.insert((*name).to_string(), parsed.clone());
-                }
-                _ => {
-                    return fallback(format!(
-                        "the attestation bundle carries a malformed or mismatched event under \
-                         reviewer '{name}' (its key does not match the event's own reviewer \
-                         field, or the event is not a reviewer.resolved event)"
-                    ));
-                }
-            },
-            None => executed_fresh.push((*name).to_string()),
+        // A `never` reviewer, or one the bundle does not cover, executes fresh
+        // rather than replaying; only a covered, replay-eligible reviewer is parsed.
+        let Some(event) = bundle.events.get(*name).filter(|_| !never_replay) else {
+            executed_fresh.push((*name).to_string());
+            continue;
+        };
+        match serde_json::from_value::<RunEvent>(event.clone()) {
+            Ok(ref parsed @ RunEvent::ReviewerResolved { ref reviewer, .. })
+                if reviewer == name =>
+            {
+                replay.insert((*name).to_string(), parsed.clone());
+            }
+            _ => {
+                return fallback(format!(
+                    "the attestation bundle carries a malformed or mismatched event under \
+                     reviewer '{name}' (its key does not match the event's own reviewer \
+                     field, or the event is not a reviewer.resolved event)"
+                ));
+            }
         }
     }
 

@@ -100,6 +100,17 @@ pub enum FindingKind {
     Optional,
 }
 
+impl FindingKind {
+    /// The lowercase wire form (`"blocking"` / `"optional"`).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FindingKind::Blocking => "blocking",
+            FindingKind::Optional => "optional",
+        }
+    }
+}
+
 /// A specific, located comment from a reviewer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Finding {

@@ -215,22 +215,30 @@ pub fn resolve_program(default: &str, override_env: &str) -> OsString {
     }
 }
 
-/// Whether a program resolves to something runnable: an existing file when it
-/// looks like a path, otherwise assumed present on `PATH`.
+/// Whether `program` resolves to an executable on `PATH` or as a direct path.
 ///
-/// Backends use this to detect-and-skip when the real CLI is absent, so tests on
-/// machines without the agent installed do not spuriously fail.
+/// A path-like program (absolute, or carrying a directory component) must point at
+/// an existing file; a bare name is searched on `PATH`, probing the Windows
+/// executable extensions so a `.cmd`/`.bat` shim counts. Backends use this in their
+/// real-subprocess tests to detect-and-skip when the agent CLI is absent, so a
+/// machine without it installed does not spuriously fail.
 #[must_use]
-pub fn program_is_available(program: &Path) -> bool {
-    // A bare command name (no separators) is assumed to be on PATH; we cannot
-    // cheaply prove otherwise without running it. A path-like program must exist.
-    let looks_like_path =
-        program.components().nth(1).is_some_and(|_| true) || program.is_absolute();
-    if looks_like_path {
-        program.exists()
-    } else {
-        true
+pub fn program_available(program: impl AsRef<OsStr>) -> bool {
+    let program = program.as_ref();
+    let path = Path::new(program);
+    if path.is_absolute() || path.components().count() > 1 {
+        return path.is_file();
     }
+    let Some(paths) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&paths).any(|dir| {
+        let candidate = dir.join(program);
+        candidate.is_file()
+            || candidate.with_extension("exe").is_file()
+            || candidate.with_extension("cmd").is_file()
+            || candidate.with_extension("bat").is_file()
+    })
 }
 
 #[cfg(test)]
@@ -254,13 +262,13 @@ mod tests {
     }
 
     #[test]
-    fn bare_command_is_assumed_available() {
-        assert!(program_is_available(Path::new("claude")));
+    fn program_available_rejects_a_missing_path_program() {
+        assert!(!program_available("/no/such/bin/claude"));
     }
 
     #[test]
-    fn missing_path_program_is_unavailable() {
-        assert!(!program_is_available(Path::new("/no/such/bin/claude")));
+    fn program_available_rejects_a_missing_bare_program() {
+        assert!(!program_available("definitely-not-a-real-program-xyz123"));
     }
 
     #[test]

@@ -64,7 +64,10 @@ pub(super) fn reviewer_check(ctx: &PrContext, row: &ReviewerRow) -> CheckRun {
         Mode::Gate if row.blocks() => (Conclusion::Failure, "Blocked"),
         Mode::Gate => (Conclusion::Success, "Passed"),
     };
-    let title = format!("{decision_word}: {}", truncate(&row.summary, 110));
+    let title = format!(
+        "{decision_word}: {}",
+        crate::text::truncate(row.summary.trim(), 110)
+    );
 
     let annotations = annotations_for(&row.findings);
     let summary = cap_check_summary(reviewer_check_summary(row, &annotations));
@@ -221,15 +224,4 @@ pub(super) fn annotations_for(findings: &[Finding]) -> Vec<Annotation> {
             message: annotation_message(&f.detail),
         })
         .collect()
-}
-
-/// Truncate `text` to `max` characters, adding an ellipsis marker when cut. Kept
-/// ASCII (`...`) to match the house style.
-pub(super) fn truncate(text: &str, max: usize) -> String {
-    let trimmed = text.trim();
-    if trimmed.chars().count() <= max {
-        return trimmed.to_string();
-    }
-    let kept: String = trimmed.chars().take(max.saturating_sub(3)).collect();
-    format!("{}...", kept.trim_end())
 }

@@ -166,10 +166,7 @@ pub(super) fn reviewer_table(digest: &RunDigest) -> String {
 /// line range; a synthetic finding (the fail-closed reviewer-crash marker, which
 /// has no path) is rendered without a location.
 pub(super) fn finding_bullet(finding: &Finding) -> String {
-    let kind = match finding.kind {
-        FindingKind::Blocking => "blocking",
-        FindingKind::Optional => "optional",
-    };
+    let kind = finding.kind.as_str();
     if finding.path.is_empty() {
         format!("- **{kind}**: {}\n", finding.detail.trim())
     } else {

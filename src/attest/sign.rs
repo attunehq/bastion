@@ -269,20 +269,17 @@ fn public_key_line(key_file: &Path) -> Result<String> {
         return Ok(single_line(&content));
     }
 
-    let pub_sibling = key_file.with_extension(match key_file.extension() {
-        Some(ext) => format!("{}.pub", ext.to_string_lossy()),
-        None => "pub".to_string(),
-    });
-    // `with_extension` on an extensionless path (the common case: `id_ed25519`
-    // has no extension by ssh-keygen convention) does not append `.pub`, so
-    // build that form directly rather than relying on `with_extension`'s
-    // replace-not-append semantics.
-    let pub_sibling = if key_file.extension().is_none() {
-        let mut name = key_file.as_os_str().to_os_string();
-        name.push(".pub");
-        std::path::PathBuf::from(name)
-    } else {
-        pub_sibling
+    // A private key's public sibling is its full name plus `.pub`. For a key whose
+    // name carries a dotted suffix (`k.pem` -> `k.pem.pub`), `with_extension` does
+    // that. For the conventional extensionless name (`id_ed25519`), `with_extension`
+    // would replace rather than append, so build that form by hand.
+    let pub_sibling = match key_file.extension() {
+        Some(ext) => key_file.with_extension(format!("{}.pub", ext.to_string_lossy())),
+        None => {
+            let mut name = key_file.as_os_str().to_os_string();
+            name.push(".pub");
+            std::path::PathBuf::from(name)
+        }
     };
 
     if let Ok(pub_text) = std::fs::read_to_string(&pub_sibling) {

@@ -296,11 +296,10 @@ impl DriftWarning {
 
     /// The affected files as `(path, reason)` pairs, missing before drifted, so the
     /// rendering is deterministic.
-    fn items(&self) -> Vec<(&str, &'static str)> {
-        let mut items: Vec<(&str, &'static str)> = Vec::new();
-        items.extend(self.missing.iter().map(|p| (p.as_str(), "missing")));
-        items.extend(self.drifted.iter().map(|p| (p.as_str(), "drifted")));
-        items
+    fn items(&self) -> impl Iterator<Item = (&str, &'static str)> {
+        let missing = self.missing.iter().map(|p| (p.as_str(), "missing"));
+        let drifted = self.drifted.iter().map(|p| (p.as_str(), "drifted"));
+        missing.chain(drifted)
     }
 
     /// A one-line rendering for a terminal or log, which `bastion review` prints to
@@ -309,7 +308,6 @@ impl DriftWarning {
     pub fn plain(&self) -> String {
         let files = self
             .items()
-            .into_iter()
             .map(|(path, reason)| format!("{path} ({reason})"))
             .collect::<Vec<_>>()
             .join(", ");

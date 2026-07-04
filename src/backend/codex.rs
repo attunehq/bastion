@@ -29,8 +29,7 @@
 //! `docs/developer-guide/design.md`), then gives up with an error. The runner turns that error
 //! into a fail-closed `block` for gates; this backend never invents a verdict.
 
-use std::ffi::{OsStr, OsString};
-use std::path::Path;
+use std::ffi::OsString;
 
 use color_eyre::eyre::{Result, bail, eyre};
 use serde::Deserialize;
@@ -222,10 +221,7 @@ impl<R: CommandRunner> Backend for CodexBackend<R> {
         // when resuming, the new turn is only the reprompt suffix (the session
         // already holds the review). Without a thread id we fall back to a fresh
         // session and must re-send the full prompt.
-        let reprompt_text = match session.thread_id.as_deref() {
-            Some(_) => super::REPROMPT_SUFFIX.to_string(),
-            None => format!("{prompt}\n\n{}", super::REPROMPT_SUFFIX),
-        };
+        let reprompt_text = super::reprompt_text(&prompt, session.thread_id.is_some());
         let retry = self.reprompt_spec(request, session.thread_id.as_deref(), &reprompt_text);
         let retry_session = self.run_once(&retry).await?;
 
@@ -246,12 +242,8 @@ impl<R: CommandRunner> Backend for CodexBackend<R> {
 /// from, optionally prepending an earlier session's transcript (the original
 /// review, when the verdict was recovered on a reprompt).
 fn outcome(verdict: Verdict, session: CodexSession, prior: Option<&CodexSession>) -> ReviewOutcome {
-    let transcript = match prior {
-        Some(prior) if !prior.transcript.is_empty() => {
-            format!("{}\n{}", prior.transcript.trim_end(), session.transcript)
-        }
-        _ => session.transcript,
-    };
+    let transcript =
+        super::stitch_transcript(prior.map(|p| p.transcript.as_str()), session.transcript);
     ReviewOutcome {
         verdict,
         // Prefer the reprompt session's usage, falling back to the original's so
@@ -261,25 +253,16 @@ fn outcome(verdict: Verdict, session: CodexSession, prior: Option<&CodexSession>
     }
 }
 
-/// Build the full prompt handed to Codex for `request`: the shared changeset
-/// preamble (how to see the diff against the base branch), the interpolated review
-/// instruction, the untrusted review-context block (intent, discussion, and this
-/// reviewer's prior findings, when a producer supplied any), the shared
-/// exhaustive-findings instruction (report every issue in one pass), and the schema
-/// instruction.
+/// Build the full prompt handed to Codex for `request`: the [shared review
+/// body](super::review_prompt) closed with the fenced-YAML
+/// [`SCHEMA_INSTRUCTION`](super::SCHEMA_INSTRUCTION).
 fn build_prompt(request: &ReviewRequest<'_>) -> String {
-    let reviewer = request.reviewer;
-    let preamble = super::changeset_preamble(request.base);
-    let interpolated = super::interpolate(&reviewer.prompt, &reviewer.inputs);
-    let context = super::context_segment(request);
-    let exhaustive = super::EXHAUSTIVE_FINDINGS_INSTRUCTION;
-    let schema = super::SCHEMA_INSTRUCTION;
-    format!("{preamble}\n\n{interpolated}\n\n{context}{exhaustive}\n\n{schema}")
+    super::review_prompt(request, super::SCHEMA_INSTRUCTION)
 }
 
 /// A parsed Codex `exec --json` session: the reconstructed transcript, the final
 /// agent message, usage when reported, and the thread id used to resume.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct CodexSession {
     /// The human-readable transcript, reconstructed from the event stream.
     transcript: String,
@@ -303,7 +286,8 @@ impl CodexSession {
     /// Returns an error if the stream carried neither a recognized event nor any
     /// other output to record.
     fn parse(stdout: &str) -> Result<Self> {
-        let mut acc = SessionAccumulator::default();
+        let mut acc = CodexSession::default();
+        let mut saw_event = false;
 
         for line in stdout.lines() {
             let trimmed = line.trim();
@@ -312,7 +296,7 @@ impl CodexSession {
             }
             match serde_json::from_str::<CodexEvent>(trimmed) {
                 Ok(event) => {
-                    acc.saw_event = true;
+                    saw_event = true;
                     event.fold_into(&mut acc);
                 }
                 Err(_) => {
@@ -323,16 +307,40 @@ impl CodexSession {
             }
         }
 
-        if !acc.saw_event && acc.transcript.is_empty() {
+        if !saw_event && acc.transcript.is_empty() {
             bail!("codex produced no output to parse");
         }
 
-        Ok(Self {
-            transcript: acc.transcript,
-            last_message: acc.last_message,
-            usage: acc.usage,
-            thread_id: acc.thread_id,
-        })
+        Ok(acc)
+    }
+
+    /// Record a message in the transcript and as the latest agent message.
+    fn record_message(&mut self, message: String) {
+        self.transcript.push_str(&message);
+        self.transcript.push('\n');
+        self.last_message = Some(message);
+    }
+
+    /// Record reasoning text in the transcript only.
+    fn record_reasoning(&mut self, text: &str) {
+        self.transcript.push_str(text);
+        self.transcript.push('\n');
+    }
+
+    /// Record token/cost usage.
+    fn record_usage(
+        &mut self,
+        input_tokens: u64,
+        output_tokens: u64,
+        cached_input_tokens: u64,
+        cost_usd: Option<f64>,
+    ) {
+        self.usage = Some(Usage {
+            tokens_in: input_tokens,
+            tokens_out: output_tokens,
+            cache_read: cached_input_tokens,
+            cost_usd: cost_usd.map_or_else(Money::default, super::money_from_dollars),
+        });
     }
 
     /// The final agent message text, if the session produced one.
@@ -445,50 +453,9 @@ struct CodexUsage {
     cost_usd: Option<f64>,
 }
 
-/// The mutable accumulator a stream of [`CodexEvent`]s folds into.
-#[derive(Debug, Default)]
-struct SessionAccumulator {
-    transcript: String,
-    last_message: Option<String>,
-    usage: Option<Usage>,
-    thread_id: Option<String>,
-    saw_event: bool,
-}
-
-impl SessionAccumulator {
-    /// Record a message in the transcript and as the latest agent message.
-    fn record_message(&mut self, message: String) {
-        self.transcript.push_str(&message);
-        self.transcript.push('\n');
-        self.last_message = Some(message);
-    }
-
-    /// Record reasoning text in the transcript only.
-    fn record_reasoning(&mut self, text: &str) {
-        self.transcript.push_str(text);
-        self.transcript.push('\n');
-    }
-
-    /// Record token/cost usage.
-    fn record_usage(
-        &mut self,
-        input_tokens: u64,
-        output_tokens: u64,
-        cached_input_tokens: u64,
-        cost_usd: Option<f64>,
-    ) {
-        self.usage = Some(Usage {
-            tokens_in: input_tokens,
-            tokens_out: output_tokens,
-            cache_read: cached_input_tokens,
-            cost_usd: cost_usd.map_or_else(Money::default, super::money_from_dollars),
-        });
-    }
-}
-
 impl CodexEvent {
     /// Fold this event into `acc`.
-    fn fold_into(self, acc: &mut SessionAccumulator) {
+    fn fold_into(self, acc: &mut CodexSession) {
         match self {
             CodexEvent::ThreadStarted { thread_id } => acc.thread_id = Some(thread_id),
             CodexEvent::ItemCompleted { item } => match item {
@@ -517,36 +484,14 @@ impl CodexEvent {
     }
 }
 
-/// Whether `program` resolves to an executable on `PATH` or as a direct path.
-///
-/// Used by real-binary tests to detect-and-skip when the Codex CLI is absent.
-#[must_use]
-pub fn program_available(program: impl AsRef<OsStr>) -> bool {
-    let program = program.as_ref();
-    let path = Path::new(program);
-    if path.is_absolute() || path.components().count() > 1 {
-        return path.is_file();
-    }
-    let Some(paths) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&paths).any(|dir| {
-        let candidate = dir.join(program);
-        candidate.is_file()
-            || candidate.with_extension("exe").is_file()
-            || candidate.with_extension("cmd").is_file()
-            || candidate.with_extension("bat").is_file()
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
-    use crate::backend::command::{CommandOutput, SystemCommandRunner};
+    use crate::backend::command::{CommandOutput, SystemCommandRunner, program_available};
     use crate::event::RunId;
     use crate::reviewer::{Capabilities, Mode, Reviewer};
     use crate::verdict::{Decision, FindingKind};
@@ -1193,10 +1138,5 @@ findings:
         let outcome = backend.review(&req).await.expect("real subprocess parses");
         assert_eq!(outcome.verdict.decision, Decision::Pass);
         assert_eq!(outcome.verdict.summary, "from a real process");
-    }
-
-    #[test]
-    fn program_available_detects_missing_binary() {
-        assert!(!program_available("definitely-not-a-real-program-xyz123"));
     }
 }
