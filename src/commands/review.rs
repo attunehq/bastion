@@ -1,33 +1,30 @@
-//! Command handlers.
-//!
-//! Each function implements one CLI subcommand. The read-back commands
-//! (`transcript`, `show`, `runs`, `clean`) are fully functional over saved runs;
-//! `review` does real config discovery, git-based change detection, and routing,
-//! then hands off to the [`crate::runner`] to execute the matched reviewers. The
-//! runner owns event emission and persistence; this handler renders the stream and
-//! reports the aggregate decision so the CLI can set the exit status.
-//! `codeowners` is pure generation.
+//! The `bastion review` gate: routing, attestation replay, carry, execution.
 
-use std::io::{self, Write};
-use std::num::NonZeroU64;
-use std::path::{Path, PathBuf};
-use std::time::Duration;
-
-use color_eyre::eyre::{Context, Result, bail, eyre};
-
+use super::skills::warn_on_stale_skills;
 use crate::config::Config;
 use crate::context::ReviewContext;
-use crate::event::{ReviewerRef, RunEvent, RunId};
+use crate::event::ReviewerRef;
+use crate::event::RunEvent;
+use crate::event::RunId;
 use crate::git;
 use crate::paths::Layout;
-use crate::render::{self, Format};
-use crate::reviewer::{Mode, ModelId};
+use crate::render;
+use crate::render::Format;
 use crate::routing::Router;
-use crate::runner::{self, ExecContext};
+use crate::runner;
+use crate::runner::ExecContext;
 use crate::seal::SealBindings;
-use crate::skills;
 use crate::store;
-use crate::verdict::{Decision, Money};
+use crate::verdict::Decision;
+use crate::verdict::Money;
+use color_eyre::eyre::Context;
+use color_eyre::eyre::Result;
+use color_eyre::eyre::bail;
+use color_eyre::eyre::eyre;
+use std::io;
+use std::io::Write;
+use std::num::NonZeroU64;
+use std::path::Path;
 
 /// What a `bastion review` invocation asked for, beyond where to run it.
 ///
@@ -171,32 +168,8 @@ pub async fn review(
         return Ok(Decision::Pass);
     }
 
-    // Assemble the review context: the author's stated intent (the PR body, or this
-    // branch's commit messages locally), this branch's prior findings recalled from the
-    // run store, and the surrounding discussion (GitHub only). Empty when nothing
-    // applies, which leaves every reviewer's prompt exactly as it was.
-    let mut context = ReviewContext {
-        intent: git::commit_messages(&repo_root, base),
-        comments: Vec::new(),
-        prior_findings: store::prior_findings(layout, &branch),
-    };
-    let mut gathered_github: Option<crate::github::context::GatheredContext> = None;
-    if let Some(source) = github.as_ref() {
-        match gather_github_context(source).await {
-            Ok(gathered) => {
-                // A PR body is a better statement of intent than the commit messages,
-                // so it wins when present; the discussion is GitHub-only.
-                if gathered.intent.is_some() {
-                    context.intent = gathered.intent.clone();
-                }
-                context.comments = gathered.comments.clone();
-                gathered_github = Some(gathered);
-            }
-            Err(err) => {
-                eprintln!("bastion review: continuing without GitHub context ({err:#})");
-            }
-        }
-    }
+    let (context, gathered_github) =
+        assemble_context(&repo_root, base, &branch, layout, github.as_ref()).await;
 
     let seal = derive_seal_bindings(&repo_root, base, &repo_attestation);
     // A dirty working tree is a first-class seal input, not merely a caveat: a
@@ -235,117 +208,25 @@ pub async fn review(
         _ => None,
     };
 
-    let (replayed, attestation, attestation_fallback, matched): (
-        std::collections::BTreeMap<String, runner::ReplayedReviewer>,
-        Option<runner::AttestationAudit>,
-        Option<RunEvent>,
-        Vec<&crate::reviewer::Reviewer>,
-    ) = match attested {
-        Some(crate::attest::AttestationOutcome::Replay(plan)) => {
-            let bundle_public_key = plan.bundle.public_key.clone();
-            let bundle_attested_at = plan.bundle.attested_at.clone();
-            let mut replayed = std::collections::BTreeMap::new();
-            for reviewer in &matched {
-                if let Some(event) = plan.replay.get(&reviewer.name) {
-                    replayed.insert(
-                        reviewer.name.clone(),
-                        runner::ReplayedReviewer {
-                            reviewer: (*reviewer).clone(),
-                            event: event.clone(),
-                        },
-                    );
-                }
-            }
-            let fresh: Vec<&crate::reviewer::Reviewer> = matched
-                .iter()
-                .copied()
-                .filter(|r| !replayed.contains_key(&r.name))
-                .collect();
-            if replayed.is_empty() {
-                (replayed, None, None, fresh)
-            } else {
-                let callout = format!(
-                    "bastion review: {} reviewer(s) replayed from a signed local attestation (key {}, attested {}): {}",
-                    replayed.len(),
-                    bundle_public_key,
-                    bundle_attested_at,
-                    replayed.keys().cloned().collect::<Vec<_>>().join(", "),
-                );
-                // Fallible on purpose: a closed stderr must not panic the gate
-                // out of an otherwise valid review.
-                let _ = writeln!(io::stderr(), "{callout}");
-                (
-                    replayed,
-                    Some(runner::AttestationAudit {
-                        public_key: bundle_public_key,
-                        attested_at: bundle_attested_at,
-                    }),
-                    None,
-                    fresh,
-                )
-            }
-        }
-        Some(crate::attest::AttestationOutcome::Fallback { reason }) => {
-            // Fallible on purpose: the fallback must still render and the
-            // fresh reviewers must still run if stderr is closed.
-            let _ = writeln!(
-                io::stderr(),
-                "bastion review: attestation not honored: {reason}"
-            );
-            let fallback = RunEvent::AttestationFallback {
-                run: run.clone(),
-                reason,
-            };
-            render::write_event(&mut out, format, &fallback)?;
-            (
-                std::collections::BTreeMap::new(),
-                None,
-                Some(fallback),
-                matched,
-            )
-        }
-        // No note was offered (`NotAttested`), or attestation was never attempted
-        // (`None`): either way there is nothing to tell the author, so run every
-        // matched reviewer fresh with no event and no stderr line. Surfacing a
-        // "no attestation note found" notice here would nag every un-attested PR.
-        Some(crate::attest::AttestationOutcome::NotAttested) | None => {
-            (std::collections::BTreeMap::new(), None, None, matched)
-        }
-    };
+    let AttestationResolution {
+        replayed,
+        attestation,
+        fallback: attestation_fallback,
+        fresh: matched,
+    } = resolve_attestation(attested, matched, &run);
+    // Render the fallback (an offered attestation that was refused) to the live
+    // stream before any reviewer resolves, so the plan reads the reason up front.
+    // It is also carried into `ExecContext` so persistence keeps it.
+    if let Some(fallback) = &attestation_fallback {
+        render::write_event(&mut out, format, fallback)?;
+    }
 
     // Trigger-scoped digests for everything about to run, stamped onto each
-    // resolved event so the *next* run can decide whether to carry it. Best
-    // effort: a digest that fails to compute only leaves that reviewer
-    // executing fresh and uncarryable, never fails the review.
-    let mut scope_digests: std::collections::BTreeMap<String, String> = Default::default();
-    let mut digest_probe: Option<runner::DigestProbe> = None;
-    match git::merge_base(&repo_root, base) {
-        Ok(merge_base) => {
-            for reviewer in &matched {
-                match crate::carry::scope_digest(&repo_root, base, &merge_base, reviewer, &changed)
-                {
-                    Ok(digest) => {
-                        scope_digests.insert(reviewer.name.clone(), digest);
-                    }
-                    Err(err) => tracing::warn!(
-                        reviewer = %reviewer.name,
-                        error = %err,
-                        "could not compute a scope digest; the reviewer executes fresh and cannot be carried from"
-                    ),
-                }
-            }
-            // The runner re-derives every stamped digest after the reviewers
-            // finish, so a tree that changed mid-run cannot leave a stale
-            // digest behind for a later run to carry from.
-            digest_probe = Some(runner::DigestProbe {
-                base: base.to_string(),
-                merge_base,
-            });
-        }
-        Err(err) => {
-            tracing::warn!(error = %err, "could not resolve a merge base; no scope digests this run");
-        }
-    }
+    // resolved event so the *next* run can decide whether to carry it. The runner
+    // re-derives every stamped digest after the reviewers finish (through the
+    // probe), so a tree that changed mid-run cannot leave a stale digest behind
+    // for a later run to carry from.
+    let (scope_digests, digest_probe) = plan_scope_digests(&repo_root, base, &matched, &changed);
 
     // Carry prior passes forward ([`crate::carry`]): both locally and in CI, a
     // reviewer whose prior run on this branch passed and whose trigger-scoped
@@ -358,25 +239,15 @@ pub async fn review(
     // candidate (it is no longer in `matched`). Carry runs only for the full
     // triggered set (an explicit `--reviewer` selection asks for those reviewers to
     // run) and only unless `--fresh` opted out.
-    let carried = if !fresh && only.is_empty() {
-        let candidates: Vec<(&crate::reviewer::Reviewer, String)> = matched
-            .iter()
-            .filter_map(|r| {
-                scope_digests
-                    .get(&r.name)
-                    .map(|digest| (*r, digest.clone()))
-            })
-            .collect();
-        crate::carry::plan(
-            layout,
-            &branch,
-            &candidates,
-            &repo_attestation.reviewers,
-            crate::seal::embedded_secret(),
-        )
-    } else {
-        Default::default()
-    };
+    let carried = plan_carry(
+        layout,
+        &branch,
+        &matched,
+        &scope_digests,
+        &repo_attestation.reviewers,
+        fresh,
+        &only,
+    );
     let matched: Vec<&crate::reviewer::Reviewer> = matched
         .into_iter()
         .filter(|r| !carried.contains_key(&r.name))
@@ -500,6 +371,236 @@ fn select_reviewers<'a>(
         .copied()
         .filter(|r| requested.contains(r.name.as_str()))
         .collect())
+}
+
+/// Assemble the review context every reviewer sees beyond the diff: the author's
+/// stated intent (the PR body when reviewing one, otherwise this branch's commit
+/// messages), this branch's prior findings recalled from the run store, and the
+/// surrounding discussion (GitHub only).
+///
+/// GitHub gathering is best effort: a failure to reach it is logged and the
+/// review proceeds on the local context alone. The returned
+/// [`GatheredContext`](crate::github::context::GatheredContext), when present, is
+/// also what attestation replay reads the PR author and head SHA from. Empty
+/// context leaves every reviewer's prompt exactly as it was.
+async fn assemble_context(
+    repo_root: &Path,
+    base: &str,
+    branch: &str,
+    layout: &Layout,
+    github: Option<&GithubSource>,
+) -> (
+    ReviewContext,
+    Option<crate::github::context::GatheredContext>,
+) {
+    let mut context = ReviewContext {
+        intent: git::commit_messages(repo_root, base),
+        comments: Vec::new(),
+        prior_findings: store::prior_findings(layout, branch),
+    };
+    let Some(source) = github else {
+        return (context, None);
+    };
+    match gather_github_context(source).await {
+        Ok(gathered) => {
+            // A PR body is a better statement of intent than the commit messages,
+            // so it wins when present; the discussion is GitHub-only.
+            if gathered.intent.is_some() {
+                context.intent = gathered.intent.clone();
+            }
+            context.comments = gathered.comments.clone();
+            (context, Some(gathered))
+        }
+        Err(err) => {
+            eprintln!("bastion review: continuing without GitHub context ({err:#})");
+            (context, None)
+        }
+    }
+}
+
+/// What resolving a run's attestation plan settled: which reviewers replay, the
+/// audit trail, an optional fallback event, and the reviewers still to execute.
+struct AttestationResolution<'a> {
+    /// Reviewers replaying a verified attestation instead of executing, keyed by
+    /// name. Empty for any local review and for any CI run without a verified
+    /// bundle.
+    replayed: std::collections::BTreeMap<String, runner::ReplayedReviewer>,
+    /// The attestation audit trail, present only when something replayed.
+    attestation: Option<runner::AttestationAudit>,
+    /// The `run.attestation-fallback` event to render and persist, present only
+    /// when an offered attestation was refused. A genuinely absent note is not a
+    /// refusal and produces no event.
+    fallback: Option<RunEvent>,
+    /// The reviewers that still execute fresh this run: everything not replayed.
+    fresh: Vec<&'a crate::reviewer::Reviewer>,
+}
+
+/// Resolve a computed [`AttestationOutcome`](crate::attest::AttestationOutcome)
+/// into the run's replay set, audit trail, optional fallback event, and the
+/// reviewers still to execute fresh.
+///
+/// Renders no `run.jsonl` event itself: the caller renders the returned
+/// `fallback` so the ordering (before any reviewer resolves) stays visible at the
+/// call site. The stderr callouts it does write are advisory and deliberately
+/// fallible, since a closed stderr must never panic the gate out of an otherwise
+/// valid review. A genuinely absent note (`NotAttested`) or an attestation never
+/// attempted (`None`) runs every reviewer fresh with no event and no stderr line,
+/// so an un-attested PR is never nagged.
+fn resolve_attestation<'a>(
+    attested: Option<crate::attest::AttestationOutcome>,
+    matched: Vec<&'a crate::reviewer::Reviewer>,
+    run: &RunId,
+) -> AttestationResolution<'a> {
+    let plan = match attested {
+        Some(crate::attest::AttestationOutcome::Replay(plan)) => plan,
+        Some(crate::attest::AttestationOutcome::Fallback { reason }) => {
+            let _ = writeln!(
+                io::stderr(),
+                "bastion review: attestation not honored: {reason}"
+            );
+            return AttestationResolution {
+                replayed: std::collections::BTreeMap::new(),
+                attestation: None,
+                fallback: Some(RunEvent::AttestationFallback {
+                    run: run.clone(),
+                    reason,
+                }),
+                fresh: matched,
+            };
+        }
+        Some(crate::attest::AttestationOutcome::NotAttested) | None => {
+            return AttestationResolution {
+                replayed: std::collections::BTreeMap::new(),
+                attestation: None,
+                fallback: None,
+                fresh: matched,
+            };
+        }
+    };
+
+    let bundle_public_key = plan.bundle.public_key.clone();
+    let bundle_attested_at = plan.bundle.attested_at.clone();
+    let mut replayed = std::collections::BTreeMap::new();
+    for reviewer in &matched {
+        if let Some(event) = plan.replay.get(&reviewer.name) {
+            replayed.insert(
+                reviewer.name.clone(),
+                runner::ReplayedReviewer {
+                    reviewer: (*reviewer).clone(),
+                    event: event.clone(),
+                },
+            );
+        }
+    }
+    let fresh: Vec<&crate::reviewer::Reviewer> = matched
+        .iter()
+        .copied()
+        .filter(|r| !replayed.contains_key(&r.name))
+        .collect();
+    if replayed.is_empty() {
+        return AttestationResolution {
+            replayed,
+            attestation: None,
+            fallback: None,
+            fresh,
+        };
+    }
+
+    let callout = format!(
+        "bastion review: {} reviewer(s) replayed from a signed local attestation (key {}, attested {}): {}",
+        replayed.len(),
+        bundle_public_key,
+        bundle_attested_at,
+        replayed.keys().cloned().collect::<Vec<_>>().join(", "),
+    );
+    // Fallible on purpose: a closed stderr must not panic the gate.
+    let _ = writeln!(io::stderr(), "{callout}");
+    AttestationResolution {
+        replayed,
+        attestation: Some(runner::AttestationAudit {
+            public_key: bundle_public_key,
+            attested_at: bundle_attested_at,
+        }),
+        fallback: None,
+        fresh,
+    }
+}
+
+/// Compute the trigger-scoped digest for each reviewer about to run, plus the
+/// probe the runner needs to re-derive them after execution.
+///
+/// Best effort: a reviewer whose digest fails to compute is left out of the map
+/// (it executes fresh and cannot be carried from), and a run with no resolvable
+/// merge base gets no digests and no probe at all. Neither ever fails the review.
+fn plan_scope_digests(
+    repo_root: &Path,
+    base: &str,
+    matched: &[&crate::reviewer::Reviewer],
+    changed: &[String],
+) -> (
+    std::collections::BTreeMap<String, String>,
+    Option<runner::DigestProbe>,
+) {
+    let mut scope_digests = std::collections::BTreeMap::new();
+    let merge_base = match git::merge_base(repo_root, base) {
+        Ok(merge_base) => merge_base,
+        Err(err) => {
+            tracing::warn!(error = %err, "could not resolve a merge base; no scope digests this run");
+            return (scope_digests, None);
+        }
+    };
+    for reviewer in matched {
+        match crate::carry::scope_digest(repo_root, base, &merge_base, reviewer, changed) {
+            Ok(digest) => {
+                scope_digests.insert(reviewer.name.clone(), digest);
+            }
+            Err(err) => tracing::warn!(
+                reviewer = %reviewer.name,
+                error = %err,
+                "could not compute a scope digest; the reviewer executes fresh and cannot be carried from"
+            ),
+        }
+    }
+    let probe = runner::DigestProbe {
+        base: base.to_string(),
+        merge_base,
+    };
+    (scope_digests, Some(probe))
+}
+
+/// Plan which prior passes carry forward this run ([`crate::carry`]).
+///
+/// Carry runs only for the full triggered set and only when the author did not
+/// opt out: `--fresh` disables it, and an explicit `--reviewer` selection asks
+/// for those reviewers to run, so a non-empty `only` disables it too. A reviewer
+/// with no computed scope digest is not a carry candidate.
+fn plan_carry(
+    layout: &Layout,
+    branch: &str,
+    matched: &[&crate::reviewer::Reviewer],
+    scope_digests: &std::collections::BTreeMap<String, String>,
+    repo_reviewers: &std::collections::BTreeSet<String>,
+    fresh: bool,
+    only: &[String],
+) -> std::collections::BTreeMap<String, crate::carry::Carried> {
+    if fresh || !only.is_empty() {
+        return Default::default();
+    }
+    let candidates: Vec<(&crate::reviewer::Reviewer, String)> = matched
+        .iter()
+        .filter_map(|r| {
+            scope_digests
+                .get(&r.name)
+                .map(|digest| (*r, digest.clone()))
+        })
+        .collect();
+    crate::carry::plan(
+        layout,
+        branch,
+        &candidates,
+        repo_reviewers,
+        crate::seal::embedded_secret(),
+    )
 }
 
 /// Attempt to verify and plan an attestation replay for a CI run.
@@ -666,538 +767,6 @@ async fn gather_github_context(
     crate::github::context::gather(&client, &source.owner, &source.name, source.pr.get()).await
 }
 
-/// `bastion validate`: parse the reviewer registry and report any problems.
-///
-/// Loads the registry (the explicit `file`, or the merged set discovered by
-/// walking up from `cwd` and layering in the user-level config dir) through the
-/// same [`Config`] path `bastion review` uses, so it surfaces exactly the errors a
-/// real review would hit at load time: malformed YAML, an unknown field, a
-/// duplicate reviewer name, or a model pinned under `backend: any`. On success it
-/// prints a one-line summary and the parsed reviewers and returns `Ok`; on any
-/// problem it returns the error, which `color_eyre` renders before the process
-/// exits non-zero, so the command doubles as a CI lint and a cheap local check that
-/// never spends a model call.
-///
-/// `user_dir` is the user-level config directory layered into discovery (`None` to
-/// skip it). An explicit `file` is validated on its own, with no layering, since it
-/// is a deliberate single-file check.
-///
-/// # Errors
-///
-/// Returns an error if no registry is found, the file cannot be read, or it fails
-/// to parse or validate.
-pub fn validate(cwd: &Path, file: Option<&Path>, user_dir: Option<&Path>) -> Result<()> {
-    let (label, config) = match file {
-        Some(file) => (file.display().to_string(), Config::load(file)?),
-        None => {
-            // Resolve from the repo root when we are inside one (so the command
-            // works from any subdirectory, like `review`), falling back to `cwd`
-            // when git cannot tell us, which keeps a not-yet-initialized repo
-            // working. `discover_merged_located` warns on the deprecated location,
-            // gives the clear "no registry found" error, and hands back the sources
-            // it loaded, so the summary reports exactly the files that were merged.
-            let root = git::repo_root(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-            let (sources, config) = Config::discover_merged_located(&root, user_dir)?;
-            (describe_sources(&sources), config)
-        }
-    };
-
-    let gates = config
-        .reviewers
-        .iter()
-        .filter(|r| r.mode == Mode::Gate)
-        .count();
-    let advisors = config.reviewers.len() - gates;
-
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    writeln!(
-        out,
-        "{label} is valid: {} reviewer(s), {gates} gate(s), {advisors} advisor(s).",
-        config.reviewers.len(),
-    )?;
-    for reviewer in &config.reviewers {
-        let model = reviewer.model.as_ref().map_or("default", ModelId::as_str);
-        writeln!(
-            out,
-            "  - {} ({}, backend: {}, model: {model})",
-            reviewer.name,
-            reviewer.mode.as_str(),
-            reviewer.backend.as_str(),
-        )?;
-    }
-    Ok(())
-}
-
-/// Describe the registry [`Sources`] that fed a merged config, for the `validate`
-/// summary line. A single source reads as its own path (so the common case matches
-/// the pre-merge wording); both sources name each file so it is clear what was
-/// merged. At least one is always present, since discovery errors otherwise.
-fn describe_sources(sources: &crate::config::Sources) -> String {
-    match (&sources.repo, &sources.user) {
-        (Some(repo), Some(user)) => format!(
-            "the merged registry (repo: {}, user: {})",
-            repo.path.display(),
-            user.display()
-        ),
-        (Some(repo), None) => repo.path.display().to_string(),
-        (None, Some(user)) => user.display().to_string(),
-        (None, None) => unreachable!("discover_merged_located errors when both sources are absent"),
-    }
-}
-
-/// `bastion transcript [<run>] <reviewer>`: print a saved session transcript.
-///
-/// # Errors
-///
-/// Returns an error if the run or transcript does not exist.
-pub fn transcript(layout: &Layout, run: Option<&str>, reviewer: &str) -> Result<()> {
-    let run = store::resolve_run(layout, run)?;
-    let path = layout.transcript(&run, reviewer);
-    let text = std::fs::read_to_string(&path).wrap_err_with(|| {
-        format!(
-            "no saved transcript for reviewer '{reviewer}' in run '{run}' ({})",
-            path.display()
-        )
-    })?;
-    io::stdout()
-        .write_all(text.as_bytes())
-        .wrap_err("writing transcript")?;
-    Ok(())
-}
-
-/// `bastion show [<run>]`: re-emit a past run's verdicts and findings.
-///
-/// # Errors
-///
-/// Returns an error if the run does not exist or cannot be read.
-pub fn show(layout: &Layout, run: Option<&str>, format: Format) -> Result<()> {
-    let run = store::resolve_run(layout, run)?;
-    let events = store::read_run(layout, &run)?;
-
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    for event in &events {
-        if matches!(
-            event,
-            RunEvent::ReviewerResolved { .. } | RunEvent::RunCompleted { .. }
-        ) {
-            render::write_event(&mut out, format, event)?;
-        }
-    }
-    Ok(())
-}
-
-/// `bastion runs`: list recorded runs.
-///
-/// # Errors
-///
-/// Returns an error if the runs directory cannot be read.
-pub fn runs(layout: &Layout, format: Format) -> Result<()> {
-    let runs = store::list_runs(layout)?;
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    render::write_runs(&mut out, format, &runs).wrap_err("rendering runs")?;
-    Ok(())
-}
-
-/// `bastion clean`: prune saved runs.
-///
-/// # Errors
-///
-/// Returns an error if a run cannot be removed.
-pub fn clean(layout: &Layout, keep: Option<usize>, older_than: Option<Duration>) -> Result<()> {
-    let keep = if keep.is_none() && older_than.is_none() {
-        Some(default_keep())
-    } else {
-        keep
-    };
-    let removed = store::prune(layout, keep, older_than)?;
-    println!("removed {} run(s)", removed.len());
-    for id in &removed {
-        println!("  {id}");
-    }
-    Ok(())
-}
-
-/// `bastion github codeowners`: print a CODEOWNERS block for the reviewer-policy paths.
-///
-/// Covers the reviewer registry, the Bastion workflow, and the CODEOWNERS file
-/// itself, so any PR touching review policy requires a human review.
-///
-/// # Errors
-///
-/// Returns an error if writing to stdout fails.
-pub fn codeowners(owners: &[String]) -> Result<()> {
-    io::stdout()
-        .write_all(crate::github::codeowners::block(owners).as_bytes())
-        .wrap_err("writing CODEOWNERS block")?;
-    Ok(())
-}
-
-/// `bastion attest`: sign the latest sealed run (or `run`, when given) as an
-/// attestation note on HEAD.
-///
-/// Resolves the repository root from the current directory and hands off to
-/// [`crate::attest::attest`] with the build's embedded sealing secret; the real
-/// verification and signing logic lives there so it stays testable without a
-/// CLI harness.
-///
-/// # Errors
-///
-/// Returns an error under any of the refusals documented on
-/// [`crate::attest::attest`] (an unsealed run, a seam-tainted seal, a
-/// tampered run store, repository drift since the run, or no resolvable
-/// signing key), or if writing to stdout fails.
-pub fn attest(layout: &Layout, run: Option<&str>, key: Option<&Path>) -> Result<()> {
-    let cwd = std::env::current_dir().wrap_err("determining the current directory")?;
-    let root = git::repo_root(&cwd)?;
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    crate::attest::attest(
-        &root,
-        layout,
-        run,
-        key,
-        crate::seal::embedded_secret(),
-        &mut out,
-    )
-}
-
-/// `bastion update`: resolve the latest release and swap the running binary for it.
-///
-/// With `--check` it only reports where the running version stands. Otherwise it
-/// downloads the platform archive, verifies it against the release SHA-256
-/// checksums, and installs it over the running binary in place. `--force`
-/// reinstalls even when already up to date.
-///
-/// # Errors
-///
-/// Returns an error if the latest release cannot be resolved, the download or
-/// checksum verification fails, or the in-place binary swap fails.
-pub async fn update(check: bool, force: bool) -> Result<()> {
-    use crate::update::{self, Status};
-
-    let current = crate::version::VERSION;
-    let updater = update::Updater::new()?;
-    let latest = updater
-        .latest_tag()
-        .await
-        .wrap_err("resolve the latest bastion release")?;
-    let status = update::status(current, &latest);
-
-    if check {
-        print_update_status(current, &latest, status);
-        return Ok(());
-    }
-    if status == Status::UpToDate && !force {
-        println!("bastion {current} is already the latest release.");
-        return Ok(());
-    }
-
-    match status {
-        // A development build has no meaningful ordering against the release, so be
-        // explicit that this installs the latest published release over it.
-        Status::Development => println!(
-            "Installing the latest release {latest} (replacing development build {current})."
-        ),
-        _ => println!("Updating bastion from {current} to {latest}."),
-    }
-
-    // Stage the download in a temp file, then let self-replace swap it over the
-    // running binary. Dropping the staged file afterward removes the leftover.
-    let staged = tempfile::Builder::new()
-        .prefix("bastion-update-")
-        .tempfile()
-        .wrap_err("create a staging file for the update")?;
-    updater.fetch(&latest, staged.path()).await?;
-    update::replace_running_exe(staged.path())?;
-    drop(staged);
-
-    println!("bastion updated to {latest}.");
-    Ok(())
-}
-
-/// The detached background worker (`bastion __update-check`) spawned by the startup
-/// check: refresh the cached latest release, silently, then exit. Any error is
-/// swallowed inside [`crate::update::run_check_worker`], so a failed refresh never
-/// surfaces; the cache is retried after its TTL.
-///
-/// # Errors
-///
-/// Never returns an error; the signature matches the other async handlers so the
-/// dispatcher can treat it uniformly.
-pub async fn update_check_worker() -> Result<()> {
-    crate::update::run_check_worker().await;
-    Ok(())
-}
-
-/// Print the result of `bastion update --check`.
-fn print_update_status(current: &str, latest: &str, status: crate::update::Status) {
-    use crate::update::Status;
-    match status {
-        Status::Development => {
-            println!("bastion is a development build ({current}); the latest release is {latest}.");
-            println!("Run `bastion update` to install it.");
-        }
-        Status::UpToDate => {
-            println!("bastion {current} is up to date (latest release {latest}).");
-        }
-        Status::UpdateAvailable => {
-            println!("update available: {latest} (current {current}).");
-            println!("Run `bastion update` to install it.");
-        }
-    }
-}
-
-/// `bastion github report`: post a finished run's results to its pull request.
-///
-/// Reads the persisted run (the latest, or `run` when given), builds the GitHub
-/// client from the Actions environment (`GITHUB_TOKEN`, `GITHUB_API_URL`), and
-/// upserts the sticky PR comment plus a check run per reviewer and the aggregate
-/// `bastion` check. The run is already persisted by `bastion review`, so this is a
-/// pure read-and-post step that can run after the gate has decided.
-///
-/// `slug` is the `owner/name` repository, `pr` the pull request number, and `sha`
-/// the head commit the check runs attach to (all supplied by the workflow from the
-/// pull-request event).
-///
-/// # Errors
-///
-/// Returns an error if the run cannot be read, the client cannot be built (e.g. a
-/// missing token), or a GitHub request fails. A missing run is reported as a
-/// non-fatal notice (so a report step running after an infrastructure failure does
-/// not pile a second, confusing error on top of the real one).
-pub async fn github_report(
-    layout: &Layout,
-    cwd: &Path,
-    slug: &str,
-    pr: u64,
-    sha: &str,
-    run: Option<&str>,
-) -> Result<()> {
-    let ctx = crate::github::PrContext::new(slug, pr, sha)?;
-
-    let run = match store::resolve_run(layout, run) {
-        Ok(run) => run,
-        Err(err) => {
-            // No run to report: surface it as a notice and stop, rather than failing
-            // the step on top of whatever already went wrong upstream.
-            eprintln!("bastion github report: nothing to report ({err:#})");
-            return Ok(());
-        }
-    };
-    let events = store::read_run(layout, &run)?;
-
-    // Fold a skills-freshness advisory into the comment when the checked-out repo's
-    // bundled skills are missing or stale, mirroring the stderr notice the local
-    // review prints. Best effort, so a check error never fails the report step.
-    let skills_warning = stale_skills_warning(cwd);
-
-    let client = crate::github::client::RestClient::from_env()?;
-    let summary =
-        crate::github::report::report(&client, &ctx, &events, skills_warning.as_ref()).await?;
-
-    writeln!(
-        io::stdout(),
-        "Reported run {run} to {slug}#{pr}: {summary}."
-    )
-    .wrap_err("writing report summary")?;
-    Ok(())
-}
-
-/// `bastion skills install`: write the bundled agent skills into the repository.
-///
-/// Resolves the repository root from `cwd`, writes each bundled skill into every
-/// target directory (the defaults, or the `--dir` overrides), and prints what it
-/// did. Existing files that differ are left untouched unless `force` is set, so a
-/// local edit is never clobbered silently.
-///
-/// # Errors
-///
-/// Returns an error if a skill directory cannot be created or a file cannot be
-/// read or written, or if writing the summary to stdout fails.
-pub fn skills_install(cwd: &Path, dirs: &[PathBuf], force: bool) -> Result<()> {
-    let root = skills_root(cwd);
-    let targets = resolve_skill_dirs(dirs);
-    let outcomes = skills::install(&root, &targets, force)?;
-
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    let mut skipped = 0usize;
-    for outcome in &outcomes {
-        let label = match outcome.status {
-            skills::Installed::Created => "created",
-            skills::Installed::Updated => "updated",
-            skills::Installed::Unchanged => "unchanged",
-            skills::Installed::Skipped => {
-                skipped += 1;
-                "skipped (exists)"
-            }
-        };
-        writeln!(
-            out,
-            "  {label}: {}",
-            skills::display_relative(&root, &outcome.path)
-        )?;
-    }
-    if skipped > 0 {
-        writeln!(
-            out,
-            "\n{skipped} file(s) already existed and were left as-is; re-run with --force to overwrite."
-        )?;
-    } else {
-        writeln!(
-            out,
-            "\nCommit these files so your agents discover them on checkout."
-        )?;
-    }
-    Ok(())
-}
-
-/// `bastion skills check`: verify the installed skills match this binary's
-/// embedded source.
-///
-/// Prints one line per skill file and returns whether every one is up to date.
-/// Returns `Ok(false)` when any file is missing or has drifted (a hand edit, or a
-/// stale install left behind after the skill source changed), so the caller can
-/// exit non-zero: a CI step can run this to fail when the checked-in skills fall
-/// out of sync with the source.
-///
-/// # Errors
-///
-/// Returns an error if a skill file exists but cannot be read, or if writing the
-/// summary to stdout fails.
-pub fn skills_check(cwd: &Path, dirs: &[PathBuf]) -> Result<bool> {
-    let root = skills_root(cwd);
-    let targets = resolve_skill_dirs(dirs);
-    let outcomes = skills::check(&root, &targets)?;
-
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    let mut current = true;
-    for outcome in &outcomes {
-        let label = match outcome.status {
-            skills::Checked::UpToDate => "up to date",
-            skills::Checked::Drifted => {
-                current = false;
-                "drifted"
-            }
-            skills::Checked::Missing => {
-                current = false;
-                "missing"
-            }
-        };
-        writeln!(
-            out,
-            "  {label}: {}",
-            skills::display_relative(&root, &outcome.path)
-        )?;
-    }
-    if !current {
-        writeln!(
-            out,
-            "\nChecked-in skills are out of sync; run `bastion skills install` to refresh them."
-        )?;
-    }
-    Ok(current)
-}
-
-/// `bastion skills list`: show the skills bundled into this binary.
-///
-/// # Errors
-///
-/// Returns an error if writing to stdout fails.
-pub fn skills_list() -> Result<()> {
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    writeln!(
-        out,
-        "Skills bundled in bastion {}:",
-        crate::version::VERSION
-    )?;
-    for skill in skills::BUNDLED {
-        writeln!(out, "  {} - {}", skill.slug, skill.summary)?;
-    }
-    writeln!(
-        out,
-        "\nInstall them with `bastion skills install` (default targets: {}).",
-        skills::DEFAULT_DIRS.join(", ")
-    )?;
-    Ok(())
-}
-
-/// The repository root to install skills into: the git toplevel containing `cwd`,
-/// or `cwd` itself when it is not inside a repo, so first-time setup still works.
-fn skills_root(cwd: &Path) -> PathBuf {
-    git::repo_root(cwd).unwrap_or_else(|_| cwd.to_path_buf())
-}
-
-/// The skills-freshness advisory for the repository containing `cwd`, or `None`
-/// when every bundled skill is present and current.
-///
-/// Both review surfaces call this to warn when an agent may be working against
-/// stale guidance. It is deliberately best effort, so a check error (an unreadable
-/// skill file) maps to `None` rather than surfacing; a skills advisory must never
-/// fail a review or a report. The default skills directories are checked, the same
-/// ones `bastion skills install` writes.
-fn stale_skills_warning(cwd: &Path) -> Option<skills::DriftWarning> {
-    skills::assess(&skills_root(cwd), &skills::default_dirs())
-        .ok()
-        .flatten()
-}
-
-/// The skills-freshness advisory a local `bastion review` should surface, or `None`
-/// when it should stay silent.
-///
-/// This gates [`stale_skills_warning`] on the repository having *adopted* Bastion: a
-/// repository-level registry is present ([`crate::config::locate_kind`] resolves one).
-/// A purely local review that merged in only the author's user-level reviewers has no
-/// repo registry, and nudging that author to install skills into a project that has not
-/// configured Bastion would be misdirected. Only the local surface is gated this way;
-/// CI always has a repo registry, so the warning [`github_report`] folds into the
-/// sticky comment is unaffected.
-fn local_skills_warning(repo_root: &Path) -> Option<skills::DriftWarning> {
-    // No repo registry (or an unreadable candidate): stay silent. The skills nudge is
-    // meaningful only once the project itself has adopted Bastion, and a failed
-    // presence check must never be the thing this advisory surfaces.
-    if !matches!(crate::config::locate_kind(repo_root), Ok(Some(_))) {
-        return None;
-    }
-    stale_skills_warning(repo_root)
-}
-
-/// Print the skills-freshness advisory to stderr, where the agent driving
-/// `bastion review` sees it alongside the run. Silent when the skills are current or
-/// the repository has not adopted Bastion (see [`local_skills_warning`]).
-///
-/// stderr keeps it out of the `--format jsonl` event stream on stdout (so a parsing
-/// agent's input stays clean) while still landing somewhere both a human and an
-/// agent read, matching how the GitHub-context notice is surfaced.
-fn warn_on_stale_skills(repo_root: &Path) {
-    if let Some(warning) = local_skills_warning(repo_root) {
-        // Fail open on the write itself. This advisory runs before any reviewer, so a
-        // failed stderr write (a broken pipe, say) must not abort an otherwise-passing
-        // review the way `eprintln!` would by panicking; swallow the result instead.
-        let _ = writeln!(io::stderr(), "bastion review: {}", warning.plain());
-    }
-}
-
-/// The requested skill directories, falling back to the documented defaults when
-/// none were passed.
-fn resolve_skill_dirs(dirs: &[PathBuf]) -> Vec<PathBuf> {
-    if dirs.is_empty() {
-        skills::default_dirs()
-    } else {
-        dirs.to_vec()
-    }
-}
-
-/// How many runs to keep when `bastion clean` is given no arguments.
-fn default_keep() -> usize {
-    20
-}
-
 /// Build a run id for a local run from the short HEAD sha, falling back to a
 /// fixed local marker when git can't supply one.
 fn local_run_id(repo_root: &Path) -> RunId {
@@ -1261,50 +830,7 @@ fn derive_seal_bindings(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn stale_skills_warning_fails_open_on_an_unreadable_skill() {
-        // A skills-freshness check must never fail a review or a report. When the
-        // assessment errors (here a directory where a SKILL.md should be, so reading
-        // it fails), the warning maps to `None` rather than propagating the error.
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        std::fs::create_dir_all(root.join(".claude/skills/using-bastion/SKILL.md")).unwrap();
-        assert!(
-            stale_skills_warning(root).is_none(),
-            "an assessment error should swallow to no warning, not surface"
-        );
-    }
-
-    #[test]
-    fn local_skills_warning_is_silent_without_a_repo_registry() {
-        // A purely local review against a repo that has not adopted Bastion (no
-        // `.bastion.yaml`) merges in only the author's user-level reviewers. Warning
-        // there would tell the author to install skills into a project that has not
-        // configured Bastion, which is misdirected. Even with every skill missing, the
-        // local surface stays silent.
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        assert!(
-            local_skills_warning(root).is_none(),
-            "no repo registry should suppress the local skills advisory"
-        );
-    }
-
-    #[test]
-    fn local_skills_warning_fires_once_the_repo_adopts_bastion() {
-        // With a repository registry present, the repo has adopted Bastion, so a stale
-        // (here entirely missing) skills tree is worth flagging to the driving agent.
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        std::fs::write(
-            root.join(crate::config::REGISTRY_FILE),
-            "reviewers:\n  - name: r\n    trigger: [x]\n    mode: gate\n    prompt: p\n",
-        )
-        .unwrap();
-        let warning = local_skills_warning(root).expect("a repo registry enables the advisory");
-        assert!(warning.plain().contains("missing or out of date"));
-    }
+    use crate::reviewer::Mode;
 
     #[test]
     fn github_source_parses_a_slug_and_rejects_malformed_ones() {
@@ -1351,84 +877,6 @@ mod tests {
             git(dir, &["config", "user.email", "grace@bastion.dev"]);
             git(dir, &["config", "user.name", "Grace Hopper"]);
         }
-    }
-
-    #[test]
-    fn validate_accepts_a_well_formed_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join(".bastion.yaml");
-        std::fs::write(
-            &path,
-            "reviewers:\n  - name: a\n    trigger: [src/**]\n    mode: gate\n    prompt: p\n",
-        )
-        .unwrap();
-        validate(tmp.path(), Some(&path), None).expect("a well-formed file validates");
-    }
-
-    #[test]
-    fn validate_reports_a_duplicate_name() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join(".bastion.yaml");
-        std::fs::write(
-            &path,
-            "reviewers:\n  - name: dup\n    trigger: [a]\n    mode: gate\n    prompt: p\n  - name: dup\n    trigger: [b]\n    mode: gate\n    prompt: p\n",
-        )
-        .unwrap();
-        let err = validate(tmp.path(), Some(&path), None).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("duplicate reviewer name"),
-            "error should name the duplicate, got: {err:#}"
-        );
-    }
-
-    #[test]
-    fn validate_reports_an_unknown_field() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join(".bastion.yaml");
-        std::fs::write(
-            &path,
-            "reviewers:\n  - name: typo\n    trigger: [src/**]\n    mode: gate\n    bakend: codex\n    prompt: p\n",
-        )
-        .unwrap();
-        let err = validate(tmp.path(), Some(&path), None).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("unknown field `bakend`"),
-            "validate should reject an unknown field, got: {err:#}"
-        );
-    }
-
-    #[test]
-    fn validate_reports_a_model_under_backend_any() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join(".bastion.yaml");
-        std::fs::write(
-            &path,
-            "reviewers:\n  - name: stray\n    trigger: [src/**]\n    mode: gate\n    model: gpt-5\n    prompt: p\n",
-        )
-        .unwrap();
-        let err = validate(tmp.path(), Some(&path), None).unwrap_err();
-        assert!(format!("{err:#}").contains("backend: any"), "got: {err:#}");
-    }
-
-    #[test]
-    fn validate_discovers_from_the_directory_when_no_file_is_given() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(
-            tmp.path().join(".bastion.yaml"),
-            "reviewers:\n  - name: a\n    trigger: [x]\n    mode: advisor\n    prompt: p\n",
-        )
-        .unwrap();
-        validate(tmp.path(), None, None).expect("discovered registry validates");
-    }
-
-    #[test]
-    fn validate_errors_clearly_when_no_registry_is_found() {
-        let tmp = tempfile::tempdir().unwrap();
-        let err = validate(tmp.path(), None, None).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("no reviewer registry found"),
-            "got: {err:#}"
-        );
     }
 
     #[tokio::test]

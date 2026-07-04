@@ -19,7 +19,7 @@ These are not style preferences; breaking one is a correctness bug.
   cannot produce a valid, consistent verdict resolves to `block`, never a silent
   pass. An advisor that does the same is ignored. "All gates pass" means every gate
   *returned* a clean pass. This invariant lives in
-  [`runner.rs`](../../src/runner.rs) and is the single most important property to
+  [`runner/`](../../src/runner/) and is the single most important property to
   preserve; the `fail-closed-gates` reviewer in the registry guards it.
 - **A backend that cannot verdict reviews nothing.** All three backends
   (`claude-code`, `codex`, `pi`) are wired, but any of them returns an error rather
