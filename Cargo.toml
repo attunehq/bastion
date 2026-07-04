@@ -22,9 +22,16 @@ hex = "0.4.3"
 hmac = "0.13.0"
 humantime = "2.3.0"
 # The GitHub adapter posts the PR comment and per-reviewer check runs over the
-# REST API. Default features keep the platform-native TLS (SChannel on Windows,
-# OpenSSL on the Linux CI runner) so the build needs no extra C toolchain.
-reqwest = { version = "0.13.4", features = ["json"] }
+# REST API. reqwest's default TLS is rustls (its `rustls-platform-verifier`
+# checks certs against the OS trust store), which needs no OpenSSL and keeps the
+# musl static targets building cleanly. `http2` is dropped: the adapter makes a
+# handful of REST calls and GitHub serves them fine over HTTP/1.1, so the `h2`
+# stack is dead weight in the binary.
+reqwest = { version = "0.13.4", default-features = false, features = [
+    "json",
+    "system-proxy",
+    "default-tls",
+] }
 # `bastion update` swaps the running binary for a freshly downloaded release. A
 # live executable cannot simply be overwritten on Windows; self-replace
 # encapsulates the platform split (an atomic rename on Unix, the
@@ -81,7 +88,15 @@ expect_used = "deny"
 missing_errors_doc = "deny"
 
 [profile.release]
-opt-level = 3
+# Bastion ships in CI, where download and disk footprint matter more than raw
+# throughput (it spends nearly all its wall-clock waiting on agent subprocesses,
+# not on its own CPU). So the release profile is tuned for the smallest binary:
+# optimize for size ("z" beat "s" here), cross-crate-inline and dead-strip via
+# fat LTO with a single codegen unit, and strip symbols. `panic = "abort"` would
+# shave a further ~1.6MB but is deliberately left off: the runner relies on
+# unwinding to isolate a panicking reviewer (see src/runner/mod.rs) so one crash
+# fails that reviewer closed without taking down the rest of the review.
+opt-level = "z"
 lto = "fat"
 codegen-units = 1
 strip = true
