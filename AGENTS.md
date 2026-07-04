@@ -124,94 +124,13 @@ Targeted checks when relevant:
 
 ## Architecture map
 
-The full module map and the life of a `bastion review` live in
+The module map and the life of a `bastion review` live in
 [`architecture.md`](docs/developer-guide/architecture.md); the backend boundary in
 [`backends.md`](docs/developer-guide/backends.md), the GitHub adapter in
 [`github-adapter.md`](docs/developer-guide/github-adapter.md), and the seal and
-attestation in [`attestation.md`](docs/developer-guide/attestation.md). This is the
-file-to-purpose map at a glance; go to those docs before duplicating their prose
-here.
-
-- `build.rs`: derives `BASTION_VERSION` (from `git describe`, overridable) and bakes
-  the rustc target triple as `BASTION_TARGET` and the run-seal secret the binary
-  embeds.
-- `src/main.rs` / `src/lib.rs` / `src/version.rs`: binary entrypoint, library root
-  (installs `color_eyre` + `tracing` and dispatches), and the build-derived version.
-- `src/cli.rs`: the clap command tree and dispatch.
-- `src/commands/`: one module per subcommand (`review`, `validate`, `read_back`,
-  `codeowners`, `attest`, `update`, `github_report`, `skills`); `mod.rs` re-exports
-  the CLI surface `cli.rs` calls.
-- `src/reviewer.rs` / `src/config.rs`: the declarative reviewer schema and registry
-  loading. Discovery walks up for a repository `.bastion.yaml` and merges in a
-  user-level one from the platform config dir (overridable with `BASTION_CONFIG_DIR`),
-  so a personal reviewer runs locally even against a repo that has not adopted
-  Bastion. The merge is a set keyed by name; a same-name collision keeps both with the
-  repo side scoped to `REPO_SCOPE_PREFIX` (`repo:`), whose colon `paths.rs` maps to a
-  portable run-store path component.
-- `src/routing.rs`: compiling trigger globs and matching changed files.
-- `src/verdict.rs` / `src/event.rs`: the structured verdict and run-event schemas
-  (`Money` carries cents but serializes as dollars).
-- `src/context.rs`: the transport-neutral `ReviewContext` a reviewer sees beyond the
-  diff (author intent, discussion, prior findings). Everything in it is untrusted and
-  read only when rendering the prompt, never in gate logic. The local producer is
-  `commands::review`; the GitHub producer is `src/github/context.rs`.
-- `src/git.rs`: the git queries the CLI needs (changed files, branch, root,
-  `base..HEAD` commit messages).
-- `src/paths.rs` / `src/store.rs`: the data-directory layout and run history
-  (`store::prior_findings` recalls the last run's findings for a branch).
-- `src/render.rs`: human and JSONL output.
-- `src/runner/`: the parallel, timeout-bounded runner. `mod.rs` is the orchestration
-  core; `verdicts.rs` folds in replayed and carried verdicts, `seal.rs` seals an
-  eligible run, `persist.rs` writes the artifacts, `tests.rs` the unit tests. Fails
-  closed on error or timeout; a partial run (narrowed by `--reviewer`) is never sealed.
-- `src/carry.rs`: incremental re-review on both surfaces. A reviewer's verdict is
-  stamped with a trigger-scoped `scope_digest`; on a re-run a prior *pass* with an
-  identical digest is carried forward with no backend dispatch, while blocks and
-  changed-scope reviewers execute fresh. Full mechanics in
-  [`local-surface.md`](docs/developer-guide/local-surface.md#incremental-re-review).
-- `src/seal.rs` / `src/attest/`: the run seal (an HMAC over the committed tree, the
-  merge-base tree, the `base..HEAD` patch-id, the config hash, the test-seam and
-  dirty flags, and the sorted resolved events) and signed attestation, split into
-  `attest/{mod,bundle,sign,replay}.rs`. See
-  [`attestation.md`](docs/developer-guide/attestation.md).
-- `src/backend/`: the agent execution boundary. `mod.rs` defines the `Backend` trait,
-  the deterministic `MockBackend`, `dispatch`, and the shared prompt helpers;
-  `command.rs` is the injectable subprocess seam; `claude_code.rs`, `codex.rs`, and
-  `pi.rs` are the real backends; `container/` runs a backend inside a built image,
-  split into `plan`/`runner`/`credentials`/`teardown`. `dispatch` is the single place
-  an unprovisioned capability tier fails closed. See
-  [`backends.md`](docs/developer-guide/backends.md).
-- `src/github/`: the GitHub adapter (the CI surface). `codeowners.rs` generates the
-  governance block; `client.rs` is the `reqwest`-backed REST seam; `signing.rs`
-  fetches a user's SSH signing keys; `context.rs` produces the review context from a
-  PR; `report/` distills a finished run into a sticky comment and check runs, split by
-  concern (`comment`, `callouts`, `checks`, `requests`, `post`). Check runs need a
-  GitHub App installation token. See
-  [`github-adapter.md`](docs/developer-guide/github-adapter.md).
-- `src/skills.rs` / `skills/`: the agent skills bundled into the binary with
-  `include_str!` and installed by `bastion skills install`/`check`/`list`;
-  `skills::assess` builds the advisory drift warning both review surfaces emit.
-  Distinct from the bundled `using-bastion` skill are the repo-local skills that guide
-  agents working *on* Bastion (the Rust skills and `stop-slop`), which are **not**
-  bundled and sit outside `skills install`/`check`. All skills live under both
-  `.agents/skills/` (agent-neutral) and `.claude/skills/` (Claude Code's path) as
-  exact copies; `tests/skills_mirror.rs` fails the build if the two trees drift.
-- `src/update.rs`: the native self-updater behind `bastion update` (resolves the
-  latest release, verifies it against `checksums.txt`, swaps the running binary with
-  `self-replace`) and the passive out-of-date nag. `BASTION_REPO` and
-  `BASTION_BASE_URL` override the release source (tests point them at a local server).
-- `tests/integration/`: the end-to-end suite driving the *real compiled binary*
-  against a `rustc`-compiled fake agent, each scenario in its own throwaway `git` repo
-  and private `BASTION_DATA_DIR`, with the fake wired in via
-  `BASTION_CLAUDE_BIN`/`BASTION_CODEX_BIN`/`BASTION_PI_BIN` (and a fake engine via
-  `BASTION_CONTAINER_ENGINE`). Scenarios are grouped into per-theme files
-  (`aggregation`, `carry`, `container`, `accounting`, `persistence`, `cli_surface`,
-  `github_report`, `attestation`) over shared `fakes`/`fixtures`/`github` support.
-  Sibling structural targets: `tests/skills_mirror.rs`, `tests/script_safety.rs`, and
-  `tests/user_guide_integrity.rs`.
-- `scripts/install.sh` / `scripts/install.ps1`: the public install scripts. They
-  detect the platform, download the matching archive plus `checksums.txt`, verify the
-  SHA-256, and fail closed on any checksum problem; `tests/script_safety.rs` pins that.
+attestation in [`attestation.md`](docs/developer-guide/attestation.md). Start there
+before touching a module: those docs are the canonical map, and this file keeps no
+second copy to drift against.
 
 ## Development rules
 
