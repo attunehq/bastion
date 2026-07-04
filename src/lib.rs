@@ -52,6 +52,7 @@ pub mod runner;
 pub mod seal;
 pub mod skills;
 pub mod store;
+pub mod text;
 pub mod update;
 pub mod verdict;
 pub mod version;

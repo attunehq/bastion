@@ -221,28 +221,19 @@ const REPROMPT: &str = "Your previous response did not include a valid structure
      `verdict` of \"pass\" or \"block\", a `summary` string, and an optional `findings` array. \
      A `block` must include at least one finding with kind \"blocking\".";
 
-/// Build the prompt handed to `claude`: the shared changeset preamble (how to see
-/// the diff against the base branch), the reviewer's instruction with `${name}`
-/// inputs interpolated, the untrusted review-context block (intent, discussion, and
-/// this reviewer's prior findings, when a producer supplied any), the shared
-/// exhaustive-findings instruction (report every issue in one pass), and the schema
-/// instruction.
+/// The structured-output instruction closing every `claude` review prompt, pinning
+/// the reviewer's judgment to the backend's native JSON verdict schema.
+const JSON_SCHEMA_INSTRUCTION: &str = "\
+When you have finished reviewing, return your judgment as structured output \
+conforming to the requested JSON schema: a top-level `verdict` of \"pass\" or \"block\", \
+a human-friendly `summary`, and a `findings` array locating specific comments. Mark a \
+finding `blocking` if it is a reason to block, or `optional` if it is a non-blocking \
+suggestion. If you block, include a blocking finding for each issue you are blocking on.";
+
+/// Build the prompt handed to `claude`: the [shared review body](super::review_prompt)
+/// closed with this backend's native-JSON-schema instruction.
 fn build_prompt(request: &ReviewRequest<'_>) -> String {
-    let reviewer = request.reviewer;
-    let mut prompt = super::changeset_preamble(request.base);
-    prompt.push_str("\n\n");
-    prompt.push_str(&super::interpolate(&reviewer.prompt, &reviewer.inputs));
-    prompt.push_str("\n\n");
-    prompt.push_str(&super::context_segment(request));
-    prompt.push_str(super::EXHAUSTIVE_FINDINGS_INSTRUCTION);
-    prompt.push_str(
-        "\n\nWhen you have finished reviewing, return your judgment as structured output \
-         conforming to the requested JSON schema: a top-level `verdict` of \"pass\" or \"block\", \
-         a human-friendly `summary`, and a `findings` array locating specific comments. Mark a \
-         finding `blocking` if it is a reason to block, or `optional` if it is a non-blocking \
-         suggestion. If you block, include a blocking finding for each issue you are blocking on.",
-    );
-    prompt
+    super::review_prompt(request, JSON_SCHEMA_INSTRUCTION)
 }
 
 /// The parsed `claude --output-format json` result envelope plus the raw text.

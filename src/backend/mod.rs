@@ -263,6 +263,24 @@ pub(crate) fn context_segment(request: &ReviewRequest<'_>) -> String {
     }
 }
 
+/// Assemble the full review prompt for `request`, ending with `trailer`.
+///
+/// Every backend hands the agent the same four-part body: the shared changeset
+/// preamble (how to see the diff against the base branch), the interpolated review
+/// instruction, the untrusted review-context block (when a producer supplied any),
+/// and the shared exhaustive-findings instruction. Only the trailing structured-output
+/// instruction differs by backend (Claude Code pins its native JSON schema; the
+/// fenced-YAML backends pass [`SCHEMA_INSTRUCTION`]), so it is the one parameter.
+pub(crate) fn review_prompt(request: &ReviewRequest<'_>, trailer: &str) -> String {
+    let reviewer = request.reviewer;
+    let preamble = changeset_preamble(request.base);
+    let interpolated = interpolate(&reviewer.prompt, &reviewer.inputs);
+    let context = context_segment(request);
+    format!(
+        "{preamble}\n\n{interpolated}\n\n{context}{EXHAUSTIVE_FINDINGS_INSTRUCTION}\n\n{trailer}"
+    )
+}
+
 /// Replace `${key}` occurrences in `template` with values from `inputs`.
 ///
 /// Shared by the backends so prompt interpolation is identical regardless of
@@ -344,6 +362,28 @@ pub(super) const REPROMPT_SUFFIX: &str = "\
 Your previous response did not contain a valid structured verdict. Do not perform \
 any further work. Reply with ONLY the fenced YAML verdict block described above, \
 for the review you already completed, and nothing else.";
+
+/// The text of the reprompt turn for a fenced-YAML backend whose first message
+/// lacked a conforming verdict. A resumable session already holds the review, so the
+/// turn is just [`REPROMPT_SUFFIX`]; a fresh session has no memory of the prompt, so
+/// the full `prompt` is re-sent ahead of the suffix. Shared by Codex and Pi.
+pub(super) fn reprompt_text(prompt: &str, resumable: bool) -> String {
+    if resumable {
+        REPROMPT_SUFFIX.to_string()
+    } else {
+        format!("{prompt}\n\n{REPROMPT_SUFFIX}")
+    }
+}
+
+/// Join an earlier session's transcript ahead of the `current` one, for when a
+/// verdict was recovered on a reprompt and both turns should be preserved. An empty
+/// or absent prior transcript collapses to just `current`. Shared by Codex and Pi.
+pub(super) fn stitch_transcript(prior: Option<&str>, current: String) -> String {
+    match prior {
+        Some(prior) if !prior.is_empty() => format!("{}\n{}", prior.trim_end(), current),
+        _ => current,
+    }
+}
 
 /// Extract a schema-conforming, internally-consistent [`Verdict`] from `message`.
 ///

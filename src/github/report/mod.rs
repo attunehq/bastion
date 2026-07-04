@@ -32,16 +32,17 @@
 //! All the event-to-markdown and event-to-payload mapping here is pure and unit
 //! tested; the only side effects are the [`GitHubApi`] calls in [`report`].
 
+use std::collections::HashMap;
 use std::fmt;
 
-use color_eyre::eyre::{Context, Result, bail};
+use color_eyre::eyre::{Context, Result};
 
 use crate::event::{Gates, RunEvent};
 use crate::reviewer::{Backend, Mode};
 use crate::verdict::{Decision, Finding, FindingKind, Money, Usage};
 
 use super::PrContext;
-use super::client::{ApiRequest, ApiResponse, GitHubApi, IssueComment};
+use super::client::{ApiRequest, GitHubApi, IssueComment, send_checked};
 
 mod callouts;
 mod checks;
@@ -208,8 +209,10 @@ struct AttestedSummary {
 /// row knows whether it gated and what ran it.
 fn digest(events: &[RunEvent]) -> RunDigest {
     let mut digest = RunDigest::default();
-    let mut started: Vec<(String, Mode)> = Vec::new();
-    let mut backends: Vec<(String, Backend)> = Vec::new();
+    // Reviewer name -> mode (from run.started) and -> backend (from reviewer.started),
+    // joined onto each reviewer.resolved row by name.
+    let mut started: HashMap<String, Mode> = HashMap::new();
+    let mut backends: HashMap<String, Backend> = HashMap::new();
 
     for event in events {
         match event {
@@ -231,7 +234,10 @@ fn digest(events: &[RunEvent]) -> RunDigest {
             }
             RunEvent::ReviewerStarted {
                 reviewer, backend, ..
-            } => backends.push((reviewer.clone(), *backend)),
+            } => {
+                // First start wins, matching the prior first-match scan.
+                backends.entry(reviewer.clone()).or_insert(*backend);
+            }
             RunEvent::ReviewerResolved {
                 reviewer,
                 verdict,
@@ -243,14 +249,8 @@ fn digest(events: &[RunEvent]) -> RunDigest {
                 carried,
                 ..
             } => {
-                let mode = started
-                    .iter()
-                    .find(|(name, _)| name == reviewer)
-                    .map_or(Mode::Gate, |(_, mode)| *mode);
-                let backend = backends
-                    .iter()
-                    .find(|(name, _)| name == reviewer)
-                    .map(|(_, backend)| *backend);
+                let mode = started.get(reviewer).copied().unwrap_or(Mode::Gate);
+                let backend = backends.get(reviewer).copied();
                 digest.rows.push(ReviewerRow {
                     name: reviewer.clone(),
                     mode,

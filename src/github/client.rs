@@ -11,7 +11,7 @@
 //! the reporting layer builds (method, path, JSON body), so the request shapes are
 //! unit-testable as plain data and the client only has to send them.
 
-use color_eyre::eyre::{Context, Result, eyre};
+use color_eyre::eyre::{Context, Result, bail, eyre};
 use serde::Deserialize;
 
 /// The REST verbs the adapter uses. Deliberately just the three Bastion needs.
@@ -136,6 +136,32 @@ pub trait GitHubApi: Send + Sync {
     /// not be read. A non-2xx status is *not* an error here: it is reported via
     /// [`ApiResponse::status`] so the caller decides what it means.
     async fn send(&self, req: &ApiRequest) -> Result<ApiResponse>;
+}
+
+/// Send a request and treat any non-2xx status as an error, surfacing GitHub's own
+/// message. The fail-closed posture: a call GitHub rejected is a real failure, not
+/// something to swallow. Both halves of the adapter route through this: reporting
+/// (`super::report::post`) sends writes, gathering (`super::context`) and signing
+/// (`super::signing`) send reads, so the status check lives once.
+///
+/// # Errors
+///
+/// Returns an error if the request could not be sent or its status was not 2xx.
+pub(super) async fn send_checked<A: GitHubApi + ?Sized>(
+    api: &A,
+    req: &ApiRequest,
+) -> Result<ApiResponse> {
+    let resp = api.send(req).await?;
+    if !resp.is_success() {
+        bail!(
+            "GitHub {} {} returned {}: {}",
+            req.method.as_str(),
+            req.path,
+            resp.status,
+            resp.error_message().unwrap_or("(no message)"),
+        );
+    }
+    Ok(resp)
 }
 
 /// The GitHub REST base URL in Actions, exposed as `GITHUB_API_URL`

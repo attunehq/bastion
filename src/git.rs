@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 
 use color_eyre::eyre::{Context, Result, bail};
 
@@ -17,13 +17,9 @@ use color_eyre::eyre::{Context, Result, bail};
 /// and lets it push/fetch as one unit (`git push origin refs/notes/bastion`).
 pub const NOTES_REF: &str = "refs/notes/bastion";
 
-/// Run `git` with `args` in `cwd`, returning trimmed stdout on success.
-fn run_git(cwd: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .wrap_err("failed to invoke git; is it installed and on PATH?")?;
+/// Check a finished `git` process and decode its trimmed stdout, or bail with the
+/// command and its stderr. The shared success/failure tail of the git runners.
+fn finish(args: &[&str], output: Output) -> Result<String> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("git {} failed: {}", args.join(" "), stderr.trim());
@@ -32,6 +28,16 @@ fn run_git(cwd: &Path, args: &[&str]) -> Result<String> {
         .wrap_err("git produced non-UTF-8 output")?
         .trim()
         .to_string())
+}
+
+/// Run `git` with `args` in `cwd`, returning trimmed stdout on success.
+fn run_git(cwd: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .wrap_err("failed to invoke git; is it installed and on PATH?")?;
+    finish(args, output)
 }
 
 /// Like [`run_git`], but pipes `stdin_bytes` to the child's stdin. Used for
@@ -62,14 +68,7 @@ fn run_git_with_stdin(cwd: &Path, args: &[&str], stdin_bytes: &[u8]) -> Result<S
     let output = child
         .wait_with_output()
         .wrap_err("waiting for git to finish")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git {} failed: {}", args.join(" "), stderr.trim());
-    }
-    Ok(String::from_utf8(output.stdout)
-        .wrap_err("git produced non-UTF-8 output")?
-        .trim()
-        .to_string())
+    finish(args, output)
 }
 
 /// The repository root containing `cwd`.

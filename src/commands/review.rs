@@ -664,13 +664,11 @@ where
     let head_sha = gathered.and_then(|g| g.head_sha.as_deref());
     let note = match crate::attest::note_for_review(repo_root, "HEAD", head_sha) {
         Ok(Some(note)) => note,
-        Ok(None) => {
-            return Some(crate::attest::AttestationOutcome::NotAttested);
-        }
+        Ok(None) => return Some(crate::attest::AttestationOutcome::NotAttested),
         Err(err) => {
-            return Some(crate::attest::AttestationOutcome::Fallback {
-                reason: format!("could not look up the attestation note: {err:#}"),
-            });
+            return Some(fallback_outcome(format!(
+                "could not look up the attestation note: {err:#}"
+            )));
         }
     };
 
@@ -678,32 +676,33 @@ where
     {
         Ok(ci) => ci,
         Err(err) => {
-            return Some(crate::attest::AttestationOutcome::Fallback {
-                reason: format!("could not re-derive CI bindings: {err:#}"),
-            });
+            return Some(fallback_outcome(format!(
+                "could not re-derive CI bindings: {err:#}"
+            )));
         }
     };
 
     let Some(author) = gathered.and_then(|g| g.author_login.as_deref()) else {
-        return Some(crate::attest::AttestationOutcome::Fallback {
-            reason: "could not determine the pull request author to verify the attestation signature against".to_string(),
-        });
+        return Some(fallback_outcome(
+            "could not determine the pull request author to verify the attestation signature against"
+                .to_string(),
+        ));
     };
 
     let client = match build_client() {
         Ok(client) => client,
         Err(err) => {
-            return Some(crate::attest::AttestationOutcome::Fallback {
-                reason: format!("could not build a GitHub client to fetch signing keys: {err:#}"),
-            });
+            return Some(fallback_outcome(format!(
+                "could not build a GitHub client to fetch signing keys: {err:#}"
+            )));
         }
     };
     let keys = match crate::github::signing::ssh_signing_keys(&client, author).await {
         Ok(keys) => keys,
         Err(err) => {
-            return Some(crate::attest::AttestationOutcome::Fallback {
-                reason: format!("could not fetch {author}'s registered SSH signing keys: {err:#}"),
-            });
+            return Some(fallback_outcome(format!(
+                "could not fetch {author}'s registered SSH signing keys: {err:#}"
+            )));
         }
     };
 
@@ -718,6 +717,13 @@ where
         &routed_map,
         crate::seal::embedded_secret(),
     ))
+}
+
+/// Wrap `reason` as a surfaced [`Fallback`](crate::attest::AttestationOutcome::Fallback):
+/// the shape every early return in [`plan_attestation_replay_with`] takes when a replay
+/// precondition (the note, CI bindings, the author, the client, the keys) is unmet.
+fn fallback_outcome(reason: String) -> crate::attest::AttestationOutcome {
+    crate::attest::AttestationOutcome::Fallback { reason }
 }
 
 /// The pull request a review is running against, so its description and discussion can
@@ -789,34 +795,22 @@ fn derive_seal_bindings(
     base: &str,
     repo_attestation: &crate::config::RepoAttestation,
 ) -> Option<SealBindings> {
-    let merge_base_commit = match git::merge_base(repo_root, base) {
-        Ok(commit) => commit,
-        Err(err) => {
-            tracing::warn!(error = %err, "could not derive a merge base; run will be unsealed");
-            return None;
-        }
-    };
-    let head_tree = match git::tree_hash(repo_root, "HEAD") {
-        Ok(tree) => tree,
-        Err(err) => {
-            tracing::warn!(error = %err, "could not resolve HEAD's tree; run will be unsealed");
-            return None;
-        }
-    };
-    let base_tree = match git::tree_hash(repo_root, &merge_base_commit) {
-        Ok(tree) => tree,
-        Err(err) => {
-            tracing::warn!(error = %err, "could not resolve the merge base's tree; run will be unsealed");
-            return None;
-        }
-    };
-    let patch_id = match git::patch_id(repo_root, &merge_base_commit) {
-        Ok(id) => id,
-        Err(err) => {
-            tracing::warn!(error = %err, "could not compute a patch id; run will be unsealed");
-            return None;
-        }
-    };
+    let merge_base_commit = ok_or_warn(
+        git::merge_base(repo_root, base),
+        "could not derive a merge base; run will be unsealed",
+    )?;
+    let head_tree = ok_or_warn(
+        git::tree_hash(repo_root, "HEAD"),
+        "could not resolve HEAD's tree; run will be unsealed",
+    )?;
+    let base_tree = ok_or_warn(
+        git::tree_hash(repo_root, &merge_base_commit),
+        "could not resolve the merge base's tree; run will be unsealed",
+    )?;
+    let patch_id = ok_or_warn(
+        git::patch_id(repo_root, &merge_base_commit),
+        "could not compute a patch id; run will be unsealed",
+    )?;
 
     Some(SealBindings {
         head_tree,
@@ -825,6 +819,15 @@ fn derive_seal_bindings(
         config_hash: repo_attestation.config_hash.clone(),
         repo_reviewers: repo_attestation.reviewers.clone(),
     })
+}
+
+/// Unwrap `result`, or log `msg` at `warn` and yield `None` so the caller's `?`
+/// short-circuits. The uniform shape behind [`derive_seal_bindings`]'s opportunistic
+/// git derivations: any failure leaves the run unsealed rather than failing it.
+fn ok_or_warn<T, E: std::fmt::Display>(result: std::result::Result<T, E>, msg: &str) -> Option<T> {
+    result
+        .inspect_err(|err| tracing::warn!(error = %err, "{msg}"))
+        .ok()
 }
 
 #[cfg(test)]

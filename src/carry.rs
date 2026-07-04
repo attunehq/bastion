@@ -294,7 +294,12 @@ pub fn plan(
         let Some(event) = resolved_pass_with_digest(&events, &reviewer.name, digest) else {
             continue;
         };
-        if repo_reviewers.contains(&reviewer.name)
+        // A repo reviewer may carry only when the prior seal actually covered it; an
+        // unsealed repo reviewer executes fresh. A personal reviewer (not in the repo
+        // set) carries on its content digest alone. The `&&` short-circuits, so the
+        // seal-set probe never runs on the personal-reviewer path.
+        let is_repo_reviewer = repo_reviewers.contains(&reviewer.name);
+        if is_repo_reviewer
             && !sealed_names
                 .as_ref()
                 .is_some_and(|names| names.contains(reviewer.name.as_str()))

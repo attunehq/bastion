@@ -9,7 +9,7 @@ use std::io::{self, Write};
 
 use crate::event::RunEvent;
 use crate::store::RunSummary;
-use crate::verdict::{Decision, Finding, FindingKind};
+use crate::verdict::{Decision, Finding};
 
 /// The output format for streamed and replayed run data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
@@ -136,10 +136,7 @@ fn write_event_human<W: Write>(out: &mut W, event: &RunEvent) -> io::Result<()> 
 }
 
 fn write_finding<W: Write>(out: &mut W, finding: &Finding) -> io::Result<()> {
-    let tag = match finding.kind {
-        FindingKind::Blocking => "blocking",
-        FindingKind::Optional => "optional",
-    };
+    let tag = finding.kind.as_str();
     writeln!(
         out,
         "      [{tag}] {}:{}-{}: {}",
@@ -207,6 +204,7 @@ fn marker(decision: Decision) -> &'static str {
 mod tests {
     use super::*;
     use crate::event::RunId;
+    use crate::verdict::FindingKind;
 
     fn resolved() -> RunEvent {
         RunEvent::ReviewerResolved {

@@ -248,16 +248,21 @@ impl Updater {
         extract_binary(io::Cursor::new(archive), dest)
     }
 
-    /// GET `url` and return the response body, bounded by [`MAX_METADATA`].
-    async fn get_bytes(&self, url: &str) -> Result<Vec<u8>> {
-        let mut response = self
-            .client
+    /// GET `url`, erroring on a non-success status. The shared prologue for the
+    /// metadata and archive fetches.
+    async fn get(&self, url: &str) -> Result<reqwest::Response> {
+        self.client
             .get(url)
             .send()
             .await
             .wrap_err_with(|| format!("GET {url}"))?
             .error_for_status()
-            .wrap_err_with(|| format!("GET {url}"))?;
+            .wrap_err_with(|| format!("GET {url}"))
+    }
+
+    /// GET `url` and return the response body, bounded by [`MAX_METADATA`].
+    async fn get_bytes(&self, url: &str) -> Result<Vec<u8>> {
+        let mut response = self.get(url).await?;
         read_capped(&mut response, MAX_METADATA)
             .await
             .wrap_err_with(|| format!("read the response from {url}"))
@@ -267,31 +272,12 @@ impl Updater {
     /// SHA-256 so the caller can verify it against the published checksum. Bounded
     /// by [`MAX_ARCHIVE`].
     async fn download_hashed(&self, url: &str) -> Result<(Vec<u8>, String)> {
-        let mut response = self
-            .client
-            .get(url)
-            .send()
+        let mut response = self.get(url).await?;
+        let bytes = read_capped(&mut response, MAX_ARCHIVE)
             .await
-            .wrap_err_with(|| format!("GET {url}"))?
-            .error_for_status()
-            .wrap_err_with(|| format!("GET {url}"))?;
-
-        let mut hasher = Sha256::new();
-        let mut bytes = Vec::new();
-        let mut total: u64 = 0;
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .wrap_err("read the download stream")?
-        {
-            total += chunk.len() as u64;
-            if total > MAX_ARCHIVE {
-                bail!("archive at {url} exceeded {MAX_ARCHIVE} bytes");
-            }
-            hasher.update(&chunk);
-            bytes.extend_from_slice(&chunk);
-        }
-        Ok((bytes, hex::encode(hasher.finalize())))
+            .wrap_err_with(|| format!("download the archive at {url}"))?;
+        let hash = hex::encode(Sha256::digest(&bytes));
+        Ok((bytes, hash))
     }
 }
 

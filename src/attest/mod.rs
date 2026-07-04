@@ -133,12 +133,13 @@ pub fn attest(
     }
 
     let head_tree = git::tree_hash(root, "HEAD").wrap_err("resolving HEAD's tree")?;
-    if head_tree != seal.head_tree {
-        bail!(
-            "HEAD has changed since this run: the reviewed tree was {}, HEAD is now {head_tree}; re-run `bastion review` before attesting",
-            seal.head_tree
-        );
-    }
+    drift_check(
+        "HEAD has changed since this run",
+        "tree",
+        "HEAD is now",
+        &seal.head_tree,
+        &head_tree,
+    )?;
 
     let base = base_ref(&events).ok_or_else(|| {
         eyre!("run '{run_id}' has no recorded base ref; cannot re-derive its merge base")
@@ -147,31 +148,33 @@ pub fn attest(
         .wrap_err("resolving the merge base against the run's recorded base ref")?;
     let base_tree =
         git::tree_hash(root, &merge_base_commit).wrap_err("resolving the merge base's tree")?;
-    if base_tree != seal.base_tree {
-        bail!(
-            "the merge base has moved since this run: the reviewed base tree was {}, it is now {base_tree}; re-run `bastion review` before attesting",
-            seal.base_tree
-        );
-    }
+    drift_check(
+        "the merge base has moved since this run",
+        "base tree",
+        "it is now",
+        &seal.base_tree,
+        &base_tree,
+    )?;
 
     let patch_id =
         git::patch_id(root, &merge_base_commit).wrap_err("recomputing the diff's patch id")?;
-    if patch_id != seal.patch_id {
-        bail!(
-            "the diff has changed since this run: the reviewed patch id was {}, it is now {patch_id}; re-run `bastion review` before attesting",
-            seal.patch_id
-        );
-    }
+    drift_check(
+        "the diff has changed since this run",
+        "patch id",
+        "it is now",
+        &seal.patch_id,
+        &patch_id,
+    )?;
 
     let (_, repo_attestation, _) = Config::discover_merged_attested(root, None)
         .wrap_err("re-deriving the effective repository reviewer config")?;
-    if repo_attestation.config_hash != seal.config_hash {
-        bail!(
-            "the reviewer registry has changed since this run: the reviewed config hash was {}, it is now {}; re-run `bastion review` before attesting",
-            seal.config_hash,
-            repo_attestation.config_hash
-        );
-    }
+    drift_check(
+        "the reviewer registry has changed since this run",
+        "config hash",
+        "it is now",
+        &seal.config_hash,
+        &repo_attestation.config_hash,
+    )?;
 
     let temp_pubkey_file =
         tempfile::NamedTempFile::new().wrap_err("creating a temporary key file")?;
@@ -214,6 +217,21 @@ pub fn attest(
     )
     .wrap_err("writing attest summary")?;
 
+    Ok(())
+}
+
+/// Bail if a value re-derived at attest time has drifted from what the run's seal
+/// recorded, with the uniform "re-run `bastion review` before attesting" guidance.
+///
+/// `lead` names what moved, `subject` names the sealed value, and `now` introduces
+/// the current value ("HEAD is now" for the head tree, "it is now" for the rest);
+/// the interleaved derivations that produce `actual` stay at the call site.
+fn drift_check(lead: &str, subject: &str, now: &str, sealed: &str, actual: &str) -> Result<()> {
+    if actual != sealed {
+        bail!(
+            "{lead}: the reviewed {subject} was {sealed}, {now} {actual}; re-run `bastion review` before attesting"
+        );
+    }
     Ok(())
 }
 

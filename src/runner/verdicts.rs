@@ -161,7 +161,6 @@ fn resolve_reused(reviewer: &Reviewer, event: &RunEvent, reuse: Reuse) -> Resolv
         // run's row without its transcript file.
         transcript: None,
         duration: reuse.duration(*duration_ms),
-        counts_as_gate: is_gate,
         replayed,
         carried,
         scope_digest: reuse.scope_digest(scope_digest),

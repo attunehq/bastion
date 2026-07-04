@@ -404,33 +404,38 @@ impl Config {
     /// The combined list is re-validated by the caller, so a scoped name that still
     /// collides (a pathological registry) fails closed rather than overwriting.
     fn layer_user(&mut self, user: Config) {
-        use std::collections::BTreeMap;
+        use std::collections::{BTreeMap, BTreeSet};
 
-        // Index the repo (base) reviewers by name to test collisions and equality.
-        let repo: BTreeMap<&str, &Reviewer> = self
-            .reviewers
-            .iter()
-            .map(|r| (r.name.as_str(), r))
-            .collect();
+        // Decide what to append and which repo reviewers to scope. The repo index
+        // borrows `self.reviewers`, so it is scoped to this block: the borrow ends at
+        // the closing brace, freeing the mutable rename pass below to reborrow.
+        let (append, scope): (Vec<Reviewer>, BTreeSet<String>) = {
+            // Index the repo (base) reviewers by name to test collisions and equality.
+            let repo: BTreeMap<&str, &Reviewer> = self
+                .reviewers
+                .iter()
+                .map(|r| (r.name.as_str(), r))
+                .collect();
 
-        let mut append = Vec::new();
-        let mut scope = std::collections::BTreeSet::new();
-        for reviewer in &user.reviewers {
-            match repo.get(reviewer.name.as_str()) {
-                // Same name, same config: the identical reviewer defined in both
-                // files. Keep the single repo copy; drop the user duplicate.
-                Some(existing) if **existing == *reviewer => {}
-                // Same name, different config: a real collision. Keep the user
-                // reviewer as-is and mark the repo side for scoping below.
-                Some(_) => {
-                    scope.insert(reviewer.name.clone());
-                    append.push(reviewer.clone());
+            let mut append = Vec::new();
+            let mut scope = BTreeSet::new();
+            for reviewer in &user.reviewers {
+                match repo.get(reviewer.name.as_str()) {
+                    // Same name, same config: the identical reviewer defined in both
+                    // files. Keep the single repo copy; drop the user duplicate.
+                    Some(existing) if **existing == *reviewer => {}
+                    // Same name, different config: a real collision. Keep the user
+                    // reviewer as-is and mark the repo side for scoping below.
+                    Some(_) => {
+                        scope.insert(reviewer.name.clone());
+                        append.push(reviewer.clone());
+                    }
+                    // Novel reviewer: append it.
+                    None => append.push(reviewer.clone()),
                 }
-                // Novel reviewer: append it.
-                None => append.push(reviewer.clone()),
             }
-        }
-        drop(repo);
+            (append, scope)
+        };
 
         for reviewer in &mut self.reviewers {
             if scope.contains(&reviewer.name) {

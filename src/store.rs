@@ -36,15 +36,21 @@ pub struct RunSummary {
     pub partial: bool,
 }
 
+/// Create a run's directory (and any missing parents), naming it in the error.
+/// Both writers land a file under the run dir, so each ensures it exists first.
+fn ensure_run_dir(layout: &Layout, id: &RunId) -> Result<()> {
+    let dir = layout.run_dir(id);
+    std::fs::create_dir_all(&dir)
+        .wrap_err_with(|| format!("creating run directory {}", dir.display()))
+}
+
 /// Persist a run's full event stream and update the `latest` pointer.
 ///
 /// # Errors
 ///
 /// Returns an error if the data directory cannot be created or written.
 pub fn write_run(layout: &Layout, id: &RunId, events: &[RunEvent]) -> Result<()> {
-    let dir = layout.run_dir(id);
-    std::fs::create_dir_all(&dir)
-        .wrap_err_with(|| format!("creating run directory {}", dir.display()))?;
+    ensure_run_dir(layout, id)?;
 
     let mut body = String::new();
     for event in events {
@@ -91,9 +97,7 @@ pub fn read_run(layout: &Layout, id: &RunId) -> Result<Vec<RunEvent>> {
 /// Returns an error if the run directory cannot be created or the seal cannot
 /// be written.
 pub fn write_seal(layout: &Layout, id: &RunId, seal: &Seal) -> Result<()> {
-    let dir = layout.run_dir(id);
-    std::fs::create_dir_all(&dir)
-        .wrap_err_with(|| format!("creating run directory {}", dir.display()))?;
+    ensure_run_dir(layout, id)?;
     let path = layout.seal(id);
     let body = serde_json::to_string_pretty(seal).wrap_err("serializing seal")?;
     std::fs::write(&path, body).wrap_err_with(|| format!("writing {}", path.display()))?;
@@ -152,9 +156,7 @@ pub fn resolve_run(layout: &Layout, id: Option<&str>) -> Result<RunId> {
 /// Returns an error if the runs directory cannot be read. A missing runs
 /// directory is treated as an empty list.
 pub fn list_runs(layout: &Layout) -> Result<Vec<RunSummary>> {
-    let mut runs = collect_runs(layout)?;
-    runs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
-    Ok(runs
+    Ok(collect_runs(layout)?
         .into_iter()
         .map(|(id, _)| summarize(layout, &id))
         .collect())
@@ -171,8 +173,7 @@ pub fn prune(
     keep: Option<usize>,
     older_than: Option<Duration>,
 ) -> Result<Vec<RunId>> {
-    let mut runs = collect_runs(layout)?;
-    runs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
+    let runs = collect_runs(layout)?;
 
     let now = SystemTime::now();
     let mut removed = Vec::new();
@@ -242,7 +243,9 @@ pub fn prior_findings(layout: &Layout, branch: &str) -> Vec<PriorFinding> {
     findings
 }
 
-/// Gather `(RunId, modified-time)` for every run directory.
+/// Gather `(RunId, modified-time)` for every run directory, most recent first
+/// (ties broken by descending id for a stable order). Both callers want this same
+/// ordering, so the sort lives here once.
 fn collect_runs(layout: &Layout) -> Result<Vec<(RunId, SystemTime)>> {
     let runs_dir = layout.runs_dir();
     let entries = match std::fs::read_dir(&runs_dir) {
@@ -262,6 +265,7 @@ fn collect_runs(layout: &Layout) -> Result<Vec<(RunId, SystemTime)>> {
         let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
         runs.push((RunId(name), modified));
     }
+    runs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
     Ok(runs)
 }
 

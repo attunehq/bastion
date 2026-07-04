@@ -72,11 +72,9 @@ pub fn runs(layout: &Layout, format: Format) -> Result<()> {
 ///
 /// Returns an error if a run cannot be removed.
 pub fn clean(layout: &Layout, keep: Option<usize>, older_than: Option<Duration>) -> Result<()> {
-    let keep = if keep.is_none() && older_than.is_none() {
-        Some(default_keep())
-    } else {
-        keep
-    };
+    // With neither bound given, default to keeping the most recent DEFAULT_KEEP runs;
+    // any explicit `--keep` or `--older-than` is honored as passed.
+    let keep = keep.or_else(|| older_than.is_none().then_some(DEFAULT_KEEP));
     let removed = store::prune(layout, keep, older_than)?;
     println!("removed {} run(s)", removed.len());
     for id in &removed {
@@ -86,6 +84,4 @@ pub fn clean(layout: &Layout, keep: Option<usize>, older_than: Option<Duration>)
 }
 
 /// How many runs to keep when `bastion clean` is given no arguments.
-fn default_keep() -> usize {
-    20
-}
+const DEFAULT_KEEP: usize = 20;

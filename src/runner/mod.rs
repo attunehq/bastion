@@ -238,9 +238,6 @@ struct Resolved {
     usage: Option<Usage>,
     transcript: Option<String>,
     duration: Duration,
-    /// Whether this reviewer's outcome counts toward the aggregate gate. Advisors
-    /// never do; a failed advisor is ignored entirely.
-    counts_as_gate: bool,
     /// Whether this verdict was replayed from a signed local attestation rather
     /// than executed fresh this run.
     replayed: bool,
@@ -250,6 +247,15 @@ struct Resolved {
     /// The scope digest to stamp on this reviewer's `reviewer.resolved` event,
     /// when one was computed.
     scope_digest: Option<String>,
+}
+
+impl Resolved {
+    /// Whether this reviewer's outcome counts toward the aggregate gate: only gates
+    /// do, advisors never (a failed advisor is ignored entirely). Derived from the
+    /// carried `reviewer` rather than stored, so it cannot drift from the mode.
+    fn counts_as_gate(&self) -> bool {
+        self.reviewer.mode == Mode::Gate
+    }
 }
 
 /// Execute the matched reviewers for a run using the real backends.
@@ -562,7 +568,7 @@ fn recheck_scope_digests(resolved: &mut [Resolved], ctx: &ExecContext) {
                 );
                 *item = fail(
                     &item.reviewer,
-                    item.counts_as_gate,
+                    item.counts_as_gate(),
                     "the working tree content this reviewer's carried verdict was \
                      scoped to changed while the run executed; re-run to review the \
                      current content",
@@ -629,7 +635,6 @@ fn resolve(
                 usage: outcome.usage,
                 transcript: outcome.transcript,
                 duration,
-                counts_as_gate: is_gate,
                 replayed: false,
                 carried: false,
                 scope_digest,
@@ -697,40 +702,38 @@ fn clamp_advisor(
 /// Build the resolved row for a failed/timed-out reviewer: a gate fails closed
 /// (block, with a synthetic blocking finding), an advisor fails open (pass).
 fn fail(reviewer: &Reviewer, is_gate: bool, reason: &str, duration: Duration) -> Resolved {
-    if is_gate {
-        Resolved {
-            reviewer: reviewer.clone(),
-            decision: Decision::Block,
-            summary: format!("{} did not produce a verdict: {reason}", reviewer.name),
-            findings: vec![crate::verdict::Finding {
+    // Only the verdict differs by mode: a gate blocks with a synthetic blocking
+    // finding, an advisor passes with none. Everything else about the row is shared.
+    let (decision, summary, findings) = if is_gate {
+        (
+            Decision::Block,
+            format!("{} did not produce a verdict: {reason}", reviewer.name),
+            vec![crate::verdict::Finding {
                 kind: crate::verdict::FindingKind::Blocking,
                 path: String::new(),
                 line_start: 0,
                 line_end: 0,
                 detail: format!("reviewer failed to complete: {reason}"),
             }],
-            usage: None,
-            transcript: None,
-            duration,
-            counts_as_gate: true,
-            replayed: false,
-            carried: false,
-            scope_digest: None,
-        }
+        )
     } else {
-        Resolved {
-            reviewer: reviewer.clone(),
-            decision: Decision::Pass,
-            summary: format!("{} skipped (advisor): {reason}", reviewer.name),
-            findings: Vec::new(),
-            usage: None,
-            transcript: None,
-            duration,
-            counts_as_gate: false,
-            replayed: false,
-            carried: false,
-            scope_digest: None,
-        }
+        (
+            Decision::Pass,
+            format!("{} skipped (advisor): {reason}", reviewer.name),
+            Vec::new(),
+        )
+    };
+    Resolved {
+        reviewer: reviewer.clone(),
+        decision,
+        summary,
+        findings,
+        usage: None,
+        transcript: None,
+        duration,
+        replayed: false,
+        carried: false,
+        scope_digest: None,
     }
 }
 
@@ -740,7 +743,7 @@ fn tally(resolved: &[Resolved]) -> Gates {
     let mut passed = 0u32;
     let mut blocked = 0u32;
     for item in resolved {
-        if !item.counts_as_gate {
+        if !item.counts_as_gate() {
             continue;
         }
         total += 1;

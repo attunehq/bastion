@@ -2,27 +2,38 @@
 
 use super::*;
 
+/// Join reviewer names as comma-separated inline code (`` `a`, `b` ``), the form
+/// both callouts list their reviewers in.
+fn quoted_names(names: impl IntoIterator<Item = impl std::fmt::Display>) -> String {
+    names
+        .into_iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The subject-and-verb a callout opens with: `"1 reviewer was"` for a single
+/// reviewer, `"reviewers were"` otherwise.
+fn reviewer_was(count: usize) -> &'static str {
+    if count == 1 {
+        "1 reviewer was"
+    } else {
+        "reviewers were"
+    }
+}
+
 /// The prominent `[!NOTE]` callout opening the comment when one or more
 /// reviewers replayed from a signed local attestation instead of executing
 /// fresh in CI (`docs/developer-guide/attestation.md`, "Verification and
 /// replay in CI"). Uses the same GitHub alert mechanism as the skills-drift
 /// `[!WARNING]` block so both advisories read consistently.
 pub(super) fn attestation_callout(attested: &AttestedSummary) -> String {
-    let names = attested
-        .reviewers
-        .iter()
-        .map(|name| format!("`{name}`"))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let names = quoted_names(&attested.reviewers);
     format!(
         "> [!NOTE]\n\
          > {} replayed from a signed local attestation rather than executed fresh: {names}.\n\
          > Attested by {} at {}.\n",
-        if attested.reviewers.len() == 1 {
-            "1 reviewer was"
-        } else {
-            "reviewers were"
-        },
+        reviewer_was(attested.reviewers.len()),
         truncate_key(&attested.public_key),
         attested.attested_at,
     )
@@ -36,20 +47,12 @@ pub(super) fn attestation_callout(attested: &AttestedSummary) -> String {
 /// CLI's `carried` marker. Carry is not attestation and carries no signature:
 /// the note states only that the verdict was reused, not that anyone signed it.
 pub(super) fn carried_callout(reviewers: &[&str]) -> String {
-    let names = reviewers
-        .iter()
-        .map(|name| format!("`{name}`"))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let names = quoted_names(reviewers.iter().copied());
     format!(
         "> [!NOTE]\n\
          > {} carried forward from the branch's previous run (trigger-scoped diff \
          unchanged) rather than executed fresh: {names}.\n",
-        if reviewers.len() == 1 {
-            "1 reviewer was"
-        } else {
-            "reviewers were"
-        },
+        reviewer_was(reviewers.len()),
     )
 }
 

@@ -132,7 +132,7 @@ pub(super) async fn upsert_comment<A: GitHubApi + ?Sized>(
     body: &str,
 ) -> Result<CommentAction> {
     let listed = send_checked(api, &comment_list_request(ctx)).await?;
-    match find_marker_comment(&listed.body)? {
+    match find_marker_comment(listed.body)? {
         Some(id) => {
             send_checked(api, &comment_update_request(ctx, id, body)).await?;
             Ok(CommentAction::Updated(id))
@@ -155,31 +155,11 @@ pub(super) async fn upsert_comment<A: GitHubApi + ?Sized>(
 /// # Errors
 ///
 /// Returns an error if the response body is not the expected array of comments.
-pub(super) fn find_marker_comment(list_body: &serde_json::Value) -> Result<Option<u64>> {
-    let comments: Vec<IssueComment> = serde_json::from_value(list_body.clone())
-        .wrap_err("parsing the PR comment list from GitHub")?;
+pub(super) fn find_marker_comment(list_body: serde_json::Value) -> Result<Option<u64>> {
+    let comments: Vec<IssueComment> =
+        serde_json::from_value(list_body).wrap_err("parsing the PR comment list from GitHub")?;
     Ok(comments
         .into_iter()
         .find(|c| c.body.contains(MARKER))
         .map(|c| c.id))
-}
-
-/// Send a request and treat any non-2xx status as an error, surfacing GitHub's
-/// own message. The fail-closed posture: a reporting call that GitHub rejected is
-/// a real failure, not something to swallow.
-pub(super) async fn send_checked<A: GitHubApi + ?Sized>(
-    api: &A,
-    req: &ApiRequest,
-) -> Result<ApiResponse> {
-    let resp = api.send(req).await?;
-    if !resp.is_success() {
-        bail!(
-            "GitHub {} {} returned {}: {}",
-            req.method.as_str(),
-            req.path,
-            resp.status,
-            resp.error_message().unwrap_or("(no message)"),
-        );
-    }
-    Ok(resp)
 }
