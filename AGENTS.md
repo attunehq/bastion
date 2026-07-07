@@ -96,6 +96,7 @@ bastion review --base main
 bastion review --base main --format jsonl
 bastion review --base main --reviewer <name> --reviewer <other>
 bastion review --base main --fresh
+bastion review --base main --include extra-reviewers.yaml
 bastion runs
 bastion show
 bastion transcript <reviewer>

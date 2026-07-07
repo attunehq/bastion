@@ -34,6 +34,14 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "PATH", env = crate::config::CONFIG_DIR_ENV)]
     pub config_dir: Option<PathBuf>,
 
+    /// Merge an extra reviewer registry file into the repository registry, as if
+    /// its `include:` array listed the path (relative to the current directory).
+    /// Repeatable. The extra reviewers become part of the effective repository
+    /// config, so `bastion attest` needs the same flags to re-derive the same
+    /// config hash.
+    #[arg(long = "include", global = true, value_name = "PATH")]
+    pub includes: Vec<PathBuf>,
+
     /// The command to run.
     #[command(subcommand)]
     pub command: Command,
@@ -274,6 +282,7 @@ pub async fn run() -> Result<ExitCode> {
                 github,
                 only: reviewers,
                 fresh,
+                includes: cli.includes,
             };
             let decision = crate::commands::review(&layout, &cwd, options, review_user_dir).await?;
             // A blocked review is an expected, non-error outcome that must still
@@ -285,8 +294,13 @@ pub async fn run() -> Result<ExitCode> {
         }
         Command::Validate { file } => {
             let cwd = std::env::current_dir().wrap_err("determining the current directory")?;
-            crate::commands::validate(&cwd, file.as_deref(), user_config_dir.as_deref())
-                .map(|()| ExitCode::SUCCESS)
+            crate::commands::validate(
+                &cwd,
+                file.as_deref(),
+                user_config_dir.as_deref(),
+                &cli.includes,
+            )
+            .map(|()| ExitCode::SUCCESS)
         }
         Command::Transcript { first, second } => {
             let (run, reviewer) = match second {
@@ -307,7 +321,8 @@ pub async fn run() -> Result<ExitCode> {
         }
         Command::Github { command } => match command {
             GithubCommand::Codeowners { owners } => {
-                crate::commands::codeowners(&owners).map(|()| ExitCode::SUCCESS)
+                let cwd = std::env::current_dir().wrap_err("determining the current directory")?;
+                crate::commands::codeowners(&cwd, &owners).map(|()| ExitCode::SUCCESS)
             }
             GithubCommand::Report { repo, pr, sha, run } => {
                 let cwd = std::env::current_dir().wrap_err("determining the current directory")?;
@@ -335,7 +350,7 @@ pub async fn run() -> Result<ExitCode> {
             SkillsCommand::List => crate::commands::skills_list().map(|()| ExitCode::SUCCESS),
         },
         Command::Attest { run, key } => {
-            crate::commands::attest(&layout, run.as_deref(), key.as_deref())
+            crate::commands::attest(&layout, run.as_deref(), key.as_deref(), &cli.includes)
                 .map(|()| ExitCode::SUCCESS)
         }
         Command::Update { check, force } => crate::commands::update(check, force)
@@ -451,6 +466,29 @@ mod tests {
         // A PR number is positive; `--pr 0` is rejected at parse time by `NonZeroU64`.
         let err = Cli::try_parse_from(["bastion", "review", "--pr", "0"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn include_is_a_repeatable_global_flag() {
+        // `--include` merges extra registry files into the repository layer; it
+        // parses on any subcommand so review, validate, and attest all see the
+        // same effective config.
+        let cli = Cli::parse_from([
+            "bastion",
+            "review",
+            "--include",
+            "a.yaml",
+            "--include",
+            "b.yaml",
+        ]);
+        assert_eq!(
+            cli.includes,
+            [PathBuf::from("a.yaml"), PathBuf::from("b.yaml")]
+        );
+        let attest = Cli::parse_from(["bastion", "attest", "--include", "a.yaml"]);
+        assert_eq!(attest.includes, [PathBuf::from("a.yaml")]);
+        let validate = Cli::parse_from(["bastion", "validate", "--include", "a.yaml"]);
+        assert_eq!(validate.includes, [PathBuf::from("a.yaml")]);
     }
 
     #[test]

@@ -33,11 +33,15 @@ itself:
 bastion github codeowners --owner @your-org/platform
 ```
 
-Pass `--owner` once per owner (it is repeatable). Add the generated block to your
-`CODEOWNERS`. With that block in place, any PR that adds, removes, or edits a
-reviewer; loosens a trigger; or changes a prompt touches an owned path, so GitHub
-requires a human review before merge. You can also write your own CODEOWNERS instead; the
-generated block is a correct starting suggestion.
+Pass `--owner` once per owner (it is repeatable). When run inside the repository,
+the command loads the registry and adds an entry for every file it pulls in
+(each `include:`d registry file and each `prompt: {file: ...}` prompt file),
+since those carry policy exactly like the root file. Add the generated block to
+your `CODEOWNERS`, and regenerate it when you add an include or a prompt file so
+the new path is covered. With that block in place, any PR that adds, removes, or
+edits a reviewer; loosens a trigger; or changes a prompt touches an owned path,
+so GitHub requires a human review before merge. You can also write your own
+CODEOWNERS instead; the generated block is a correct starting suggestion.
 
 > Why generate it statically rather than have Bastion manage it live? CODEOWNERS
 > changes only take effect *after* a PR merges, so the file must be written to

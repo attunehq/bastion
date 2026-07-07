@@ -49,6 +49,11 @@ pub struct ReviewOptions {
     /// reviewer executes even when its trigger-scoped diff is unchanged since
     /// the branch's previous run ([`crate::carry`]).
     pub fresh: bool,
+    /// Extra registry files merged into the repository layer (`--include`,
+    /// repeatable), as if the repository registry's `include:` array listed
+    /// them. Part of the effective repository config, so they move the config
+    /// hash that carry and attestation bind.
+    pub includes: Vec<std::path::PathBuf>,
 }
 
 /// `bastion review`: route and run the triggered reviewers, gating the result.
@@ -108,13 +113,14 @@ pub async fn review(
         github,
         only,
         fresh,
+        includes,
     } = options;
     let base = base.as_str();
     let repo_root = git::repo_root(cwd)?;
     warn_on_stale_skills(&repo_root);
     let branch = git::current_branch(&repo_root)?;
     let (_sources, repo_attestation, config) =
-        Config::discover_merged_attested(&repo_root, user_dir)?;
+        Config::discover_merged_attested(&repo_root, user_dir, &includes)?;
     let changed = git::changed_files(&repo_root, base)?;
 
     let router = Router::compile(&config.reviewers)?;

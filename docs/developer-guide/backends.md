@@ -165,7 +165,7 @@ about what is honored, so the code does not over-promise:
 | `backend` | Honored (`claude-code`, `codex`, `pi`; `any` -> Claude Code). |
 | `model` | **Honored.** Forwarded to the backend's model selector (`--model` for Claude Code, `-m` for Codex, `--model` for Pi). Backend-specific, so the registry rejects a `model` (own or inherited) under `backend: any`. Pi's `--model` takes a `provider/id` form (e.g. `openai-codex/gpt-5.5`) that selects the provider too (Pi's bare default provider is `google`), so a Pi model carries its provider in the string. Absent, Claude Code defaults to `claude-opus-4-8`; Codex and Pi resolve their own. |
 | `effort` | **Honored.** An opaque level forwarded verbatim to each backend's native control (Claude Code's `--effort`, Codex's `model_reasoning_effort`, Pi's `--thinking`; see below). Default `high`. |
-| `defaults` (registry-wide `model`/`effort`) | **Honored.** Folded into each reviewer at load time (a reviewer's own field wins); resolution happens once, in `Config::from_yaml`, so the persisted run record carries the effective values. |
+| `defaults` (registry-wide `model`/`effort`) | **Honored.** Folded into each reviewer at load time (a reviewer's own field wins); resolution happens once, at registry load, so the persisted run record carries the effective values. |
 | `timeout` | Honored by the runner. |
 | `inputs` | Honored, interpolated into the prompt. |
 | `env` | Honored, injected into the child process environment. |

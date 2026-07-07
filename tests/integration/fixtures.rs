@@ -435,6 +435,22 @@ impl TestRepo {
         self.review_base(fake, "main", &[])
     }
 
+    /// Run `bastion review --base main --format jsonl` with extra CLI arguments
+    /// (`--include`, say) and parse the stream.
+    pub(crate) fn review_with_args(&self, fake: &Path, extra_args: &[&str]) -> ReviewRun {
+        let mut args = vec!["review", "--base", "main", "--format", "jsonl"];
+        args.extend_from_slice(extra_args);
+        let output = self.run(fake, &args, &[]);
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        let events = parse_events(&stdout, &stderr);
+        ReviewRun {
+            code: output.status.code(),
+            events,
+            stderr,
+        }
+    }
+
     /// Run `bastion review --base <base> --repo <repo> --pr <pr> --format jsonl`
     /// against a GitHub source (the CI path), with any `extra_env` (typically the
     /// fake GitHub's `GITHUB_API_URL`/`GITHUB_TOKEN`).

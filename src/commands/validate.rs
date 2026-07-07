@@ -22,16 +22,26 @@ use std::path::Path;
 /// never spends a model call.
 ///
 /// `user_dir` is the user-level config directory layered into discovery (`None` to
-/// skip it). An explicit `file` is validated on its own, with no layering, since it
-/// is a deliberate single-file check.
+/// skip it). An explicit `file` is validated on its own, with no user-level
+/// layering, since it is a deliberate single-file check; `includes` (the
+/// `--include` flag) merge into it, or into the repository layer under discovery,
+/// exactly as they would on a real review.
 ///
 /// # Errors
 ///
-/// Returns an error if no registry is found, the file cannot be read, or it fails
-/// to parse or validate.
-pub fn validate(cwd: &Path, file: Option<&Path>, user_dir: Option<&Path>) -> Result<()> {
-    let (label, config) = match file {
-        Some(file) => (file.display().to_string(), Config::load(file)?),
+/// Returns an error if no registry is found, any involved file cannot be read, or
+/// the merged set fails to parse or validate.
+pub fn validate(
+    cwd: &Path,
+    file: Option<&Path>,
+    user_dir: Option<&Path>,
+    includes: &[std::path::PathBuf],
+) -> Result<()> {
+    let (label, extra_files, config) = match file {
+        Some(file) => {
+            let (config, files) = Config::load_layer(file, includes)?;
+            (file.display().to_string(), files, config)
+        }
         None => {
             // Resolve from the repo root when we are inside one (so the command
             // works from any subdirectory, like `review`), falling back to `cwd`
@@ -40,8 +50,11 @@ pub fn validate(cwd: &Path, file: Option<&Path>, user_dir: Option<&Path>) -> Res
             // gives the clear "no registry found" error, and hands back the sources
             // it loaded, so the summary reports exactly the files that were merged.
             let root = git::repo_root(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-            let (sources, config) = Config::discover_merged_located(&root, user_dir)?;
-            (describe_sources(&sources), config)
+            let (sources, config) = Config::discover_merged_located(&root, user_dir, includes)?;
+            let mut files = sources.repo_files.clone();
+            files.includes.extend(sources.user_files.includes.clone());
+            files.prompts.extend(sources.user_files.prompts.clone());
+            (describe_sources(&sources), files, config)
         }
     };
 
@@ -69,13 +82,22 @@ pub fn validate(cwd: &Path, file: Option<&Path>, user_dir: Option<&Path>) -> Res
             reviewer.backend.as_str(),
         )?;
     }
+    // Name every further file the merged set was assembled from, so the
+    // summary states exactly what was loaded.
+    for include in &extra_files.includes {
+        writeln!(out, "  included: {}", include.display())?;
+    }
+    for prompt in &extra_files.prompts {
+        writeln!(out, "  prompt file: {}", prompt.display())?;
+    }
     Ok(())
 }
 
 /// Describe the registry [`Sources`] that fed a merged config, for the `validate`
 /// summary line. A single source reads as its own path (so the common case matches
 /// the pre-merge wording); both sources name each file so it is clear what was
-/// merged. At least one is always present, since discovery errors otherwise.
+/// merged. With no root registry at all the layer came purely from `--include`
+/// files, which the caller lists individually.
 fn describe_sources(sources: &crate::config::Sources) -> String {
     match (&sources.repo, &sources.user) {
         (Some(repo), Some(user)) => format!(
@@ -85,7 +107,7 @@ fn describe_sources(sources: &crate::config::Sources) -> String {
         ),
         (Some(repo), None) => repo.path.display().to_string(),
         (None, Some(user)) => user.display().to_string(),
-        (None, None) => unreachable!("discover_merged_located errors when both sources are absent"),
+        (None, None) => "the registry assembled from --include".to_string(),
     }
 }
 
@@ -102,7 +124,7 @@ mod tests {
             "reviewers:\n  - name: a\n    trigger: [src/**]\n    mode: gate\n    prompt: p\n",
         )
         .unwrap();
-        validate(tmp.path(), Some(&path), None).expect("a well-formed file validates");
+        validate(tmp.path(), Some(&path), None, &[]).expect("a well-formed file validates");
     }
 
     #[test]
@@ -114,7 +136,7 @@ mod tests {
             "reviewers:\n  - name: dup\n    trigger: [a]\n    mode: gate\n    prompt: p\n  - name: dup\n    trigger: [b]\n    mode: gate\n    prompt: p\n",
         )
         .unwrap();
-        let err = validate(tmp.path(), Some(&path), None).unwrap_err();
+        let err = validate(tmp.path(), Some(&path), None, &[]).unwrap_err();
         assert!(
             format!("{err:#}").contains("duplicate reviewer name"),
             "error should name the duplicate, got: {err:#}"
@@ -130,7 +152,7 @@ mod tests {
             "reviewers:\n  - name: typo\n    trigger: [src/**]\n    mode: gate\n    bakend: codex\n    prompt: p\n",
         )
         .unwrap();
-        let err = validate(tmp.path(), Some(&path), None).unwrap_err();
+        let err = validate(tmp.path(), Some(&path), None, &[]).unwrap_err();
         assert!(
             format!("{err:#}").contains("unknown field `bakend`"),
             "validate should reject an unknown field, got: {err:#}"
@@ -146,7 +168,7 @@ mod tests {
             "reviewers:\n  - name: stray\n    trigger: [src/**]\n    mode: gate\n    model: gpt-5\n    prompt: p\n",
         )
         .unwrap();
-        let err = validate(tmp.path(), Some(&path), None).unwrap_err();
+        let err = validate(tmp.path(), Some(&path), None, &[]).unwrap_err();
         assert!(format!("{err:#}").contains("backend: any"), "got: {err:#}");
     }
 
@@ -158,13 +180,13 @@ mod tests {
             "reviewers:\n  - name: a\n    trigger: [x]\n    mode: advisor\n    prompt: p\n",
         )
         .unwrap();
-        validate(tmp.path(), None, None).expect("discovered registry validates");
+        validate(tmp.path(), None, None, &[]).expect("discovered registry validates");
     }
 
     #[test]
     fn validate_errors_clearly_when_no_registry_is_found() {
         let tmp = tempfile::tempdir().unwrap();
-        let err = validate(tmp.path(), None, None).unwrap_err();
+        let err = validate(tmp.path(), None, None, &[]).unwrap_err();
         assert!(
             format!("{err:#}").contains("no reviewer registry found"),
             "got: {err:#}"

@@ -101,11 +101,18 @@ Finally, Bastion does not own CI. One of the examples below indicates a preview 
 
 The schema is format-agnostic in principle, but YAML is the on-disk format we start with because it's human-friendly and widely used for config. The important part is that it's **declarative and static**: no code, no dynamic logic, so it's reviewable and generates a stable trigger set.
 
-The registry is a top-level mapping with three keys: `reviewers` (the list, each
+The registry is a top-level mapping with four keys: `reviewers` (the list, each
 entry keyed by `name`), `defaults` (registry-wide fields folded into any reviewer
-that does not set them itself), and `attestations` (a boolean, default `false`,
+that does not set them itself), `attestations` (a boolean, default `false`,
 that lets CI replay a verified attested run instead of re-executing a reviewer; see
-[Attestation](./attestation.md)). Only `reviewers` is required. (This is the
+[Attestation](./attestation.md)), and `include` (further registry files, resolved
+relative to the including file, whose reviewers merge into this file's; includes
+recurse, a file reached twice merges once, and each file's `defaults` apply to its
+own reviewers only). Only `reviewers` is required, and only the root file may set
+`attestations`. A reviewer's `prompt` is either inline text or a `{file: <path>}`
+reference resolved relative to the declaring file; loading inlines the content, so
+everything downstream (the run record, the effective config hash) binds the
+resolved text and file layout is invisible past the loader. (This is the
 on-disk shape the loader expects; see [`src/config.rs`](../../src/config.rs) and
 [`.bastion.yaml`](../../.bastion.yaml).)
 
@@ -162,8 +169,8 @@ reviewers:
 
 > **Implementation status.** This schema is the design target. In this
 > build, `name`, `trigger`, `mode`, `backend`, `model`, `effort`, the registry
-> `defaults` block, `prompt`, `timeout`, `env`,
-> `inputs`, and `runner` (containers) are honored: a reviewer with a `runner` block
+> `defaults` block, `include`, `prompt` (inline or `{file: <path>}`), `timeout`,
+> `env`, `inputs`, and `runner` (containers) are honored: a reviewer with a `runner` block
 > and `capabilities.network: true` runs its backend inside the built or named image
 > (see [Containers](./containers.md)). `capabilities.network: true` grants a containerized
 > reviewer general (unscoped) egress; a container with the default `network: false`
