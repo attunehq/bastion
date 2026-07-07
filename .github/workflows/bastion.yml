@@ -277,23 +277,12 @@ jobs:
         # minted dedicated-app token and the default GITHUB_TOKEN qualify, so this
         # uses the dedicated-app token when present and falls back to GITHUB_TOKEN
         # otherwise. GITHUB_API_URL is provided by Actions.
-        #
-        # `github report` landed after v0.1.0, so until a release that includes it
-        # becomes the latest, the installed binary will not have the subcommand.
-        # When an older engine lacks the subcommand, the report step exits 0, and
-        # reporting starts once the latest release includes the command. The
-        # capability probe is the only tolerated failure; once the subcommand
-        # exists, a real posting error fails the step.
         if: always()
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           BASTION_DATA_DIR: ${{ github.workspace }}/.bastion
         run: |
           set -euo pipefail
-          if ! bastion github report --help >/dev/null 2>&1; then
-            echo "::notice::bastion engine ${BASTION_ENGINE_VERSION:-unknown} has no 'github report'; skipping PR comment and checks until the latest release includes it."
-            exit 0
-          fi
           # `bastion github report` reads its own posting identity from the check-run
           # responses, so it decides on its own whether to nudge toward a dedicated
           # app; the workflow does not need to tell it.
