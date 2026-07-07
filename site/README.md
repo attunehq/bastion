@@ -58,7 +58,7 @@ than copying them, so the docs never drift between surfaces.
 ### Agent / LLM surface
 
 - `src/pages/guide/[slug].md.ts` serves every page's raw Markdown at a
-  predictable `.md` URL (e.g. `/guide/concepts.md`) -- the representation agents
+  predictable `.md` URL (e.g. `/guide/concepts.md`): the representation agents
   probe for and the text the "Copy page" button copies.
 - `src/pages/llms.txt.ts` and `src/pages/llms-full.txt.ts` generate
   [`/llms.txt`](https://llmstxt.org) (a curated index) and `/llms-full.txt` (the

@@ -147,8 +147,9 @@ one model is better at a given concern. See
 [Authoring reviewers](./authoring-reviewers.md#backend) and, for CI
 billing, [Continuous integration](./continuous-integration.md#authentication--billing).
 
-By default the backend CLI runs **natively** on the host, using the `claude` or
-`codex` already on your `PATH` and the auth and billing that CLI is configured with.
+By default the backend CLI runs **natively** on the host, using the `claude`,
+`codex`, or `pi` already on your `PATH` and the auth and billing that CLI is
+configured with.
 A reviewer that declares a [`runner`](./authoring-reviewers.md#runner-and-capabilities)
 instead runs that same backend **inside a container** (which requires
 `capabilities.network: true`; without it the reviewer is rejected before it runs, so a
@@ -162,7 +163,10 @@ can also bake in its own auth. If the reviewer's own `env` sets one of those nam
 that value wins and the host's is not also forwarded, so the reviewer can pin a
 specific credential. Nothing else from your host environment crosses that boundary. To
 give the in-container agent another value, set it as a literal in the reviewer's `env`,
-which is forwarded in alongside the credentials.
+which is forwarded in alongside the credentials. The fixed set covers the Anthropic
+and OpenAI variables only, so a containerized Pi reviewer on another provider
+authenticates from auth baked into its image or from a credential written into its
+`env`.
 
 ## How it all fits
 

@@ -40,8 +40,8 @@ plan it then:
    used as-is; the engine pulls it on demand at run time. `dockerfile` takes
    precedence over `image`, and a `runner` with neither fails closed.
 2. **Wraps the backend** (`ContainerRunner`). The backend is constructed with the
-   bare in-container program name (`claude` / `codex`) rather than a host-resolved
-   path, since `BASTION_CLAUDE_BIN` means nothing inside the image. Every spec the
+   bare in-container program name (`claude` / `codex` / `pi`) rather than a
+   host-resolved path, since `BASTION_CLAUDE_BIN` means nothing inside the image. Every spec the
    backend produces is rewritten to:
 
    ```
@@ -53,8 +53,8 @@ plan it then:
    The checkout is bind-mounted at `/workspace` and made the working directory, and
    stdin (the Codex prompt) flows through `docker run -i`. The container is given a
    unique `--name` so it can be torn down on cancellation (see Timeouts below). The
-   backend program (`claude` / `codex`) is set as the container `--entrypoint` rather
-   than appended as a command argument: a bare `docker run <image> <program>` overrides
+   backend program (`claude` / `codex` / `pi`) is set as the container `--entrypoint`
+   rather than appended as a command argument: a bare `docker run <image> <program>` overrides
    only the image's CMD, so an image that declares an ENTRYPOINT would run that with the
    program as an argument, and the entrypoint, not the backend, would receive the
    forwarded credentials and the mounted checkout. Setting `--entrypoint` makes the

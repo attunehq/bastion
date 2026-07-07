@@ -73,9 +73,8 @@ To cut a release:
    `BASTION_SEAL_SECRET`, so all platform binaries of the release seal and
    verify run attestations identically (see
    `docs/developer-guide/attestation.md`, "The run seal"). It then builds the
-   binary for
-   every supported target -- Linux x86_64/aarch64 (glibc and musl), macOS
-   x86_64/aarch64, and Windows x86_64 -- packages each as a `.tar.gz` alongside
+   binary for every supported target (Linux x86_64/aarch64 on glibc and musl,
+   macOS x86_64/aarch64, and Windows x86_64), packages each as a `.tar.gz` alongside
    `README.md`, `LICENSE`, and `NOTICE`, generates SHA-256 `checksums.txt`, and
    publishes a GitHub Release whose notes are generated from the pull requests
    merged since the previous tag (`--generate-notes`). The release is created as a

@@ -9,8 +9,8 @@ order: 2
 > Install Bastion, write one reviewer, and run your first review.
 
 This chapter gets you from nothing to a working review loop. It assumes you have a
-git repository and one of the supported agent backends installed (the Claude Code
-or Codex CLI).
+git repository and one of the supported agent backends installed (the Claude Code,
+Codex, or Pi CLI).
 
 A little vocabulary shows up here in passing: *reviewer*, *gate*, *advisor*,
 *verdict*, *findings*. The inline definitions are enough to follow along; the next
@@ -135,10 +135,11 @@ authenticated before running a review:
 ```sh
 claude --version    # for the Claude Code backend
 codex --version     # for the Codex backend
+pi --version        # for the Pi backend
 ```
 
 If the binary lives elsewhere or you want to point at a wrapper, set
-`BASTION_CLAUDE_BIN` or `BASTION_CODEX_BIN` to its path.
+`BASTION_CLAUDE_BIN`, `BASTION_CODEX_BIN`, or `BASTION_PI_BIN` to its path.
 
 That covers the default, **native** path. If you author a reviewer with a
 [`runner`](./authoring-reviewers.md#runner-and-capabilities), that reviewer runs its
@@ -146,7 +147,7 @@ backend inside a container instead (and must opt into `capabilities.network: tru
 without it the reviewer is rejected before it runs, so a gate blocks and an advisor is
 skipped), so it needs a container engine on the host rather than the backend CLI: Bastion shells out to `docker` by default (set
 `BASTION_CONTAINER_ENGINE` to use another, for example `podman`), and the backend CLI
-(`claude` / `codex`) must be present inside the image. A fixed set of provider
+(`claude` / `codex` / `pi`) must be present inside the image. A fixed set of provider
 credential variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and the like) is forwarded
 from your environment into the container by name so the in-container agent can
 authenticate; host CLI auth that lives in a file (`~/.claude`, `~/.codex/auth.json`) is
@@ -312,7 +313,8 @@ The most common first-run snags and what they mean:
   re-run. See [Authoring reviewers](./authoring-reviewers.md).
 - **The review blocks immediately with "did not produce a verdict".** A gate failed
   closed, usually because the backend binary is missing or unauthenticated. Re-check
-  `claude --version` / `codex --version` and that you are signed in (step 2).
+  `claude --version` / `codex --version` / `pi --version` and that you are signed
+  in (step 2).
 - **No reviewers ran (a trivial pass).** Nothing in your changeset matched any
   reviewer's `trigger`. Confirm you actually changed a file the globs cover, and
   that `--base` points at the right branch.

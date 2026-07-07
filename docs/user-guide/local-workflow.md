@@ -270,6 +270,7 @@ variable, handy for scratch runs you do not want in your real history. The layou
   runs/
     r-0f3a/
       run.jsonl                  # the full event stream (always JSONL, regardless of display format)
+      seal.json                  # the run seal, when the run was sealed (what `bastion attest` reads)
       reviewers/
         tenant-isolation/
           transcript.jsonl       # the full agent session
