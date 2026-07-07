@@ -533,15 +533,15 @@ a single reviewer or spending a model call:
 
 ```sh
 bastion validate                          # validate the merged set review would run
-bastion validate path/to/.bastion.yaml    # check a specific file on its own
+bastion validate path/to/.bastion.yaml    # check one registry and its include tree
 ```
 
 With no file argument it validates the same merged set a local `bastion review`
 would run, the discovered repository registry plus your user-level one, and names
 each source it merged, listing every included registry file and prompt file it
-pulled in. An explicit `FILE` is checked on its own, with no user-level merging
-(though its own `include:` entries and any `--include` flags still merge, as they
-would on a real review). It loads through the same path `bastion review` uses, so
+pulled in. An explicit `FILE` skips the user-level merging but still resolves the
+file fully: its `include:` entries, its prompt files, and any `--include` flags
+all load, as they would on a real review. It loads through the same path `bastion review` uses, so
 it catches exactly the errors a real review would hit at load time: malformed
 YAML, an unknown field, a duplicate name (including one that survives the
 user/repo merge or arrives via an include), a reviewer missing a required field,
