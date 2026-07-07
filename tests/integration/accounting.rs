@@ -6,8 +6,6 @@
 use crate::fakes::*;
 use crate::fixtures::*;
 
-use std::time::{Duration, Instant};
-
 use bastion::store;
 use bastion::verdict::{Decision, Money};
 
@@ -166,8 +164,16 @@ fn prior_findings_reach_the_next_runs_prompt() {
 }
 
 /// Reviewers run concurrently, not serially. Eight reviewers each sleep two
-/// seconds; awaited concurrently the run finishes in a few seconds, far under the
-/// ~16s a serial execution would take.
+/// seconds; the run's own recorded duration must land well under the serial
+/// floor summed from the reviewers' recorded durations.
+///
+/// Both sides of the comparison come from the run's event stream, measured by
+/// the same clock inside the binary, so machine load cannot flake the test: a
+/// fixed wall-clock bar used here previously failed under parallel-test
+/// subprocess-spawn contention, which stretches real elapsed time without any
+/// serialization in the runner. Contention stretches each reviewer's recorded
+/// duration too (the spawn wait is inside the per-task measurement), so the
+/// serial floor rises at least as fast as the run duration does.
 #[test]
 fn reviewers_run_concurrently_not_serially() {
     let Some(fake) = tooling() else { return };
@@ -185,21 +191,37 @@ fn reviewers_run_concurrently_not_serially() {
         .collect();
     let repo = TestRepo::new(&registry(&reviewers));
 
-    let started = Instant::now();
     let run = repo.review(fake);
-    let elapsed = started.elapsed();
 
     assert!(run.exited_zero(), "stderr:\n{}", run.stderr);
     assert_eq!(run.started_count(), 8);
     assert_eq!(run.resolved_count(), 8);
     assert_eq!(run.completed().1.passed, 8);
-    // Serial would be ~16s (8x2s); concurrent is a few seconds. The 13s bar sits
-    // well under that serial floor so it still catches serialization, with wide
-    // headroom for a slow or heavily loaded CI box (where subprocess spawn under
-    // parallel-test contention, not the sleeps, is what stretches the wall clock).
+
+    // Every reviewer really slept its 2s (the sleep is a floor, so each recorded
+    // duration is too), which guarantees the serial floor is at least 16s.
+    let durations = run.resolved_durations_ms();
+    assert_eq!(durations.len(), 8);
+    for (name, duration) in names.iter().zip(&durations) {
+        assert!(
+            *duration >= 2_000,
+            "{name} recorded {duration}ms, under its 2s sleep; the recorded \
+             durations are not trustworthy"
+        );
+    }
+
+    // A serialized runner cannot beat the serial floor: its run duration is the
+    // sum of the reviewer durations plus overhead. A concurrent runner finishes
+    // in about the longest single reviewer, leaving at least 7 reviewers' worth
+    // of overlap (14s and up). Demanding 6s of overlap therefore fails any
+    // serialized execution by a wide margin while giving the concurrent path
+    // wide headroom for persistence and emission overhead.
+    let serial_floor: u64 = durations.iter().sum();
+    let run_duration = run.completed_duration_ms();
     assert!(
-        elapsed < Duration::from_secs(13),
-        "8x2s reviewers took {elapsed:?}; they did not run concurrently"
+        run_duration + 6_000 <= serial_floor,
+        "the run took {run_duration}ms against a serial floor of {serial_floor}ms \
+         (per-reviewer: {durations:?}); the reviewers did not run concurrently"
     );
 }
 
