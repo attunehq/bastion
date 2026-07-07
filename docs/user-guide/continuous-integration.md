@@ -210,9 +210,9 @@ against fork code, which is exactly what the fork guard exists to prevent.
 
 ### Rolling your own workflow
 
-The action packages exactly the steps below. Reach for the raw shape when you
-cannot consume actions from github.com (say, a GitHub Enterprise instance
-without action sync) or when you need to rearrange the steps:
+Use the raw shape below when you cannot consume actions from github.com (say,
+a GitHub Enterprise instance without action sync) or when you need to
+rearrange the steps:
 
 ```yaml
 name: bastion
