@@ -76,8 +76,9 @@ Following one review top to bottom touches most of the crate:
    loading first resolves the file layout: `include:`d registry files merge in
    (recursively, each loaded once), `--include` files join the repository layer,
    and `prompt: {file: ...}` references are inlined, so a `Config` in hand always
-   carries flat reviewers with real prompt text. Either source alone
-   suffices; only the absence of both is an error. The merged set is parsed into
+   carries flat reviewers with real prompt text. Any one source (a repo registry, a
+   user registry, or a `--include` file) suffices; discovery errors only when all
+   are absent. The merged set is parsed into
    `Config` and validated (unique names, unique run-store path components, and
    non-empty prompts). Malformed input fails here, before any agent runs.
 3. **Compute the changeset** (`git.rs`). Bastion asks git for the files that differ

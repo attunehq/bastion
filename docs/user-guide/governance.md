@@ -41,8 +41,9 @@ resolves outside the repository is left out: CODEOWNERS cannot protect a path
 outside the tree, so keep policy files in the repository if you want them
 governed. If the registry, an included file, or a prompt file fails to load,
 the command prints the error and exits non-zero rather than emitting a block
-that silently omits policy paths; with no repository or no registry at all it
-prints the static paths alone. Add the generated block to your `CODEOWNERS`,
+that silently omits policy paths. With no repository, or with no registry and
+no `--include <path>` files (which merge here the same way they do on a
+review), it prints the static paths alone. Add the generated block to your `CODEOWNERS`,
 and regenerate it when you add an include or a prompt file so the new path is
 covered. With that block in place, any PR that adds, removes, or
 edits a reviewer; loosens a trigger; or changes a prompt touches an owned path,
