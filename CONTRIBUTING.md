@@ -81,14 +81,22 @@ To cut a release:
    merged since the previous tag (`--generate-notes`). The release is created as a
    draft (so its notes and assets are complete before it is visible), then flipped
    to published in a final step.
-4. Bastion's own review gate adopts the new engine automatically; there is no version
-   pin to bump. The [`bastion.yml`](.github/workflows/bastion.yml) workflow downloads
-   the *latest* published release rather than building from each PR's sources, so the
-   engine that judges a PR is never the engine the PR edits, yet it tracks releases
-   without a manual pin. Once you publish a release that includes `bastion github report`, the
-   `Report the review to the pull request` step (which self-skips on older engines)
-   starts posting the PR comment and per-reviewer checks on the next run.
+4. After publishing a stable release, the workflow force-advances the floating
+   major tag (`v0` for a `v0.x.y` release) to the tagged commit. That tag is what
+   GitHub Action consumers pin (`uses: jssblck/bastion@v0`), and the action
+   resolves it to the newest stable release in that major, so both the action
+   code and the engine track the release with no consumer-side bump. Prerelease
+   tags do not move it. Never push a bare major tag by hand; the workflow's
+   trigger patterns only match full `vX.Y.Z` tags, so the floating tag itself
+   can never cut a release.
+5. Bastion's own review gate adopts the new engine automatically; there is no version
+   pin to bump. The [`bastion.yml`](.github/workflows/bastion.yml) workflow consumes
+   the GitHub Action from the PR's checkout (`uses: ./`), which installs the *latest*
+   published release rather than building from each PR's sources, so the engine that
+   judges a PR is never the engine the PR edits, yet it tracks releases without a
+   manual pin.
 
 Run the workflow via `workflow_dispatch` with `dry_run: true` to build and package
 the whole matrix without creating a release. A tag with a pre-release suffix
-(`v0.2.0-rc.1`) is published as a prerelease. macOS binaries are unsigned.
+(`v0.2.0-rc.1`) is published as a prerelease and does not move the floating major
+tag. macOS binaries are unsigned.
