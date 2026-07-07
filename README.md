@@ -104,7 +104,7 @@ merge gate. You check out the PR head and authenticate your backend CLI, and
 the action does the rest:
 
 ```yaml
-- uses: jssblck/bastion@vX.Y.Z   # pin a bastion release tag
+- uses: jssblck/bastion@v0
 ```
 
 The [continuous integration chapter](docs/user-guide/continuous-integration.md)
