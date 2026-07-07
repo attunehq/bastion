@@ -95,10 +95,13 @@ file: names must be unique across all of it, and each file's `defaults:` apply
 to the reviewers declared in that same file only, so an included file means the
 same thing no matter who includes it.
 
-You can also merge extra registry files for a single run with the `--include
-<path>` flag (repeatable, on any command that reads the registry), as if the
-repository root file listed them. The extra reviewers become part of the
-effective repository configuration for that run, which has one consequence for
+You can also merge extra registry files for a single invocation with the
+repeatable `--include <path>` flag, on `review`, `validate`, `attest`, and
+`github codeowners`. The files merge into the repository layer like `include:`
+entries, with one difference: a relative `--include` path resolves against the
+directory you run the command from, not against the registry file. The extra
+reviewers become part of the effective repository configuration for that run,
+which has one consequence for
 [attestation](./continuous-integration.md#attesting-a-run-so-ci-can-replay-it):
 `bastion attest` and CI re-derive the configuration themselves, so a run
 reviewed with `--include` only attests and replays if they are given the same
@@ -125,8 +128,11 @@ included file reads its prompt files relative to itself). A missing or empty
 prompt file is a load error. Everything downstream sees the resolved text: the
 run record, the attestation hash, and carry all bind the prompt's *content*, so
 editing the markdown file is a policy change exactly like editing an inline
-prompt, and prompt files belong under the same human review as the registry
-(`bastion github codeowners` lists them automatically).
+prompt, and prompt files belong under the same human review as the registry.
+`bastion github codeowners` lists prompt files that live inside the repository
+automatically; one outside the repository still works as a prompt, but
+CODEOWNERS cannot protect a path outside the tree, so it is left out of the
+generated block.
 
 ## User-level reviewers
 

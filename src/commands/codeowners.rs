@@ -16,7 +16,10 @@ use crate::git;
 /// itself, so any PR touching review policy requires a human review. When a
 /// registry is present, the block also covers every file it pulls in (included
 /// registry files and prompt files), since those carry policy exactly like the
-/// root file. `cwd` is where the registry is discovered from.
+/// root file; `includes` (the `--include` flag) merge in the same way they do
+/// on a review. A pulled-in file that resolves outside the repository is
+/// skipped, since CODEOWNERS cannot protect a path outside the tree. `cwd` is
+/// where the registry is discovered from.
 ///
 /// # Errors
 ///
@@ -24,11 +27,11 @@ use crate::git;
 /// otherwise silently omit the files it pulls in), or if writing to stdout
 /// fails. No registry at all is fine: the block then covers the static paths
 /// only.
-pub fn codeowners(cwd: &Path, owners: &[String]) -> Result<()> {
+pub fn codeowners(cwd: &Path, owners: &[String], includes: &[PathBuf]) -> Result<()> {
     // Outside a repository there is nothing to discover relative to; the static
     // block is still useful, so print it rather than fail.
     let extra = match git::repo_root(cwd) {
-        Ok(root) => registry_policy_paths(&root)?,
+        Ok(root) => registry_policy_paths(&root, includes)?,
         Err(_) => Vec::new(),
     };
     io::stdout()
@@ -38,14 +41,16 @@ pub fn codeowners(cwd: &Path, owners: &[String]) -> Result<()> {
 }
 
 /// The root-relative, slash-separated paths of every extra file the repository
-/// registry pulls in: `include:` entries (recursively) and `prompt: {file: ...}`
-/// files. Empty when no registry is discoverable from `root`. A file that
-/// resolves outside `root` cannot be protected by CODEOWNERS and is skipped.
-fn registry_policy_paths(root: &Path) -> Result<Vec<String>> {
-    let Some(found) = crate::config::locate_kind(root)? else {
-        return Ok(Vec::new());
+/// registry (plus any `--include` files) pulls in: `include:` entries
+/// (recursively) and `prompt: {file: ...}` files. Empty when nothing beyond the
+/// static paths is discoverable from `root`. A file that resolves outside
+/// `root` cannot be protected by CODEOWNERS and is skipped.
+fn registry_policy_paths(root: &Path, includes: &[PathBuf]) -> Result<Vec<String>> {
+    let (_, files) = match crate::config::locate_kind(root)? {
+        Some(found) => Config::load_layer(&found.path, includes)?,
+        None if !includes.is_empty() => Config::layer_from_includes(includes)?,
+        None => return Ok(Vec::new()),
     };
-    let (_, files) = Config::load_layer(&found.path, &[])?;
     let canonical_root = std::fs::canonicalize(root)
         .wrap_err_with(|| format!("resolving the repository root {}", root.display()))?;
     let mut paths: Vec<String> = files
@@ -96,7 +101,7 @@ mod tests {
         )
         .unwrap();
 
-        let paths = registry_policy_paths(root.path()).unwrap();
+        let paths = registry_policy_paths(root.path(), &[]).unwrap();
         assert_eq!(
             paths,
             ["reviewers/prompts/sec.md", "reviewers/security.yaml"],
@@ -121,13 +126,40 @@ mod tests {
         )
         .unwrap();
 
-        let paths = registry_policy_paths(root.path()).unwrap();
+        let paths = registry_policy_paths(root.path(), &[]).unwrap();
         assert!(paths.is_empty(), "got: {paths:?}");
     }
 
     #[test]
     fn policy_paths_are_empty_without_a_registry() {
         let root = tempfile::tempdir().unwrap();
-        assert!(registry_policy_paths(root.path()).unwrap().is_empty());
+        assert!(registry_policy_paths(root.path(), &[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn policy_paths_cover_include_flag_files_with_and_without_a_root_registry() {
+        // `--include` merges into the repository layer here the same way it does
+        // on a review, so an in-repo extra file gets a CODEOWNERS entry; it also
+        // works when the repository has no root registry at all.
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("extra.yaml"),
+            "reviewers:\n  - name: extra\n    trigger: [src/**]\n    mode: gate\n    prompt: p\n",
+        )
+        .unwrap();
+        let extra = root.path().join("extra.yaml");
+
+        assert_eq!(
+            registry_policy_paths(root.path(), std::slice::from_ref(&extra)).unwrap(),
+            ["extra.yaml"],
+            "no root registry: the --include file alone is covered"
+        );
+
+        std::fs::write(root.path().join(".bastion.yaml"), "reviewers: []\n").unwrap();
+        assert_eq!(
+            registry_policy_paths(root.path(), std::slice::from_ref(&extra)).unwrap(),
+            ["extra.yaml"],
+            "with a root registry: the --include file merges in and is covered"
+        );
     }
 }

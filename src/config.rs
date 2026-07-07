@@ -242,7 +242,7 @@ impl Config {
     ///
     /// Returns an error if any file cannot be read or parsed, sets
     /// `attestations`, or the merged set fails validation.
-    fn layer_from_includes(extra_includes: &[PathBuf]) -> Result<(Self, LayerFiles)> {
+    pub(crate) fn layer_from_includes(extra_includes: &[PathBuf]) -> Result<(Self, LayerFiles)> {
         let mut loader = Loader::new();
         let mut config = Config::default();
         for include in extra_includes {

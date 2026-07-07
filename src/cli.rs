@@ -322,7 +322,8 @@ pub async fn run() -> Result<ExitCode> {
         Command::Github { command } => match command {
             GithubCommand::Codeowners { owners } => {
                 let cwd = std::env::current_dir().wrap_err("determining the current directory")?;
-                crate::commands::codeowners(&cwd, &owners).map(|()| ExitCode::SUCCESS)
+                crate::commands::codeowners(&cwd, &owners, &cli.includes)
+                    .map(|()| ExitCode::SUCCESS)
             }
             GithubCommand::Report { repo, pr, sha, run } => {
                 let cwd = std::env::current_dir().wrap_err("determining the current directory")?;

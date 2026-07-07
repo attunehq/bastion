@@ -36,9 +36,11 @@ bastion github codeowners --owner @your-org/platform
 Pass `--owner` once per owner (it is repeatable). When run inside the repository,
 the command loads the registry and adds an entry for every file it pulls in
 (each `include:`d registry file and each `prompt: {file: ...}` prompt file),
-since those carry policy exactly like the root file. Add the generated block to
-your `CODEOWNERS`, and regenerate it when you add an include or a prompt file so
-the new path is covered. With that block in place, any PR that adds, removes, or
+since those carry policy exactly like the root file. A pulled-in file that
+resolves outside the repository is left out: CODEOWNERS cannot protect a path
+outside the tree, so keep policy files in the repository if you want them
+governed. Add the generated block to your `CODEOWNERS`, and regenerate it when
+you add an include or a prompt file so the new path is covered. With that block in place, any PR that adds, removes, or
 edits a reviewer; loosens a trigger; or changes a prompt touches an owned path,
 so GitHub requires a human review before merge. You can also write your own
 CODEOWNERS instead; the generated block is a correct starting suggestion.
