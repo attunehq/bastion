@@ -23,7 +23,7 @@ matching archive from the latest
 [GitHub release](https://github.com/jssblck/bastion/releases), verifies its
 SHA-256 checksum, and puts `bastion` on your `PATH`.
 
-On Linux and macOS:
+On Linux, macOS, or Windows under Git Bash:
 
 ```sh
 curl -sSfL https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.sh | bash
@@ -36,6 +36,9 @@ On Windows, from PowerShell:
 irm https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.ps1 | iex
 bastion --version
 ```
+
+On Windows both installers install `bastion.exe` to the same default location
+(`$env:LOCALAPPDATA\Programs\bastion`); use whichever matches your shell.
 
 The shell installer takes `-v/--version`, `-b/--bin-dir`, `-t/--tmp-dir`, and
 `-l/--libc` (pass them after `bash -s --`); the PowerShell installer reads the

@@ -93,8 +93,8 @@ the gate.
 ## The workflow
 
 The packaged adapter is the **Bastion GitHub Action**: the `action.yml` at the
-root of the Bastion repository, pinned as `jssblck/bastion@v0`. Its contract
-mirrors the local loop. You own the checkout and the backend credential, exactly
+root of the Bastion repository, pinned by release tag
+(`uses: jssblck/bastion@vX.Y.Z`). Its contract mirrors the local loop. You own the checkout and the backend credential, exactly
 as a contributor owns their clone and their `codex login`; the action owns the
 engine and the review. A complete workflow:
 
@@ -132,17 +132,18 @@ jobs:
       # billing" below; drop it in here. Then stand up anything your reviewers
       # consume (a preview env, a database).
 
-      - uses: jssblck/bastion@v0
+      - uses: jssblck/bastion@vX.Y.Z   # pin a bastion release tag
 ```
 
 The action then, in order:
 
 1. **Installs a published `bastion` release** (checksum-verified, via the same
-   installer as a local install). The action ref picks the engine: `@v0.3.0`
-   installs exactly that release, a floating `@v0` installs the newest stable
-   release in that major, and any other ref installs the latest stable release.
-   The `version` input overrides both, which is also how a SHA-pinned action
-   pins its engine.
+   installer as a local install). The action ref picks the engine: an exact tag
+   installs that release, a bare major tag installs the newest stable release
+   in that major (the release workflow advances the major tag on each stable
+   release), and any other ref installs the latest stable release. The
+   `version` input overrides all of these, which is also how a SHA-pinned
+   action pins its engine.
 2. **Fetches the attestation notes ref**, so a signed local run can replay
    instead of re-executing (see below). Absence is the ordinary case and is
    skipped quietly.

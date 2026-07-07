@@ -10,7 +10,8 @@ set -euo pipefail
 #
 # Options:
 #   -v, --version    Specify a version (default: latest)
-#   -b, --bin-dir    Specify the installation directory (default: $HOME/.local/bin)
+#   -b, --bin-dir    Specify the installation directory (default: $HOME/.local/bin;
+#                    on Windows, $LOCALAPPDATA/Programs/bastion to match install.ps1)
 #   -t, --tmp-dir    Specify the temporary directory (default: system temp directory)
 #   -l, --libc       Force the Linux C runtime: 'gnu' or 'musl' (default: autodetect)
 #   -h, --help       Show help message
@@ -240,7 +241,7 @@ parse_args() {
         echo
         echo "Options:"
         echo "  -v, --version    Specify a version (default: latest)"
-        echo "  -b, --bin-dir    Specify the installation directory (default: \$HOME/.local/bin)"
+        echo "  -b, --bin-dir    Specify the installation directory (default: \$HOME/.local/bin; on Windows, \$LOCALAPPDATA/Programs/bastion)"
         echo "  -t, --tmp-dir    Specify the temporary directory (default: system temp directory)"
         echo "  -l, --libc       Force the Linux C runtime: 'gnu' or 'musl' (default: autodetect)"
         echo "  -h, --help       Show this help message"
@@ -393,12 +394,33 @@ install_binary() {
 main() {
   # Set defaults
   local VERSION=""
-  local BIN_DIR="$HOME/.local/bin"
+  local BIN_DIR=""
   local TMP_DIR="${TMPDIR:-/tmp}"
   local LIBC="${BASTION_LIBC:-}"
 
   # Parse command line arguments
   parse_args "$@"
+
+  # Resolve the default install directory per host. On Windows this mirrors the
+  # PowerShell installer's default ($env:LOCALAPPDATA\Programs\bastion) so the
+  # two public Windows installers agree on where bastion lands; elsewhere it is
+  # the conventional ~/.local/bin.
+  if [[ -z "$BIN_DIR" ]]; then
+    case "$(uname -s)" in
+      MINGW* | MSYS* | CYGWIN*)
+        if [[ -n "${LOCALAPPDATA:-}" ]]; then
+          BIN_DIR="$(cygpath -u "$LOCALAPPDATA")/Programs/bastion"
+        else
+          # LOCALAPPDATA is always set on a stock Windows session; if a stripped
+          # environment lacks it, fall back rather than failing the install.
+          BIN_DIR="$HOME/.local/bin"
+        fi
+        ;;
+      *)
+        BIN_DIR="$HOME/.local/bin"
+        ;;
+    esac
+  fi
 
   # Check for required commands
   check_requirements

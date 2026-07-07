@@ -42,7 +42,7 @@ The install scripts detect your platform, download the matching archive from the
 latest [GitHub release](https://github.com/jssblck/bastion/releases), verify its
 SHA-256 checksum, and put `bastion` on your `PATH`.
 
-**Linux and macOS:**
+**Linux, macOS, and Windows (Git Bash):**
 
 ```sh
 curl -sSfL https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.sh | bash
@@ -104,7 +104,7 @@ merge gate. You check out the PR head and authenticate your backend CLI, and
 the action does the rest:
 
 ```yaml
-- uses: jssblck/bastion@v0
+- uses: jssblck/bastion@vX.Y.Z   # pin a bastion release tag
 ```
 
 The [continuous integration chapter](docs/user-guide/continuous-integration.md)
