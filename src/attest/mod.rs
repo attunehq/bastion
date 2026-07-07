@@ -49,7 +49,9 @@ use self::sign::resolve_signing_key;
 /// Implements `docs/developer-guide/attestation.md` ("The `bastion attest`
 /// flow"): loads and verifies the run's seal, re-derives the repository state
 /// and refuses on any drift, resolves the signing key, builds and signs the
-/// bundle, and writes it to `refs/notes/bastion` on HEAD. `secret` is the
+/// bundle, and writes it to `refs/notes/bastion` on HEAD. `includes` is the
+/// `--include` set of extra registry files, which must match what the run was
+/// reviewed with for the re-derived config hash to agree. `secret` is the
 /// sealing secret to verify against (`seal::embedded_secret()` in production;
 /// injected here so tests can seal and attest under a fixed test secret
 /// without depending on the build-time embedded one).
@@ -67,6 +69,7 @@ pub fn attest(
     layout: &Layout,
     run: Option<&str>,
     key: Option<&Path>,
+    includes: &[std::path::PathBuf],
     secret: &[u8],
     out: &mut impl std::io::Write,
 ) -> Result<()> {
@@ -166,7 +169,10 @@ pub fn attest(
         &patch_id,
     )?;
 
-    let (_, repo_attestation, _) = Config::discover_merged_attested(root, None)
+    // `includes` must be the same `--include` set the run was reviewed with:
+    // extra includes are part of the effective repository config, so the hash
+    // only matches when this command re-derives it from the same files.
+    let (_, repo_attestation, _) = Config::discover_merged_attested(root, None, includes)
         .wrap_err("re-deriving the effective repository reviewer config")?;
     drift_check(
         "the reviewer registry has changed since this run",
@@ -377,7 +383,9 @@ mod tests {
         let base_tree = git::tree_hash(&repo, &merge_base_commit).unwrap();
         let patch_id = git::patch_id(&repo, &merge_base_commit).unwrap();
 
-        let config_hash = Config::from_yaml(registry_yaml).unwrap().effective_hash();
+        let config_hash = Config::from_yaml(registry_yaml, Path::new("."))
+            .unwrap()
+            .effective_hash();
 
         let resolved_events = vec![
             RunEvent::RunStarted {
@@ -490,6 +498,7 @@ mod tests {
             &fixture.layout,
             None,
             Some(&key_path),
+            &[],
             fixture.secret,
             &mut out,
         )
@@ -554,7 +563,7 @@ mod tests {
         .unwrap();
 
         let mut out = Vec::new();
-        let err = attest(&repo, &layout, None, None, b"secret", &mut out).unwrap_err();
+        let err = attest(&repo, &layout, None, None, &[], b"secret", &mut out).unwrap_err();
         assert!(err.to_string().contains("was not sealed"));
     }
 
@@ -595,7 +604,7 @@ mod tests {
         .unwrap();
 
         let mut out = Vec::new();
-        let err = attest(&repo, &layout, None, None, b"secret", &mut out).unwrap_err();
+        let err = attest(&repo, &layout, None, None, &[], b"secret", &mut out).unwrap_err();
         let message = err.to_string();
         assert!(message.contains("was partial"), "got: {message}");
         assert!(message.contains("cannot be attested"), "got: {message}");
@@ -643,6 +652,7 @@ mod tests {
             &fixture.layout,
             None,
             None,
+            &[],
             fixture.secret,
             &mut out,
         )
@@ -693,6 +703,7 @@ mod tests {
             &fixture.layout,
             None,
             None,
+            &[],
             fixture.secret,
             &mut out,
         )
@@ -724,6 +735,7 @@ mod tests {
             &fixture.layout,
             None,
             None,
+            &[],
             fixture.secret,
             &mut out,
         )
@@ -750,6 +762,7 @@ mod tests {
             &fixture.layout,
             None,
             None,
+            &[],
             fixture.secret,
             &mut out,
         )

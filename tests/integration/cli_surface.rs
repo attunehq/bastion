@@ -178,6 +178,65 @@ fn a_user_only_registry_runs_when_the_repo_has_none() {
     assert_eq!(runs[0].reviewers, 1);
 }
 
+/// A registry split across files reviews like one file: the root's `include:`
+/// pulls in a second registry whose reviewer reads its prompt from a markdown
+/// file, and both reviewers execute through the real binary and gate together.
+#[test]
+fn an_included_registry_with_a_prompt_file_reviews_like_one_file() {
+    let Some(fake) = tooling() else { return };
+
+    let repo = TestRepo::new(&format!(
+        "include: [reviewers/more.yaml]\n{}",
+        registry(&[Reviewer::new("root-pass", "codex", "gate").behavior("pass")])
+    ));
+    std::fs::create_dir_all(repo.path().join("reviewers/prompts")).unwrap();
+    std::fs::write(
+        repo.path().join("reviewers/more.yaml"),
+        "reviewers:\n  - name: incl-block\n    trigger: [src/**/*.rs]\n    mode: gate\n    backend: claude-code\n    env:\n      FAKE_BEHAVIOR: block\n    prompt: {file: prompts/incl.md}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.path().join("reviewers/prompts/incl.md"),
+        "Block everything, for the test.\n",
+    )
+    .unwrap();
+
+    let run = repo.review(fake);
+
+    assert_eq!(run.code, Some(1), "the included gate's block must gate");
+    let (decision, gates, _cost) = run.completed();
+    assert_eq!(decision, Decision::Block);
+    assert_eq!(gates.total, 2, "both files' reviewers ran");
+    assert_eq!(run.resolved("root-pass").0, Decision::Pass);
+    assert_eq!(run.resolved("incl-block").0, Decision::Block);
+}
+
+/// `--include` merges an extra registry file into the repository layer for the
+/// run, as if the root file's `include:` listed it: its reviewer executes
+/// alongside the repository's.
+#[test]
+fn an_include_flag_merges_an_extra_registry_into_the_run() {
+    let Some(fake) = tooling() else { return };
+
+    let repo = TestRepo::new(&registry(&[
+        Reviewer::new("repo-r", "codex", "gate").behavior("pass")
+    ]));
+    std::fs::write(
+        repo.path().join("extra.yaml"),
+        registry(&[Reviewer::new("extra-r", "claude-code", "gate").behavior("pass")]),
+    )
+    .unwrap();
+
+    let run = repo.review_with_args(fake, &["--include", "extra.yaml"]);
+
+    assert!(run.exited_zero(), "stderr:\n{}", run.stderr);
+    let (decision, gates, _cost) = run.completed();
+    assert_eq!(decision, Decision::Pass);
+    assert_eq!(gates.total, 2, "the --include reviewer joined the run");
+    run.resolved("repo-r");
+    run.resolved("extra-r");
+}
+
 /// An invalid registry (here, duplicate reviewer names) is a hard error surfaced
 /// to the user, never swallowed into a pass.
 #[test]

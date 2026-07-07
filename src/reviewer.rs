@@ -6,6 +6,7 @@
 //! `docs/developer-guide/design.md`.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -196,14 +197,55 @@ pub struct RunnerSpec {
     pub image: Option<String>,
 }
 
+/// Where a reviewer's prompt text comes from, as written in the registry file.
+///
+/// The registry accepts either the prompt written inline (the common case) or a
+/// `{file: <path>}` mapping naming a file (markdown, typically) whose whole
+/// content is the prompt, resolved relative to the registry file that declares
+/// the reviewer. This type exists only at the parse boundary: loading resolves
+/// it into the plain `String` the rest of the system sees
+/// ([`crate::config::Config::load`]), so a [`Reviewer<String>`] always carries
+/// the actual prompt text and everything downstream (hashing, sealing, the
+/// backends) is oblivious to where it came from.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(
+    untagged,
+    expecting = "an inline prompt string or a `{file: <path>}` mapping"
+)]
+pub enum PromptSource {
+    /// The prompt text written directly in the registry file.
+    Inline(String),
+    /// A reference to a file whose content is the prompt.
+    File(PromptFile),
+}
+
+/// The `{file: <path>}` form of a prompt: a reference to a file whose whole
+/// content is the review instruction.
+///
+/// A separate struct (rather than an inline enum variant) so
+/// `deny_unknown_fields` applies: inside an untagged enum a struct variant would
+/// otherwise silently swallow a typoed sibling key.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromptFile {
+    /// Path to the prompt file, resolved relative to the registry file that
+    /// declares the reviewer (absolute paths are used as-is).
+    pub file: PathBuf,
+}
+
 /// A single reviewer definition, as parsed from the registry file.
 ///
 /// Trigger globs are kept as raw strings here; they are compiled into a matcher
 /// by [`crate::routing`] (parse-don't-validate: the compiled form is a distinct
 /// type produced once, at the boundary).
+///
+/// The `P` parameter is the prompt representation: [`PromptSource`] straight out
+/// of the YAML (inline text or a file reference), `String` once loading has
+/// resolved it. Everything past the config boundary uses the `String` default,
+/// so an unresolved prompt cannot leak downstream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Reviewer {
+pub struct Reviewer<P = String> {
     /// Unique reviewer name; also the check-run name in CI.
     pub name: String,
     /// Path globs over the changed files that trigger this reviewer.
@@ -246,15 +288,57 @@ pub struct Reviewer {
     /// instead of executing this reviewer fresh.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attestation: Option<AttestationPolicy>,
-    /// The review instruction handed to the agent.
-    pub prompt: String,
+    /// The review instruction handed to the agent: [`PromptSource`] as parsed,
+    /// the resolved text once loaded.
+    pub prompt: P,
 }
 
-impl Reviewer {
+impl<P> Reviewer<P> {
     /// Whether the reviewer runs in a container rather than native.
     #[must_use]
     pub fn is_containerized(&self) -> bool {
         self.runner.is_some()
+    }
+
+    /// Convert the prompt representation, carrying every other field across
+    /// unchanged. The destructure is exhaustive, so adding a reviewer field
+    /// cannot silently drop it here.
+    ///
+    /// # Errors
+    ///
+    /// Returns whatever `f` returns; the conversion itself cannot fail.
+    pub fn map_prompt<Q, E>(self, f: impl FnOnce(P) -> Result<Q, E>) -> Result<Reviewer<Q>, E> {
+        let Reviewer {
+            name,
+            trigger,
+            mode,
+            backend,
+            model,
+            effort,
+            timeout,
+            runner,
+            env,
+            capabilities,
+            inputs,
+            attestation,
+            prompt,
+        } = self;
+        let prompt = f(prompt)?;
+        Ok(Reviewer {
+            name,
+            trigger,
+            mode,
+            backend,
+            model,
+            effort,
+            timeout,
+            runner,
+            env,
+            capabilities,
+            inputs,
+            attestation,
+            prompt,
+        })
     }
 }
 
@@ -403,6 +487,71 @@ prompt: p
         );
         assert_eq!(Backend::Pi.as_str(), "pi");
         assert_eq!(Backend::default(), Backend::Any);
+    }
+
+    #[test]
+    fn a_prompt_parses_as_inline_text_or_a_file_reference() {
+        let inline: PromptSource = serde_yaml_ng::from_str("Check it.").unwrap();
+        assert_eq!(inline, PromptSource::Inline("Check it.".to_string()));
+
+        let file: PromptSource = serde_yaml_ng::from_str("{file: reviewers/check.md}").unwrap();
+        assert_eq!(
+            file,
+            PromptSource::File(PromptFile {
+                file: PathBuf::from("reviewers/check.md")
+            })
+        );
+    }
+
+    #[test]
+    fn a_prompt_mapping_with_a_stray_key_is_rejected() {
+        // `deny_unknown_fields` on the file form: a typoed sibling key must not
+        // be silently swallowed by the untagged match.
+        let err = serde_yaml_ng::from_str::<PromptSource>("{file: p.md, fil: q.md}").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("an inline prompt string or a `{file: <path>}` mapping"),
+            "the error should state the accepted forms, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_reviewer_parses_with_a_prompt_file_reference() {
+        let yaml = r"
+name: from-file
+trigger: [src/**]
+mode: gate
+prompt:
+  file: reviewers/from-file.md
+";
+        let reviewer: Reviewer<PromptSource> = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(
+            reviewer.prompt,
+            PromptSource::File(PromptFile {
+                file: PathBuf::from("reviewers/from-file.md")
+            })
+        );
+    }
+
+    #[test]
+    fn map_prompt_carries_every_other_field_across() {
+        let yaml = r"
+name: carried
+trigger: [src/**]
+mode: gate
+backend: codex
+model: gpt-5
+effort: low
+prompt: original
+";
+        let raw: Reviewer<PromptSource> = serde_yaml_ng::from_str(yaml).unwrap();
+        let mapped: Reviewer = raw
+            .map_prompt(|_| Ok::<_, std::convert::Infallible>("resolved".to_string()))
+            .unwrap();
+        assert_eq!(mapped.name, "carried");
+        assert_eq!(mapped.model.as_ref().map(ModelId::as_str), Some("gpt-5"));
+        assert_eq!(mapped.effort.as_ref().map(Effort::as_str), Some("low"));
+        assert_eq!(mapped.prompt, "resolved");
     }
 
     #[test]

@@ -73,6 +73,13 @@ Guidance that follows, so we stop re-deriving it:
     seal in `src/seal.rs`, `bastion attest` and the CI planner in `src/attest/`.
 - `.bastion.yaml`: the example reviewer registry at the repository root (the
   `.bastion.yml` spelling is also honored); update it when the schema changes.
+- `action.yml`: the composite GitHub Action consumers pin (`jssblck/bastion@v0`).
+  Its inputs and outputs are a downstream surface like the CLI; the consumer-facing
+  reference is `docs/user-guide/continuous-integration.md`. Sequencing lesson for
+  any future pinnable artifact: snapshot discipline (the `prose-anti-slop` gate)
+  keeps it out of `docs/` until a published release contains it, so ship the
+  artifact with raw-mechanism docs first and flip the docs in a follow-up once
+  the release exists.
 - `.agents/skills/readme.md`: repo-local Rust coding skills and their provenance.
 - `CLAUDE.md` is a bare `@AGENTS.md` import so guidance does not drift between
   agent surfaces.
@@ -96,6 +103,7 @@ bastion review --base main
 bastion review --base main --format jsonl
 bastion review --base main --reviewer <name> --reviewer <other>
 bastion review --base main --fresh
+bastion review --base main --include extra-reviewers.yaml
 bastion runs
 bastion show
 bastion transcript <reviewer>
@@ -137,7 +145,8 @@ second copy to drift against.
 - Do not preserve backwards compatibility by default. Mention breakage plainly.
 - Weigh breakage by who actually consumes the thing. The artifact downstream users
   depend on is the `bastion` binary and its surfaces: the CLI, the verdict/event
-  schema, the install scripts, and the bundled skills. A change that could wedge or
+  schema, the install scripts, the GitHub Action (`action.yml` and its
+  inputs/outputs), and the bundled skills. A change that could wedge or
   break *those* is a real risk to weigh and call out. This repo's *own* CI is not
   one of those surfaces: users run `bastion`, not our workflows, and they do not copy
   `.github/workflows/*` verbatim (the docs show an illustrative example, but each
@@ -186,7 +195,9 @@ second copy to drift against.
 Bastion ships as a binary on GitHub Releases (never a crates.io publish). To cut
 one, push a `vX.Y.Z` tag; a `-rc.N` suffix ships as a prerelease. Do not bump the
 `Cargo.toml` version: `0.0.0` is a deliberate placeholder, and the released binary's
-`--version` comes from the tag. There is no self-review pin to bump; the
-`.github/workflows/bastion.yml` gate always runs the latest published release. The
-full runbook (the seal-secret-per-release flow, the build matrix, version
-derivation) is in `CONTRIBUTING.md`.
+`--version` comes from the tag. A stable release also auto-advances the floating
+major tag (`v0`) that GitHub Action consumers pin; never push a bare major tag by
+hand. There is no self-review pin to bump; the `.github/workflows/bastion.yml`
+gate always runs the latest published release. The full runbook (the
+seal-secret-per-release flow, the build matrix, version derivation) is in
+`CONTRIBUTING.md`.

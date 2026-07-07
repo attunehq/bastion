@@ -46,6 +46,10 @@ When both exist, `bastion review` and `bastion validate` merge the repository's 
 
 This is a local-only layer. A review carrying a GitHub source (`--repo`/`--pr`, as CI runs) skips the user-level registry, so the GitHub adapter sees the repository's reviewers alone and the `repo:` scope never appears there, even on a self-hosted runner that has a config dir. `--config-dir` (or `$BASTION_CONFIG_DIR`) overrides where the user-level file is read from, mirroring `--data-dir` for run history.
 
+### Multi-file registries and `--include`
+
+Either layer's registry can spread across files: a top-level `include:` array merges further registry files (recursively, each path relative to the file that lists it, a file reached twice merging once), and a reviewer's `prompt` can be a `{file: <path>}` reference whose content is inlined at load. Both resolve inside their own layer before the user/repo merge above happens, so a user-file include is a user-layer reviewer and a repo-file include is part of the effective repository config. The global `--include <path>` flag (repeatable, on `review`, `validate`, `attest`, and `github codeowners`) merges extra files into the *repository* layer, like `include:` entries except that a relative path resolves against the current directory; because the extra files change the effective repository config hash, `bastion attest` (and a CI replay) only agree with such a run when given the same flags. See [Authoring reviewers](../user-guide/authoring-reviewers.md#splitting-the-registry-across-files) for the authoring-level rules (per-file `defaults`, root-only `attestations`, cross-file name uniqueness).
+
 The [review context](./design.md#review-context) uses local inputs. There is no PR, so intent comes from the branch's commit messages (`base..HEAD`), and there is no discussion thread to gather. Prior-findings memory works because every local run is persisted: a second `bastion review` on the same branch shows each reviewer what it raised last time, recalled from the run store. GitHub adds the PR description and discussion on top.
 
 ---
@@ -140,7 +144,7 @@ The commands that read saved data back are the local equivalent of clicking "Det
 
 `show` and `runs` accept `--format human|jsonl`; `transcript` is raw text by default, since a transcript is already a document.
 
-Separate from these run-inspection commands, `bastion validate [FILE]` parses the reviewer registry through the same `Config` load path `review` uses, and reports any load-time error (malformed YAML, an unknown field, a duplicate name, a model under `backend: any`) without running a reviewer or spending a model call. With no `FILE` it validates the merged set `review` would run (the discovered repository registry plus the user-level one), naming each source it merged; an explicit `FILE` is validated on its own. A valid registry prints a summary and exits zero; an invalid one prints the error and exits non-zero, so it serves as a cheap pre-commit or CI lint. It has no GitHub mirror: in CI the same validation happens implicitly when `review` loads the registry.
+Separate from these run-inspection commands, `bastion validate [FILE]` parses the reviewer registry through the same `Config` load path `review` uses, and reports any load-time error (malformed YAML, an unknown field, a duplicate name, an empty or unreadable prompt file, a missing include, a model under `backend: any`) without running a reviewer or spending a model call. With no `FILE` it validates the merged set `review` would run (the discovered repository registry plus the user-level one), naming each source it merged and listing every included registry file and prompt file; an explicit `FILE` is validated on its own, with no user-level layering (its `include:` entries and any `--include` flags still merge). A valid registry prints a summary and exits zero; an invalid one prints the error and exits non-zero, so it serves as a cheap pre-commit or CI lint. It has no GitHub mirror: in CI the same validation happens implicitly when `review` loads the registry.
 
 `bastion attest [<run>] [--key <path>]` signs a sealed local run as an attestation note on HEAD, so CI can verify and replay it instead of re-executing the reviewers (see [Attestation](./attestation.md) for the full design). It defaults to the latest recorded run; `--key` picks the SSH signing key, falling back to `git config user.signingkey` when omitted. It refuses to sign when:
 
@@ -149,7 +153,7 @@ Separate from these run-inspection commands, `bastion validate [FILE]` parses th
 - the seal recorded that a test seam (a `BASTION_*_BIN` backend override, or the container-engine override) was active, since a run against a stubbed reviewer is not a real review;
 - the seal recorded `dirty: true`, meaning the working tree carried uncommitted tracked changes or untracked files at review time: commit the final content, re-run the review, and attest that run instead;
 - the run store no longer matches its own seal, meaning it was edited after the run finished, or sealed by a different build of Bastion;
-- the repository has moved on since the run: HEAD's tree, the merge base's tree, the diff's patch-id, or the effective config hash no longer match what the seal recorded;
+- the repository has moved on since the run: HEAD's tree, the merge base's tree, the diff's patch-id, or the effective config hash no longer match what the seal recorded (a run reviewed with `--include` needs the same `--include` flags here, since the extra files are part of that hash);
 - no signing key can be resolved (`--key` was not given and `git config user.signingkey` is unset).
 
 On success it prints the run id and the reviewers it covers, the resolved public key, and the push command for the notes ref:

@@ -7,7 +7,10 @@
 # docs/developer-guide/design.md (and, task-first, docs/user-guide/authoring-reviewers.md).
 #
 # This file lives at the repository root as `.bastion.yaml` (the `.bastion.yml`
-# spelling is also honored). This is the live registry Bastion uses to review its
+# spelling is also honored). A registry can also spread across files: a top-level
+# `include:` array merges further registry files, and a reviewer's `prompt` can be
+# a `{file: path.md}` reference; this registry is small enough to stay in one
+# file with inline prompts. This is the live registry Bastion uses to review its
 # own changes, both in the local loop (`bastion review`) and in CI
 # (`.github/workflows/bastion.yml`). Every
 # reviewer runs on the Codex backend, billed to the maintainer's ChatGPT

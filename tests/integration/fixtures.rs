@@ -435,6 +435,22 @@ impl TestRepo {
         self.review_base(fake, "main", &[])
     }
 
+    /// Run `bastion review --base main --format jsonl` with extra CLI arguments
+    /// (`--include`, say) and parse the stream.
+    pub(crate) fn review_with_args(&self, fake: &Path, extra_args: &[&str]) -> ReviewRun {
+        let mut args = vec!["review", "--base", "main", "--format", "jsonl"];
+        args.extend_from_slice(extra_args);
+        let output = self.run(fake, &args, &[]);
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        let events = parse_events(&stdout, &stderr);
+        ReviewRun {
+            code: output.status.code(),
+            events,
+            stderr,
+        }
+    }
+
     /// Run `bastion review --base <base> --repo <repo> --pr <pr> --format jsonl`
     /// against a GitHub source (the CI path), with any `extra_env` (typically the
     /// fake GitHub's `GITHUB_API_URL`/`GITHUB_TOKEN`).
@@ -630,6 +646,29 @@ impl ReviewRun {
             }
         }
         panic!("no run.completed in stream; stderr:\n{}", self.stderr);
+    }
+
+    /// The run's own recorded wall-clock duration from the closing
+    /// `run.completed`: the runner's execute phase, measured inside the binary,
+    /// excluding process startup and changeset routing.
+    pub(crate) fn completed_duration_ms(&self) -> u64 {
+        for event in &self.events {
+            if let RunEvent::RunCompleted { duration_ms, .. } = event {
+                return *duration_ms;
+            }
+        }
+        panic!("no run.completed in stream; stderr:\n{}", self.stderr);
+    }
+
+    /// Every reviewer's recorded `duration_ms`, one per `reviewer.resolved`.
+    pub(crate) fn resolved_durations_ms(&self) -> Vec<u64> {
+        self.events
+            .iter()
+            .filter_map(|e| match e {
+                RunEvent::ReviewerResolved { duration_ms, .. } => Some(*duration_ms),
+                _ => None,
+            })
+            .collect()
     }
 
     /// The resolved verdict, summary, findings, and usage for one reviewer.

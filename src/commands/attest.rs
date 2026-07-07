@@ -21,7 +21,12 @@ use std::path::Path;
 /// [`crate::attest::attest`] (an unsealed run, a seam-tainted seal, a
 /// tampered run store, repository drift since the run, or no resolvable
 /// signing key), or if writing to stdout fails.
-pub fn attest(layout: &Layout, run: Option<&str>, key: Option<&Path>) -> Result<()> {
+pub fn attest(
+    layout: &Layout,
+    run: Option<&str>,
+    key: Option<&Path>,
+    includes: &[std::path::PathBuf],
+) -> Result<()> {
     let cwd = std::env::current_dir().wrap_err("determining the current directory")?;
     let root = git::repo_root(&cwd)?;
     let stdout = io::stdout();
@@ -31,6 +36,7 @@ pub fn attest(layout: &Layout, run: Option<&str>, key: Option<&Path>) -> Result<
         layout,
         run,
         key,
+        includes,
         crate::seal::embedded_secret(),
         &mut out,
     )
