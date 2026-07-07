@@ -632,6 +632,29 @@ impl ReviewRun {
         panic!("no run.completed in stream; stderr:\n{}", self.stderr);
     }
 
+    /// The run's own recorded wall-clock duration from the closing
+    /// `run.completed`: the runner's execute phase, measured inside the binary,
+    /// excluding process startup and changeset routing.
+    pub(crate) fn completed_duration_ms(&self) -> u64 {
+        for event in &self.events {
+            if let RunEvent::RunCompleted { duration_ms, .. } = event {
+                return *duration_ms;
+            }
+        }
+        panic!("no run.completed in stream; stderr:\n{}", self.stderr);
+    }
+
+    /// Every reviewer's recorded `duration_ms`, one per `reviewer.resolved`.
+    pub(crate) fn resolved_durations_ms(&self) -> Vec<u64> {
+        self.events
+            .iter()
+            .filter_map(|e| match e {
+                RunEvent::ReviewerResolved { duration_ms, .. } => Some(*duration_ms),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The resolved verdict, summary, findings, and usage for one reviewer.
     pub(crate) fn resolved(&self, name: &str) -> (Decision, String, Vec<Finding>, Option<Usage>) {
         for event in &self.events {
