@@ -417,7 +417,12 @@ looks before `bastion review` runs. The pattern is the same for every backend:
    For a ChatGPT or Claude **subscription**, this file holds an OAuth credential (an
    access token plus a refresh token); the CLI refreshes the short-lived access
    token from the stored refresh token on each run, so the secret does not need
-   rotating every time the access token expires. A Codex `auth.json` from a ChatGPT
+   rotating every time the access token expires. One sharp edge: the provider
+   rotates the refresh token when it is used, so two jobs refreshing the same
+   stored credential at once (two PRs from one author, say) can collide, and the
+   loser fails closed with a `refresh_token_reused` error. Re-run the failed job;
+   if the error persists across re-runs, the stored copy has been superseded, so
+   sign in again locally and update the secret. A Codex `auth.json` from a ChatGPT
    sign-in carries `"auth_mode": "chatgpt"`, and the native `backend: codex` reads it
    directly: you do **not** need Pi to spend a ChatGPT subscription (see
    [Spending a subscription in CI](#spending-a-subscription-in-ci) below).
