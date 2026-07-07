@@ -13,10 +13,15 @@ name: Release
 # macOS binaries are shipped unsigned for now. Code signing and notarization need
 # an Apple Developer account; wire them in once that exists.
 
+# Full version tags only, so the floating major tag this workflow itself moves
+# (v0, v1, ...) can never be mistaken for a release to cut. That tag is pushed
+# with GITHUB_TOKEN, which GitHub already excludes from triggering workflows,
+# but the pattern also protects against a human pushing a bare major by hand.
 on:
   push:
     tags:
-      - "v*"
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -263,6 +268,20 @@ jobs:
         run: |
           set -euo pipefail
           gh release edit "${{ needs.prepare.outputs.tag }}" --draft=false
+
+      # Consumers of the GitHub Action pin `uses: jssblck/bastion@v0`, and that
+      # floating tag must track the newest stable release in its major. Advance
+      # it here, after the release is published, so the tag never points at a
+      # release consumers cannot see. Prereleases are skipped: an -rc engine
+      # must be opted into explicitly, never adopted by a floating pin.
+      - name: Advance the floating major tag
+        if: ${{ !inputs.dry_run && needs.prepare.outputs.prerelease == 'false' }}
+        run: |
+          set -euo pipefail
+          tag="${{ needs.prepare.outputs.tag }}"
+          major="${tag%%.*}"
+          git push --force origin "HEAD:refs/tags/$major"
+          echo "Advanced $major to $tag"
 
       - name: Write release summary
         if: ${{ !inputs.dry_run }}
