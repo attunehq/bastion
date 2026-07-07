@@ -339,8 +339,8 @@ environment beyond the least-privilege default. Where these stand:
   can reference files anywhere in the repo. An `image` reference beginning with `-`
   fails closed, since the engine would read it as a command-line option rather than an
   image name. The selected backend's executable must exist inside the image on `PATH`
-  (`claude` for `claude-code`, `codex` for `codex`). This lets a reviewer carry tools
-  or a pinned toolchain the host does not have.
+  (`claude` for `claude-code`, `codex` for `codex`, `pi` for `pi`). This lets a
+  reviewer carry tools or a pinned toolchain the host does not have.
 - **`capabilities.network: true` is required to run a container; the default
   `network: false` fails closed.** `network: true` gives a containerized reviewer
   general (unscoped) outbound network. A container's egress cannot be scoped to the

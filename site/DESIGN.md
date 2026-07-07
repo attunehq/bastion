@@ -1,6 +1,6 @@
 # Design
 
-The visual system for the Bastion site. Aesthetic lane: **drafting-paper spec** --
+The visual system for the Bastion site. Aesthetic lane: **drafting-paper spec**,
 a structural engineering document, not a sci-fi dashboard. Tokens live in
 `src/styles/tokens.css`; this file is the human-readable rationale.
 
@@ -41,7 +41,7 @@ Rust CLI that reads config files), not costume.
   multiple weights (640 for headings). Letter-spacing tightens to -0.022/-0.03em on
   display.
 - **Mono (`--font-mono`):** JetBrains Mono Variable. All code, verdicts, labels,
-  filenames, section clauses, install commands -- the "artifact" voice.
+  filenames, section clauses, install commands: the "artifact" voice.
 - **Scale:** ~1.26 ratio, fluid `clamp()`. Display ceiling ~3.7rem in the hero (the
   layout is two-column; it is not a full-bleed shout). `--text-*` tokens from xs
   (0.78rem) to 4xl.
@@ -59,12 +59,12 @@ child's `max-width` can't stretch a single column past the viewport. Crisp radii
 
 ## Components
 
-- **Artifact** -- a "file" card with a labeled tab (filename + lang) and an optional
+- **Artifact**: a "file" card with a labeled tab (filename + lang) and an optional
   meta slot (a verdict pill). The recurring proof element.
-- **Section ledgers/registries** -- structural tables (reviewer registry, the gate
+- **Section ledgers/registries**: structural tables (reviewer registry, the gate
   ledger) that collapse to stacked records under ~860px.
-- **Pills** -- the verdict vocabulary as UI (`pill--pass/block/advisor/neutral`).
-- **Terminals** -- dark `--ink` panels for command/output, with a green pass color.
+- **Pills**: the verdict vocabulary as UI (`pill--pass/block/advisor/neutral`).
+- **Terminals**: dark `--ink` panels for command/output, with a green pass color.
 
 ## Motion
 
