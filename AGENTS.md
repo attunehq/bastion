@@ -74,8 +74,10 @@ Guidance that follows, so we stop re-deriving it:
 - `.bastion.yaml`: the example reviewer registry at the repository root (the
   `.bastion.yml` spelling is also honored); update it when the schema changes.
 - `action.yml`: the composite GitHub Action consumers pin (`jssblck/bastion@v0`).
-  Its inputs and outputs are a downstream surface like the CLI; the consumer-facing
-  reference is `docs/user-guide/continuous-integration.md`.
+  Its inputs and outputs are a downstream surface like the CLI. Snapshot discipline
+  (the `prose-anti-slop` gate) keeps it out of `docs/` until a published release
+  contains the action: the CI chapter documents the raw workflow until then, and
+  flips action-first in a follow-up once the release ships and the refs resolve.
 - `.agents/skills/readme.md`: repo-local Rust coding skills and their provenance.
 - `CLAUDE.md` is a bare `@AGENTS.md` import so guidance does not drift between
   agent surfaces.

@@ -4,17 +4,15 @@
 
 The core design ([`design.md`](./design.md)) is deliberately CI-agnostic; it describes reviewers, verdicts, and the merge gate without saying how any of it touches a real forge. This doc is the GitHub adapter: the concrete answer to "where does the workflow live, how does a verdict become a check, and how is the policy layer enforced" when the forge is GitHub. Everything here is one implementation of the plugin-style CI interface the core design refers to; another forge would get its own doc and reuse the same core.
 
-> **What the adapter does.** The adapter runs `bastion review`, gates on its
-> exit code, and then runs `bastion github report` to post the results: a sticky
-> PR comment carrying every reviewer's verdict and findings (optional ones
-> included), one check run per reviewer, and the always-present aggregate
-> `bastion` check. The full run is uploaded as an artifact too. Bastion's GitHub
-> helpers are `bastion github codeowners` and `bastion github report`. Because
-> `bastion github report` runs after `bastion review` finishes, each check run is
-> posted already completed with its conclusion. The packaged form is the GitHub
-> Action ([`action.yml`](../../action.yml) at the repository root); this
-> repository dogfoods it through
-> [`.github/workflows/bastion.yml`](../../.github/workflows/bastion.yml).
+> **What the adapter does.** The self-hosted workflow in
+> [`.github/workflows/bastion.yml`](../../.github/workflows/bastion.yml) runs
+> `bastion review`, gates on the job's exit code, and then runs `bastion github
+> report` to post the results: a sticky PR comment carrying every reviewer's verdict
+> and findings (optional ones included), one check run per reviewer, and the
+> always-present aggregate `bastion` check. The full run is uploaded as an artifact
+> too. Bastion's GitHub helpers are `bastion github codeowners` and `bastion github
+> report`. Because `bastion github report` runs after `bastion review` finishes, each
+> check run is posted already completed with its conclusion.
 
 The guiding rule is the same as the core: Bastion does not own CI, it plugs into yours. The workflow, the secrets, the preview environments, and the branch protection rules are GitHub's; Bastion reads and writes them through a thin adapter and otherwise stays out of the way.
 
@@ -31,31 +29,6 @@ Bastion runs as a GitHub Actions workflow triggered on pull request events: `ope
 5. Reports each verdict back to the PR.
 
 Native reviewers run directly on the Actions runner. A reviewer that declares a container `runner` and `capabilities.network: true` runs its backend inside that container on the Actions runner (the engine is already present on GitHub-hosted runners); see [Containers](./containers.md). None of routing or aggregation is GitHub-specific; only the steps that read the PR and write results go through the adapter.
-
-### The packaged action
-
-The adapter ships as a composite GitHub Action, the
-[`action.yml`](../../action.yml) at the repository root, so an adopter pins it
-by release tag instead of hand-rolling the steps. Its contract is
-deliberately the same split as the local CLI: the consumer owns the checkout
-(full history, PR head SHA) and the backend CLI plus its credential,
-authenticated in a prior step exactly as a contributor authenticates locally;
-the action owns the engine and the review. It installs a checksum-verified
-release through the bundled `scripts/install.sh`, fetches the attestation notes
-ref, restores the branch's prior run artifact (prior-finding recall and
-incremental carry), runs `bastion review` with the PR context flags, uploads
-the run, runs `bastion github report`, and only then fails on a blocked review,
-so the PR surfaces land even when the gate blocks.
-
-The release workflow advances a floating major tag on every stable release,
-and the action resolves its own ref to an engine: an exact tag pins that
-engine, a bare major tag installs the newest stable release in its major, and
-a `version` input overrides both. The action's inputs and outputs are a
-downstream surface like the CLI's, so a breaking change there is weighed and
-called out the same way. The consumer-facing
-reference (the full workflow, the input table, what stays the consumer's) is
-the user guide's
-[continuous integration chapter](../user-guide/continuous-integration.md).
 
 The adapter is the GitHub *producer* of the review context. It maps GitHub's fields onto the transport-neutral `ReviewContext` and leaves the rest out of the core. A non-empty PR body becomes the author's stated intent; an empty body supplies none, so the local commit-message intent stands. Each non-Bastion comment becomes an untrusted claim carrying the commenter's `Standing` (mapped from `author_association`, so a reviewer can weight a maintainer above an outsider without ever obeying either), and Bastion's own past comments are filtered out by their hidden marker so a reviewer never reads itself. The core never sees an `author_association` or a comment id.
 
@@ -99,10 +72,10 @@ A repository can opt in (`attestations: true` in its registry) to let CI reuse a
 
 ### The two workflow requirements
 
-Honoring an attestation needs two things from the workflow. The GitHub Action covers the second on its own; a hand-rolled workflow needs both (this repository's [`bastion.yml`](../../.github/workflows/bastion.yml) shows the first, and consumes the action for the second):
+Honoring an attestation needs two small additions to an ordinary `bastion` workflow, both already present in this repository's own [`bastion.yml`](../../.github/workflows/bastion.yml):
 
-- **Check out the PR head, not the merge commit.** `actions/checkout`'s default `pull_request` behavior checks out a synthetic merge commit, whose tree never matches the head tree an author attested. Set `ref: ${{ github.event.pull_request.head.sha }}` so CI's HEAD is the commit the note is actually attached to. The checkout is the consumer's step, so the action cannot do this for them.
-- **Fetch the notes ref.** `actions/checkout` does not fetch notes by default. The action fetches `refs/notes/bastion` before reviewing; rolling your own, add `git fetch origin +refs/notes/bastion:refs/notes/bastion`, tolerant of the ref being absent (most PRs will not carry a note; that is the ordinary case, not an error).
+- **Check out the PR head, not the merge commit.** `actions/checkout`'s default `pull_request` behavior checks out a synthetic merge commit, whose tree never matches the head tree an author attested. Set `ref: ${{ github.event.pull_request.head.sha }}` so CI's HEAD is the commit the note is actually attached to.
+- **Fetch the notes ref.** `actions/checkout` does not fetch notes by default, so add `git fetch origin +refs/notes/bastion:refs/notes/bastion`, tolerant of the ref being absent (most PRs will not carry a note; that is the ordinary case, not an error).
 
 If a repository skips either step or has not set `attestations: true`, replay is skipped and reviewers resolve the ordinary way: an unchanged reviewer carries its prior pass and the rest execute fresh.
 
@@ -173,14 +146,14 @@ One operational note carried over from the core design: under heavy volume a sub
 
 ### Self-hosted example: Bastion reviewing Bastion
 
-This repository dogfoods the adapter through [`.github/workflows/bastion.yml`](../../.github/workflows/bastion.yml), which consumes the GitHub Action from the PR's own checkout (`uses: ./`) so action changes take effect in the same PR. The engine stays outside the PR's reach: a local `uses: ./` carries no release ref, so the action installs the *latest* published stable release rather than a binary built from the PR's own sources, and a change can never edit the engine that judges it. Engine improvements land without a per-PR pin bump while the engine remains a maintainer-published release. Reviewer policy in [`.bastion.yaml`](../../.bastion.yaml) is still read from the checkout, and that file, the workflow, and `action.yml` are all CODEOWNERS-protected paths. Every reviewer in `.bastion.yaml` pins `backend: codex`, so each review runs on the Codex CLI billed to the PR author's own ChatGPT subscription. The workflow wires that up by mapping the author's GitHub login to a per-author credential:
+This repository dogfoods the adapter through [`.github/workflows/bastion.yml`](../../.github/workflows/bastion.yml). The job runs a published `bastion` release rather than a binary built from the PR's own sources, so a change can never edit the engine that judges it. It downloads the *latest* published stable release, so engine improvements land without a per-PR pin bump while the engine remains a maintainer-published release rather than the PR's sources. Reviewer policy in [`.bastion.yaml`](../../.bastion.yaml) is still read from the checkout, and both that file and the workflow are CODEOWNERS-protected paths. Every reviewer in `.bastion.yaml` pins `backend: codex`, so each review runs on the Codex CLI billed to the PR author's own ChatGPT subscription. The workflow wires that up by mapping the author's GitHub login to a per-author credential:
 
 1. **Capture the credential once, locally.** Each contributor authenticates Codex against their billed ChatGPT subscription on their own machine with `codex login`. Codex writes an OAuth credential (an access token plus a refresh token) to `~/.codex/auth.json`.
 2. **Store it as a per-author secret.** Copy the contents of that `auth.json` into a repository secret named `CODEX_AUTH_<LOGIN>`: the login uppercased, e.g. `CODEX_AUTH_JSSBLCK` for `jssblck`. Bastion never stores credentials; the secret lives in GitHub Actions.
 3. **Map the login to the secret.** The `Authenticate Codex as the PR author` step resolves `github.event.pull_request.user.login` to the matching secret through a `case` arm, so reviewing `jssblck`'s PR bills `jssblck`'s subscription. Onboarding a contributor is two reviewed lines: their secret and a `case` arm. Because the mapping lives in the workflow, which is a CODEOWNERS-protected path, changing who may spend a subscription is itself a human-reviewed change.
 4. **The job rehydrates it at run time.** Before running `bastion review`, the step writes the resolved credential back to `$HOME/.codex/auth.json`; Codex refreshes the short-lived access token from the stored refresh token on each run, so the secret does not need rotating every time the access token expires. Every reviewer pins `model: gpt-5.5` and `effort: high`, which the Codex backend forwards as `-m` and `model_reasoning_effort`, so the model and effort are selected per review.
 
-An author with no mapped secret fails closed: the step errors and the gate blocks, rather than silently billing someone else's subscription. Two further boundaries keep this safe: GitHub does not expose secrets to workflows triggered by fork pull requests, and the job additionally guards on `head.repo.full_name == github.repository`, so an agentic backend never runs over untrusted code with a live credential; a fork contribution is reviewed by a maintainer re-running it from a trusted branch. The job's pass/fail is the gate (a blocked review exits non-zero): the action runs `bastion github report` (the sticky comment and the per-reviewer and aggregate check runs) and uploads the full run artifact *before* it fails on the review's exit code, so the PR is updated even when the review blocked. Reporting needs `pull-requests: write` and `checks: write`, and a GitHub App installation token to create check runs (a classic personal access token cannot). This repo configures a dedicated Bastion app for that token, minted in a prior step and handed to the action's `report-token` input, so its checks group under their own name rather than a sibling workflow's; see [Check-run grouping and the dedicated app](#check-run-grouping-and-the-dedicated-app). When no such app is configured the action falls back to the default `GITHUB_TOKEN`, which is itself an installation token and still posts.
+An author with no mapped secret fails closed: the step errors and the gate blocks, rather than silently billing someone else's subscription. Two further boundaries keep this safe: GitHub does not expose secrets to workflows triggered by fork pull requests, and the job additionally guards on `head.repo.full_name == github.repository`, so an agentic backend never runs over untrusted code with a live credential; a fork contribution is reviewed by a maintainer re-running it from a trusted branch. The job's pass/fail is the gate (a blocked review exits non-zero); `bastion github report` then posts the sticky comment and the per-reviewer and aggregate check runs, and the full run is also uploaded as an artifact. Reporting is ordered so the PR is updated even when the review blocked and failed the job; it needs `pull-requests: write` and `checks: write`, and a GitHub App installation token to create check runs (a classic personal access token cannot). This repo configures a dedicated Bastion app for that token so its checks group under their own name rather than a sibling workflow's; see [Check-run grouping and the dedicated app](#check-run-grouping-and-the-dedicated-app). When no such app is configured the step falls back to the default `GITHUB_TOKEN`, which is itself an installation token and still posts.
 
 Dependabot PRs review like any other. They are same-repo (so they clear the `head.repo` guard), and because the job declares an explicit `permissions:` block, the default `GITHUB_TOKEN` on a Dependabot-triggered run carries the `pull-requests: write` / `checks: write` it grants, so `bastion github report` posts the sticky comment and the per-reviewer and aggregate check runs normally. That removes the usual read-only-token obstacle, so the `bastion` check can be required for Dependabot PRs the same as for any other. (As a worked example outside this repo, `Fieldguide/minionforge` runs Bastion on its Dependabot PRs on exactly this shape, an API-key-billed `claude-code` review on a plain `pull_request` trigger, and requires the resulting check.)
 
@@ -205,7 +178,7 @@ Standing up a preview environment is a deploy concern, and the deploy system alr
 
 ## Example workflow
 
-A minimal workflow wiring Bastion into PR review, through the packaged action:
+A minimal workflow wiring Bastion into PR review:
 
 ```yaml
 name: bastion
@@ -213,14 +186,13 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
-# The action posts the PR comment and the check runs, so the job needs more than
-# read access; `actions: read` lets it restore the branch's prior run artifact.
-# The aggregate `bastion` check it reports is what branch protection requires.
+# The report step writes the PR comment and the check runs, so the job needs more
+# than read access. The aggregate `bastion` check it reports is what branch
+# protection requires.
 permissions:
   contents: read
   pull-requests: write
   checks: write
-  actions: read
 
 jobs:
   review:
@@ -237,39 +209,57 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0          # full history; reviewers compare base vs head
-          # The PR head, not the merge commit: attestation replay binds to the
-          # head tree the author attested.
-          ref: ${{ github.event.pull_request.head.sha }}
 
-      # Install and authenticate your backend CLI, billed to the PR author (see
-      # Authentication & billing above). Then stand up whatever your reviewers
-      # consume; Bastion does not do this.
+      # Install a published bastion release and authenticate your backend CLI,
+      # billed to the PR author (see Authentication & billing above). Then stand up
+      # whatever your reviewers consume; Bastion does not do this.
       - id: preview
         run: ./scripts/deploy-preview.sh   # exports the preview URL
+
+      - name: Review
+        env:
+          BASTION_DATA_DIR: ${{ github.workspace }}/.bastion
+          PREVIEW_URL: ${{ steps.preview.outputs.url }}
+          # Lets the review gather the PR's description and discussion as context
+          # (read-only, best effort). Needs `pull-requests: read` or higher.
+          GITHUB_TOKEN: ${{ github.token }}
+        # Non-zero exit on a blocked gate fails the job; that is the merge gate.
+        # `--repo`/`--pr` feed the reviewers the PR's stated intent and discussion
+        # alongside their prior findings; omit them for a context-free review.
+        run: |
+          bastion review --base "origin/${{ github.base_ref }}" \
+            --repo "${{ github.repository }}" \
+            --pr "${{ github.event.pull_request.number }}"
 
       # Optional: mint a token for a dedicated Bastion app so the report's check
       # runs get their own named check suite (see "Check-run grouping" below).
       # Skipped when the app is not configured; reporting then falls back to the
       # default GITHUB_TOKEN.
       - id: app-token
-        if: env.HAS_BASTION_APP == 'true'
+        if: ${{ always() && env.HAS_BASTION_APP == 'true' }}
         uses: actions/create-github-app-token@v2
         with:
           app-id: ${{ secrets.BASTION_APP_ID }}
           private-key: ${{ secrets.BASTION_APP_PRIVATE_KEY }}
 
-      # Installs the engine, fetches the notes ref, restores the branch's prior
-      # run, reviews, uploads the run, reports, and fails on a blocked gate, in
-      # that order. Step env is visible to native reviewers, so this is where a
-      # preview URL reaches the agents.
-      - uses: jssblck/bastion@vX.Y.Z   # pin a bastion release tag
+      - name: Report to the PR
+        # Runs even when the review blocked and failed the job, so the comment and
+        # checks always land. Creating check runs needs a GitHub App installation
+        # token (a classic PAT cannot); both the dedicated-app token and the default
+        # GITHUB_TOKEN qualify, so use the dedicated one when present and fall back.
+        if: always()
         env:
-          PREVIEW_URL: ${{ steps.preview.outputs.url }}
-        with:
-          report-token: ${{ steps.app-token.outputs.token || github.token }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          BASTION_DATA_DIR: ${{ github.workspace }}/.bastion
+        run: |
+          set -euo pipefail
+          bastion github report \
+            --repo "${{ github.repository }}" \
+            --pr "${{ github.event.pull_request.number }}" \
+            --sha "${{ github.event.pull_request.head.sha }}"
 ```
 
-The steps the action packages, and the raw workflow shape for teams that cannot consume actions from github.com, are documented in the user guide's [continuous integration chapter](../user-guide/continuous-integration.md).
+For brevity, this example omits cross-run prior-findings memory. The reviewers still get the PR's intent and discussion, gathered fresh each run. For a reviewer to recall the findings it raised on the previous push, the run store has to survive between runs. Upload the run as an artifact after the report, and restore the previous one before `bastion review`. Bastion's own [self-review workflow](../../.github/workflows/bastion.yml) shows the pattern (an `actions/upload-artifact` of `.bastion/runs` plus a `gh run download` of the most recent prior run for the branch).
 
 Branch protection on the default branch requires the `bastion` check and review of the owned reviewer-config paths; everything else is standard GitHub.
 
@@ -287,7 +277,7 @@ Setup is a one-time, per-org step:
 2. **Capture its credentials.** Generate the app's private key (a downloaded `.pem`), note the numeric App ID, and install the app on the repositories that run Bastion.
 3. **Store the secrets.** Set `BASTION_APP_ID` (the App ID) and `BASTION_APP_PRIVATE_KEY` (the `.pem` contents) as Actions secrets, at the repo or org level. Mirror them into the Dependabot secret store as well if Dependabot PRs are reviewed, for the same reason the `CODEX_AUTH_<LOGIN>` secrets are mirrored there.
 
-The workflow mints an installation token from those secrets with [`actions/create-github-app-token`](https://github.com/actions/create-github-app-token) and hands it to the action's `report-token` input (or, hand-rolled, to the report step's `GITHUB_TOKEN`); the per-reviewer and aggregate checks then render under the app's name. The mint step guards on both secrets being present (the two are one credential, so a half-configured repo with only one set falls back rather than failing the mint), so it is fully optional: with the secrets unset the step is skipped and the report step falls back to the default `GITHUB_TOKEN`, still posting the comment and checks (just grouped under whichever suite GitHub picks). The minted token also authors the sticky comment, so the comment and the checks present under one identity.
+The workflow mints an installation token from those secrets with [`actions/create-github-app-token`](https://github.com/actions/create-github-app-token) and hands it to the report step; the per-reviewer and aggregate checks then render under the app's name. The mint step guards on both secrets being present (the two are one credential, so a half-configured repo with only one set falls back rather than failing the mint), so it is fully optional: with the secrets unset the step is skipped and the report step falls back to the default `GITHUB_TOKEN`, still posting the comment and checks (just grouped under whichever suite GitHub picks). The minted token also authors the sticky comment, so the comment and the checks present under one identity.
 
 `bastion github report` detects this situation on its own, with no help from the workflow (the workflow is the adopter's, and they write their own). GitHub stamps every created check run with the `app` that posted it, so the report reads that `app.slug` back from the check-run response: when it is `github-actions` (the shared identity, no dedicated app), the sticky comment closes with a one-line note linking to the setup walkthrough; when it is a distinct app's slug, the checks already have their own suite and the note is omitted. Because the report reads GitHub's response, the workflow does not pass a flag.
 
