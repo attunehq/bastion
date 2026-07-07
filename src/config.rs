@@ -173,6 +173,9 @@ struct Loader {
     visited: BTreeSet<PathBuf>,
     /// The file trail recorded for [`LayerFiles`].
     files: LayerFiles,
+    /// Which file declared each reviewer name, so a duplicate across the merged
+    /// layer errors naming both files, not just the one hit second.
+    origins: std::collections::BTreeMap<String, String>,
 }
 
 impl Config {
@@ -621,6 +624,7 @@ impl Loader {
         Loader {
             visited: BTreeSet::new(),
             files: LayerFiles::default(),
+            origins: std::collections::BTreeMap::new(),
         }
     }
 
@@ -665,14 +669,22 @@ impl Loader {
             if reviewer.effort.is_none() {
                 reviewer.effort = defaults.effort.clone();
             }
-            if config.reviewers.iter().any(|r| r.name == reviewer.name) {
+            if let Some(first) = self.origins.get(&reviewer.name) {
+                if first == label {
+                    bail!(
+                        "duplicate reviewer name: {} (declared twice in {label})",
+                        reviewer.name
+                    );
+                }
                 bail!(
-                    "duplicate reviewer name: {} (declared again in {label}); \
-                     included files merge into one registry, so names must be \
-                     unique across all of them",
+                    "duplicate reviewer name: {} (declared in {first} and again \
+                     in {label}); included files merge into one registry, so \
+                     names must be unique across all of them",
                     reviewer.name
                 );
             }
+            self.origins
+                .insert(reviewer.name.clone(), label.to_string());
             config.reviewers.push(reviewer);
         }
         for entry in include {
@@ -1275,7 +1287,7 @@ reviewer:
     }
 
     #[test]
-    fn a_duplicate_name_across_included_files_names_the_second_file() {
+    fn a_duplicate_name_across_included_files_names_both_files() {
         let dir = registry_dir(&format!(
             "include: [extra.yaml]\n{}",
             reviewer_yaml("dup", "p1")
@@ -1285,8 +1297,25 @@ reviewer:
         let err = Config::load(&dir.path().join(REGISTRY_FILE)).unwrap_err();
         let rendered = format!("{err:#}");
         assert!(
-            rendered.contains("duplicate reviewer name") && rendered.contains("extra.yaml"),
-            "the error should name the duplicate and the file, got: {rendered}"
+            rendered.contains("duplicate reviewer name")
+                && rendered.contains(REGISTRY_FILE)
+                && rendered.contains("extra.yaml"),
+            "the error should name the duplicate and both files, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_duplicate_name_within_one_file_says_so() {
+        let dir = registry_dir(&format!(
+            "{}{}",
+            reviewer_yaml("dup", "p1"),
+            "  - name: dup\n    trigger: [src/**]\n    mode: gate\n    prompt: p2\n"
+        ));
+        let err = Config::load(&dir.path().join(REGISTRY_FILE)).unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("declared twice in"),
+            "a same-file duplicate reads as one file, got: {rendered}"
         );
     }
 

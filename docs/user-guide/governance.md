@@ -39,8 +39,12 @@ the command loads the registry and adds an entry for every file it pulls in
 since those carry policy exactly like the root file. A pulled-in file that
 resolves outside the repository is left out: CODEOWNERS cannot protect a path
 outside the tree, so keep policy files in the repository if you want them
-governed. Add the generated block to your `CODEOWNERS`, and regenerate it when
-you add an include or a prompt file so the new path is covered. With that block in place, any PR that adds, removes, or
+governed. If the registry, an included file, or a prompt file fails to load,
+the command prints the error and exits non-zero rather than emitting a block
+that silently omits policy paths; with no repository or no registry at all it
+prints the static paths alone. Add the generated block to your `CODEOWNERS`,
+and regenerate it when you add an include or a prompt file so the new path is
+covered. With that block in place, any PR that adds, removes, or
 edits a reviewer; loosens a trigger; or changes a prompt touches an owned path,
 so GitHub requires a human review before merge. You can also write your own
 CODEOWNERS instead; the generated block is a correct starting suggestion.
