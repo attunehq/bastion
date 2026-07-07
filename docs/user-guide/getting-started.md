@@ -301,13 +301,15 @@ The most common first-run snags and what they mean:
 
 - **"no reviewer registry found ..."**: there is no `.bastion.yaml` (or
   `.bastion.yml`) in this repo or any ancestor, and no user-level one in your config
-  directory either. The command searches both and only errors when both are absent,
-  so create a repository registry (step 3) or a personal one.
+  directory either. The command errors only when both are absent and no `--include
+  <path>` supplied a registry file, so create a repository registry (step 3), a
+  personal one, or pass a file explicitly.
 - **A reviewer registry error (malformed YAML, duplicate name, missing field).**
   The registry is validated before any agent runs, so these fail fast with a clear
   message. Run `bastion validate` (no model call) to check the merged set a local
-  review would run, or `bastion validate path/to/.bastion.yaml` to check one file on
-  its own; fix it and re-run. See [Authoring reviewers](./authoring-reviewers.md).
+  review would run, or `bastion validate path/to/.bastion.yaml` to check one
+  registry (and everything it includes) without the user-level layer; fix it and
+  re-run. See [Authoring reviewers](./authoring-reviewers.md).
 - **The review blocks immediately with "did not produce a verdict".** A gate failed
   closed, usually because the backend binary is missing or unauthenticated. Re-check
   `claude --version` / `codex --version` and that you are signed in (step 2).

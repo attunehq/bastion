@@ -452,7 +452,7 @@ mod tests {
         let base_tree = git::tree_hash(&repo, &merge_base_commit).unwrap();
         let patch_id = git::patch_id(&repo, &merge_base_commit).unwrap();
 
-        let config_hash = crate::config::Config::from_yaml(registry_yaml)
+        let config_hash = crate::config::Config::from_yaml(registry_yaml, Path::new("."))
             .unwrap()
             .effective_hash();
 
@@ -596,6 +596,7 @@ mod tests {
             &fixture.layout,
             None,
             Some(&key_path),
+            &[],
             fixture.secret,
             &mut out,
         )

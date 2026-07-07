@@ -15,11 +15,11 @@ fields you will reach for only occasionally.
 
 ## The registry file
 
-The repository's reviewers live in one file at its root: `.bastion.yaml` (the
+The repository's reviewers live in a file at its root: `.bastion.yaml` (the
 `.bastion.yml` spelling is also honored). Bastion finds it by walking up from the
 current directory, so the command works anywhere inside the repo. The file is a
-top-level mapping with a `reviewers:` list plus two optional keys, `defaults:`
-and `attestations:`:
+top-level mapping with a `reviewers:` list plus three optional keys, `defaults:`,
+`attestations:`, and `include:`:
 
 ```yaml
 attestations: true   # optional, default off; see below
@@ -27,6 +27,9 @@ attestations: true   # optional, default off; see below
 defaults:             # optional; see "Registry-wide defaults"
   model: gpt-5
   effort: high
+
+include:              # optional; see "Splitting the registry across files"
+  - reviewers/security.yaml
 
 reviewers:
   - name: single-responsibility
@@ -44,20 +47,92 @@ reviewers:
 `attestations: true` opts the repository into letting CI verify and replay a
 signed local run instead of re-executing every reviewer; see [Attesting a run
 so CI can replay it](./continuous-integration.md#attesting-a-run-so-ci-can-replay-it).
+Only the root registry file may set it; an included file that tries is a load
+error.
 
-Reviewer **names must be unique** within the file; a duplicate name is a load
-error. A name also has to work as a directory name in the run store, so a name that
+Reviewer **names must be unique** across the merged registry (the root file plus
+everything it includes); a duplicate name is a load error that names both files. A
+name also has to work as a directory name in the run store, so a name that
 reduces to an empty, `.`, or `..` component is rejected, as are two names that
 collapse to the same component once non-portable characters are normalized (for
-example `repo:test` and `repo-test`); plain names are unaffected. Because this file
-*is* the review policy, changes to it should require human review; see
-[Governance](./governance.md) and `bastion github codeowners`.
+example `repo:test` and `repo-test`); plain names are unaffected. Every reviewer
+also needs a non-empty `prompt`; an empty one (a blank inline value, or a prompt
+file with no content) is a load error rather than a reviewer that silently checks
+nothing. Because these files *are* the review policy, changes to them should
+require human review; see [Governance](./governance.md) and `bastion github
+codeowners`.
 
 > **Migrating from `bastion/reviewers.yaml`.** Bastion still loads the legacy
 > `bastion/reviewers.yaml` location but prints a deprecation warning; the supported
 > location is `.bastion.yaml` at your repository root. Move the file (the contents
 > are unchanged) and regenerate your CODEOWNERS block with `bastion github
 > codeowners`.
+
+## Splitting the registry across files
+
+A registry can spread across files without changing what it means. The top-level
+`include:` array names further registry files whose reviewers merge into the
+including file's, in order: the including file's own reviewers first, then each
+include's. An included file has the same schema as the root one (its own
+`reviewers:`, `defaults:`, and even `include:`, so includes nest), with one
+exception: only the root file may set `attestations:`.
+
+```yaml
+# .bastion.yaml
+include:
+  - reviewers/security.yaml
+  - reviewers/docs.yaml
+reviewers:
+  - name: single-responsibility
+    ...
+```
+
+Paths resolve relative to the file that lists them, so `reviewers/security.yaml`
+above is relative to the repository root, and an `include:` inside it would be
+relative to `reviewers/`. A file reached twice (two files including the same
+third one, or a cycle) merges once. The result behaves exactly like one big
+file: names must be unique across all of it, and each file's `defaults:` apply
+to the reviewers declared in that same file only, so an included file means the
+same thing no matter who includes it.
+
+You can also merge extra registry files for a single invocation with the
+repeatable `--include <path>` flag, on `review`, `validate`, `attest`, and
+`github codeowners`. The files merge into the repository layer like `include:`
+entries, with one difference: a relative `--include` path resolves against the
+directory you run the command from, not against the registry file. The extra
+reviewers become part of the effective repository configuration for that run,
+which has one consequence for
+[attestation](./continuous-integration.md#attesting-a-run-so-ci-can-replay-it):
+`bastion attest` and CI re-derive the configuration themselves, so a run
+reviewed with `--include` only attests and replays if they are given the same
+files.
+
+## Prompt files
+
+A `prompt:` can name a file instead of carrying the text inline, with the
+`{file: <path>}` form. The file's whole content becomes the prompt, so a long
+review instruction can live in markdown with real editor support instead of a
+YAML block scalar:
+
+```yaml
+reviewers:
+  - name: tenant-isolation
+    trigger: [src/**]
+    mode: gate
+    prompt:
+      file: reviewers/prompts/tenant-isolation.md
+```
+
+The path resolves relative to the registry file that declares the reviewer (an
+included file reads its prompt files relative to itself). A missing or empty
+prompt file is a load error. Everything downstream sees the resolved text: the
+run record, the attestation hash, and carry all bind the prompt's *content*, so
+editing the markdown file is a policy change exactly like editing an inline
+prompt, and prompt files belong under the same human review as the registry.
+`bastion github codeowners` lists prompt files that live inside the repository
+automatically; one outside the repository still works as a prompt, but
+CODEOWNERS cannot protect a path outside the tree, so it is left out of the
+generated block.
 
 ## User-level reviewers
 
@@ -88,6 +163,13 @@ repository's reviewers alone, the `repo:` scope never appears there, and a perso
 reviewer can never gate someone else's change.
 `--config-dir <path>` (or `$BASTION_CONFIG_DIR`) overrides where the user-level file
 is read from.
+
+The user-level file supports the full schema, though `attestations:` only has
+meaning in the repository's registry (a personal reviewer never gates a PR, so
+there is nothing to attest). Its `include:` entries and prompt files resolve
+relative to the config directory and merge into the user layer, never the
+repository's, so splitting your personal registry across files cannot leak a
+reviewer into a repository's attested configuration.
 
 ## Registry-wide defaults
 
@@ -148,8 +230,10 @@ for the full semantics.
 
 ### `prompt`
 
-The instruction handed to the reviewing agent. This is where the craft lives; see
-[Writing a good prompt](#writing-a-good-prompt) below.
+The instruction handed to the reviewing agent, written inline or as a
+`{file: <path>}` reference to a markdown file (see [Prompt
+files](#prompt-files)). Either way it must be non-empty. This is where the craft
+lives; see [Writing a good prompt](#writing-a-good-prompt) below.
 
 ## The optional execution profile
 
@@ -449,19 +533,22 @@ a single reviewer or spending a model call:
 
 ```sh
 bastion validate                          # validate the merged set review would run
-bastion validate path/to/.bastion.yaml    # check a specific file on its own
+bastion validate path/to/.bastion.yaml    # check one registry and its include tree
 ```
 
 With no file argument it validates the same merged set a local `bastion review`
 would run, the discovered repository registry plus your user-level one, and names
-each source it merged. An explicit `FILE` is checked on its own, with no merging. It
-loads through the same path `bastion review` uses, so it catches exactly the errors a
-real review would hit at load time: malformed YAML, an unknown field, a duplicate
-name (including one that survives the user/repo merge), a reviewer missing a required
-field, or a model pinned under `backend: any`. A valid registry prints a one-line
-summary and the reviewers it parsed, and exits zero; an invalid one prints the error
-and exits non-zero, so the command works as a pre-commit or CI lint as well as a
-quick local check.
+each source it merged, listing every included registry file and prompt file it
+pulled in. An explicit `FILE` skips the user-level merging but still resolves the
+file fully: its `include:` entries, its prompt files, and any `--include` flags
+all load, as they would on a real review. It loads through the same path `bastion review` uses, so
+it catches exactly the errors a real review would hit at load time: malformed
+YAML, an unknown field, a duplicate name (including one that survives the
+user/repo merge or arrives via an include), a reviewer missing a required field,
+an empty or unreadable prompt file, a missing include, or a model pinned under
+`backend: any`. A valid registry prints a one-line summary and the reviewers it
+parsed, and exits zero; an invalid one prints the error and exits non-zero, so
+the command works as a pre-commit or CI lint as well as a quick local check.
 
 The registry is also validated whenever it loads for a real `bastion review`, so a
 malformed file fails fast there too. `bastion validate` just lets you check it on its

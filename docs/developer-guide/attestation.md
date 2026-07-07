@@ -72,11 +72,16 @@ runs, so only committed content reaches CI as an attestation.
   that changes the commit id leaves the note behind on the old, now-orphaned
   commit; CI does not find it there, so those reviewers resolve without replay.
   Re-running `bastion attest` after a rewrite re-attaches the note to the new HEAD.
-- **The effective reviewer config.** A hash of the repository registry after
-  each file's `defaults` are applied. The user-level registry is excluded:
-  personal reviewers never gate anyone else's PR, so they cannot attest anything
-  either. A local run's user-level reviewer events are simply absent from the
-  bundle.
+- **The effective reviewer config.** A hash of the repository registry fully
+  resolved: each file's `defaults` applied, `include`d files merged, and prompt
+  files inlined, so it binds what the reviewers actually say rather than how
+  the registry is laid out on disk (editing a prompt file moves the hash;
+  splitting an unchanged registry across includes does not). Files merged with
+  `--include` are part of it, so a run reviewed with that flag re-derives the
+  same hash only where the same files are passed. The user-level registry is
+  excluded: personal reviewers never gate anyone else's PR, so they cannot
+  attest anything either. A local run's user-level reviewer events are simply
+  absent from the bundle.
 - **Coverage.** The set of repository reviewers the local run routed and
   resolved, whether each executed a backend or carried its verdict forward
   from a sealed, verified earlier run (the seal covers carried events exactly
