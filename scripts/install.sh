@@ -10,7 +10,8 @@ set -euo pipefail
 #
 # Options:
 #   -v, --version    Specify a version (default: latest)
-#   -b, --bin-dir    Specify the installation directory (default: $HOME/.local/bin)
+#   -b, --bin-dir    Specify the installation directory (default: $HOME/.local/bin;
+#                    on Windows, $LOCALAPPDATA/Programs/bastion to match install.ps1)
 #   -t, --tmp-dir    Specify the temporary directory (default: system temp directory)
 #   -l, --libc       Force the Linux C runtime: 'gnu' or 'musl' (default: autodetect)
 #   -h, --help       Show help message
@@ -21,6 +22,10 @@ set -euo pipefail
 #
 # The musl build is statically linked and has no glibc version dependency, so
 # 'musl' runs on any Linux regardless of how old the host glibc is.
+#
+# Supported hosts: Linux, macOS, and Windows under a bash environment (Git
+# Bash, or `shell: bash` on a CI runner), where it installs bastion.exe. For
+# plain PowerShell on Windows, use scripts/install.ps1 instead.
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -159,8 +164,10 @@ detect_platform() {
       os="apple-darwin"
       ;;
     MINGW* | MSYS* | CYGWIN*)
-      fail "Windows is not supported by this installer. Use the PowerShell installer instead:
-  irm https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.ps1 | iex"
+      # Git Bash / MSYS on Windows: install the Windows build. Plain PowerShell
+      # users should prefer scripts/install.ps1; this path exists for bash-based
+      # environments (Git Bash terminals, `shell: bash` on Windows CI runners).
+      os="pc-windows-gnu"
       ;;
     *)
       fail "Unsupported operating system: $kernel"
@@ -178,6 +185,11 @@ detect_platform() {
       fail "Unsupported architecture: $machine"
       ;;
   esac
+
+  # Only an x86_64 Windows build is published.
+  if [[ "$os" == "pc-windows-gnu" && "$arch" != "x86_64" ]]; then
+    fail "Unsupported architecture on Windows: $machine (only x86_64 builds are published)"
+  fi
 
   # Select the C runtime variant on Linux. By default this is autodetected (see
   # detect_linux_libc); `--libc` or $BASTION_LIBC can force it. Forcing 'musl'
@@ -229,7 +241,7 @@ parse_args() {
         echo
         echo "Options:"
         echo "  -v, --version    Specify a version (default: latest)"
-        echo "  -b, --bin-dir    Specify the installation directory (default: \$HOME/.local/bin)"
+        echo "  -b, --bin-dir    Specify the installation directory (default: \$HOME/.local/bin; on Windows, \$LOCALAPPDATA/Programs/bastion)"
         echo "  -t, --tmp-dir    Specify the temporary directory (default: system temp directory)"
         echo "  -l, --libc       Force the Linux C runtime: 'gnu' or 'musl' (default: autodetect)"
         echo "  -h, --help       Show this help message"
@@ -305,7 +317,11 @@ install_binary() {
   local bin_dir="$3"
   local tmp_dir="$4"
   local archive_name="bastion-${platform}.tar.gz"
+  # The Windows archive ships bastion.exe; every other platform ships bastion.
   local binary_name="bastion"
+  case "$platform" in
+    *pc-windows*) binary_name="bastion.exe" ;;
+  esac
 
   version="${version#v}"
   local tag="v${version}"
@@ -354,16 +370,16 @@ install_binary() {
   if [[ -z "$extracted_binary" ]]; then
     fail "Could not find $binary_name in the extracted archive"
   fi
-  cp "$extracted_binary" "$bin_dir/bastion"
-  chmod +x "$bin_dir/bastion"
+  cp "$extracted_binary" "$bin_dir/$binary_name"
+  chmod +x "$bin_dir/$binary_name"
 
   # Clean up
   cd - > /dev/null
   rm -rf "$workdir"
 
   local installed_version
-  installed_version=$("$bin_dir/bastion" --version 2>/dev/null || echo "bastion")
-  info "Installed '$installed_version' to '$bin_dir/bastion'"
+  installed_version=$("$bin_dir/$binary_name" --version 2>/dev/null || echo "bastion")
+  info "Installed '$installed_version' to '$bin_dir/$binary_name'"
 
   # Check if bin_dir is in PATH
   if [[ ":$PATH:" != *":$bin_dir:"* ]]; then
@@ -378,12 +394,33 @@ install_binary() {
 main() {
   # Set defaults
   local VERSION=""
-  local BIN_DIR="$HOME/.local/bin"
+  local BIN_DIR=""
   local TMP_DIR="${TMPDIR:-/tmp}"
   local LIBC="${BASTION_LIBC:-}"
 
   # Parse command line arguments
   parse_args "$@"
+
+  # Resolve the default install directory per host. On Windows this mirrors the
+  # PowerShell installer's default ($env:LOCALAPPDATA\Programs\bastion) so the
+  # two public Windows installers agree on where bastion lands; elsewhere it is
+  # the conventional ~/.local/bin.
+  if [[ -z "$BIN_DIR" ]]; then
+    case "$(uname -s)" in
+      MINGW* | MSYS* | CYGWIN*)
+        if [[ -n "${LOCALAPPDATA:-}" ]]; then
+          BIN_DIR="$(cygpath -u "$LOCALAPPDATA")/Programs/bastion"
+        else
+          # LOCALAPPDATA is always set on a stock Windows session; if a stripped
+          # environment lacks it, fall back rather than failing the install.
+          BIN_DIR="$HOME/.local/bin"
+        fi
+        ;;
+      *)
+        BIN_DIR="$HOME/.local/bin"
+        ;;
+    esac
+  fi
 
   # Check for required commands
   check_requirements

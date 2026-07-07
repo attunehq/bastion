@@ -4,3 +4,8 @@
 /.github/workflows/bastion.yml @jssblck
 /CODEOWNERS @jssblck
 /.github/CODEOWNERS @jssblck
+
+# Hand-added beyond the generated block: the self-review workflow consumes the
+# GitHub Action from the PR's own checkout (`uses: ./`), so the action
+# definition is reviewer policy for this repository too.
+/action.yml @jssblck
