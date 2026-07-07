@@ -38,6 +38,12 @@ jobs:
                     - name: Windows
                       os: windows-latest
                       installer: powershell
+                    # The shell installer also supports Windows under Git Bash
+                    # (the GitHub Action relies on this for a single install
+                    # path across runner OSes), so exercise that combination.
+                    - name: Windows (Git Bash)
+                      os: windows-latest
+                      installer: shell
                 scenario:
                     - help
                     - fresh-latest
@@ -81,6 +87,11 @@ jobs:
                   LATEST_VERSION: ${{ steps.releases.outputs.latest_version }}
                   PREVIOUS_VERSION: ${{ steps.releases.outputs.previous_version }}
               run: |
+                  # The installed binary is bastion.exe on Windows, bastion elsewhere.
+                  exe=""
+                  if [ "$RUNNER_OS" = "Windows" ]; then
+                    exe=".exe"
+                  fi
                   case "${{ matrix.scenario }}" in
                     help)
                       # Exercises -h/--help without installing.
@@ -100,7 +111,7 @@ jobs:
                       mkdir -p "$bin_dir" "$tmp_dir"
 
                       bash scripts/install.sh --bin-dir "$bin_dir" --tmp-dir "$tmp_dir"
-                      "$bin_dir/bastion" --version
+                      "$bin_dir/bastion$exe" --version
                       ;;
                     fresh-versioned)
                       # Exercises a fresh install with --version, --bin-dir, and
@@ -114,7 +125,7 @@ jobs:
                         --version "$PREVIOUS_VERSION" \
                         --bin-dir "$bin_dir" \
                         --tmp-dir "$tmp_dir"
-                      "$bin_dir/bastion" --version | grep -q "v$PREVIOUS_VERSION"
+                      "$bin_dir/bastion$exe" --version | grep -q "v$PREVIOUS_VERSION"
                       ;;
                     upgrade-versioned)
                       # Exercises the upgrade path by installing LATEST-1, then
@@ -128,13 +139,13 @@ jobs:
                         -v "$PREVIOUS_VERSION" \
                         -b "$bin_dir" \
                         -t "$tmp_dir"
-                      "$bin_dir/bastion" --version | grep -q "v$PREVIOUS_VERSION"
+                      "$bin_dir/bastion$exe" --version | grep -q "v$PREVIOUS_VERSION"
 
                       bash scripts/install.sh \
                         -v "$LATEST_VERSION" \
                         -b "$bin_dir" \
                         -t "$tmp_dir"
-                      "$bin_dir/bastion" --version | grep -q "v$LATEST_VERSION"
+                      "$bin_dir/bastion$exe" --version | grep -q "v$LATEST_VERSION"
                       ;;
                     *)
                       echo "Unknown installer scenario: ${{ matrix.scenario }}" >&2

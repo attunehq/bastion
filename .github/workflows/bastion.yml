@@ -1,34 +1,35 @@
 name: bastion
 
-# Bastion reviewing Bastion. On every pull request this downloads a published
-# `bastion` release binary and runs `bastion review` over the changeset; a blocked
-# review exits non-zero and fails the job. Branch protection on `main` requires the
+# Bastion reviewing Bastion. On every pull request this runs the Bastion GitHub
+# Action (the `action.yml` at the repository root), which downloads a published
+# `bastion` release binary, runs `bastion review` over the changeset, posts the
+# results with `bastion github report` (a sticky PR comment, one check run per
+# reviewer, and the aggregate `bastion` check), uploads the run artifact, and
+# fails on a blocked review. Branch protection on `main` requires the
 # `bastion review` check so a blocking gate stops the merge.
 #
-# The reviewer engine is a *released* binary, not one built from the PR's own
-# sources. That is deliberate: building from the PR would let a change edit the
-# very engine that judges it (neutering a reviewer or forcing a pass). The job
-# always adopts the *latest* published release, so the engine stays outside the
-# PR's reach yet picks up improvements with no per-PR pin bump; releases are
-# maintainer-cut tags, so the engine is only ever a maintainer-published artifact.
-# Reviewer *policy* (.bastion.yaml) is still read from the checkout so
-# prompt and trigger changes take effect in the same PR; those paths are
-# CODEOWNERS-protected too.
+# The action is consumed from the PR's own checkout (`uses: ./`) so action
+# changes take effect in the same PR; `action.yml` is a CODEOWNERS-protected
+# path like this workflow. The reviewer *engine* stays outside the PR's reach:
+# `uses: ./` carries no release ref, so the action installs the *latest*
+# published release rather than a binary built from the PR's own sources.
+# Building from the PR would let a change edit the very engine that judges it
+# (neutering a reviewer or forcing a pass); releases are maintainer-cut tags,
+# so the engine is only ever a maintainer-published artifact, and it picks up
+# improvements with no per-PR pin bump. Reviewer *policy* (.bastion.yaml) is
+# still read from the checkout so prompt and trigger changes take effect in the
+# same PR; those paths are CODEOWNERS-protected too.
 #
-# This is the concrete, self-hosted adapter described in docs/developer-guide/github-adapter.md.
-# After the review runs, `bastion github report` posts a sticky PR comment carrying
-# every reviewer's verdict and findings (optional findings included) plus one check
-# run per reviewer and an always-present aggregate `bastion` check. Inline diff
-# comments and live mid-run progress are still future. The job's pass/fail remains
-# the gate, and the full run is also uploaded as an artifact.
+# This is the concrete, self-hosted adapter described in
+# docs/developer-guide/github-adapter.md. The job's pass/fail remains the gate.
 
 on:
   pull_request:
 
 # Read the diff and fail the job, and write the surfaces `bastion github report`
 # posts after the review: the sticky PR comment (`pull-requests: write`) and the
-# per-reviewer and aggregate check runs (`checks: write`). `actions: read` lets the
-# restore step list and download this branch's prior run artifact.
+# per-reviewer and aggregate check runs (`checks: write`). `actions: read` lets
+# the action's restore step list and download this branch's prior run artifact.
 permissions:
   contents: read
   pull-requests: write
@@ -69,60 +70,16 @@ jobs:
           # author attested; the merge-commit view would never match it.
           ref: ${{ github.event.pull_request.head.sha }}
 
-      # actions/checkout does not fetch notes by default. Tolerant only of the
-      # expected case (most PRs carry no attestation note, so the ref does not
-      # exist on the remote yet): probe for the ref first and fetch only when it
-      # is present, so a genuinely unreachable remote still fails the step
-      # instead of being swallowed by a blanket `|| true`.
-      - name: Fetch the attestation notes ref
-        run: |
-          set -euo pipefail
-          # `git ls-remote --exit-code` exits 2 for "no matching refs" but also
-          # exits nonzero for a genuine network or auth failure, so the status
-          # must be captured and inspected rather than used directly as an `if`
-          # condition: that would misreport every failure as an absent ref and
-          # silently skip the fetch instead of failing the step.
-          set +e
-          git ls-remote --exit-code origin refs/notes/bastion >/dev/null
-          status=$?
-          set -e
-          case "$status" in
-            0) git fetch origin +refs/notes/bastion:refs/notes/bastion ;;
-            2) echo "::notice::no refs/notes/bastion on origin yet; skipping attestation notes fetch" ;;
-            *) exit "$status" ;;
-          esac
-
-      - name: Install the bastion release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          repo="${{ github.repository }}"
-          # The latest published release. `gh release view` with no tag uses GitHub's
-          # "latest" (most recent non-draft, non-prerelease), so the engine
-          # auto-advances but never silently adopts an `-rc` build.
-          version="$(gh release view --repo "$repo" --json tagName -q .tagName)"
-          echo "Using bastion engine: $version"
-          # Expose the resolved version to later steps (e.g. the report step's notice).
-          echo "BASTION_ENGINE_VERSION=$version" >> "$GITHUB_ENV"
-          asset="bastion-x86_64-unknown-linux-gnu.tar.gz"
-          dest="$RUNNER_TEMP/bastion"
-          mkdir -p "$dest"
-          gh release download "$version" \
-            --repo "$repo" \
-            --pattern "$asset" \
-            --dir "$dest"
-          tar -xzf "$dest/$asset" -C "$dest"
-          # The archive extracts to a directory named after the asset stem.
-          echo "$dest/${asset%.tar.gz}" >> "$GITHUB_PATH"
-
-      - name: Verify bastion
-        run: bastion --version
-
       - uses: actions/setup-node@v6
         with:
           node-version: 20
 
+      # The backend CLI is the consumer's half of the action's contract: install
+      # and authenticate it before the action runs, exactly as a contributor
+      # would locally. Installed globally so `codex` resolves by name on PATH
+      # with no BASTION_CODEX_BIN override: a backend-path override marks the
+      # run's seal with a test seam, and a seam-tainted seal is disqualified
+      # from being carried forward on the next push (and from attestation).
       - name: Install the Codex CLI
         run: |
           set -euo pipefail
@@ -171,145 +128,28 @@ jobs:
           printf '%s' "$cred" > "$HOME/.codex/auth.json"
           chmod 600 "$HOME/.codex/auth.json"
 
-      - name: Restore prior run history
-        # Best effort: bring the most recent prior run of this PR branch into the data
-        # directory. A fresh Actions runner starts with an empty store, so without this
-        # neither reuse mechanism would ever see anything: reviewers recall the findings
-        # they raised on the last push, and an unchanged reviewer carries its prior pass
-        # forward instead of re-executing (docs/developer-guide/local-surface.md,
-        # "Incremental carry") when the restored run's seal verifies. The uploaded
-        # artifact already carries each run's seal.json alongside run.jsonl, so carry has
-        # what it needs. A first push, or an expired artifact, simply restores nothing:
-        # the review runs every reviewer fresh with no prior findings.
-        env:
-          GH_TOKEN: ${{ github.token }}
-          # Pass workflow context through the environment instead of interpolating it
-          # into the script. A branch name is attacker-controlled and, spliced into the
-          # script text, could break out of the quoting and inject shell.
-          HEAD_REF: ${{ github.head_ref }}
-          RUN_ID: ${{ github.run_id }}
-          WORKSPACE: ${{ github.workspace }}
-        run: |
-          set -euo pipefail
-          mkdir -p "$WORKSPACE/.bastion/runs"
-          # Expected absence (a first push) is non-fatal, but a real failure (auth, API,
-          # permissions) is surfaced as a notice rather than silently masquerading as
-          # "no prior run" and disabling prior-finding recall.
-          if ! prior=$(gh run list --workflow bastion.yml --branch "$HEAD_REF" \
-            --json databaseId \
-            --jq "map(select(.databaseId != $RUN_ID)) | .[0].databaseId // empty"); then
-            echo "::notice::could not list prior runs; reviewing without prior findings"
-            prior=
-          fi
-          if [ -n "$prior" ]; then
-            gh run download "$prior" -n bastion-run -D "$WORKSPACE/.bastion/runs" \
-              || echo "no prior bastion-run artifact to restore (first run or expired)"
-          fi
-
-      - name: Run bastion review
-        env:
-          # Keep run history inside the workspace so it can be uploaded as an
-          # artifact instead of landing in the runner's per-user data directory.
-          BASTION_DATA_DIR: ${{ github.workspace }}/.bastion
-          # We deliberately do NOT set BASTION_CODEX_BIN. The Codex CLI is already on
-          # PATH (npm installed it globally), so the codex backend resolves it by name
-          # with no override. A backend-path override marks the run's seal with a test
-          # seam, and a seam-tainted seal is disqualified from being carried forward on
-          # the next push (and from attestation). Resolving `codex` on PATH seals clean,
-          # so an unchanged reviewer carries its pass on the next run instead of paying
-          # to re-execute (docs/developer-guide/local-surface.md, "Incremental carry").
-          # Lets the review gather the PR's description and discussion as reviewer
-          # context (read-only; best effort, so a failure here never fails the review).
-          GITHUB_TOKEN: ${{ github.token }}
-          # Workflow context goes through the environment, not the script text, so a
-          # branch name cannot inject shell (see the restore step).
-          REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          BASE_REF: ${{ github.base_ref }}
-        # Default GitHub bash runs with `-eo pipefail`, so a blocked review's
-        # non-zero exit fails the job (and the required check). The human-readable
-        # stream goes to the log; the canonical JSONL is persisted under
-        # BASTION_DATA_DIR and uploaded below.
-        #
-        # `--repo`/`--pr` feed the reviewers the PR's stated intent and discussion
-        # alongside their prior findings. Some installed release engines do not recognize
-        # the context flags, so probe `bastion review --help` for `--repo` (the
-        # capability-probe the report step also uses) and pass the flags only when the
-        # engine supports them. An engine without them reviews with the diff and prior
-        # findings alone.
-        run: |
-          set -euo pipefail
-          # Capture the help text first and match in-shell: a `... | grep -q` pipeline
-          # under pipefail can SIGPIPE the producer when grep exits on the first match,
-          # which would falsely fail the probe.
-          help=$(bastion review --help 2>/dev/null || true)
-          ctx=()
-          if [[ "$help" == *"--repo"* ]]; then
-            ctx+=(--repo "$REPO" --pr "$PR_NUMBER")
-          fi
-          bastion review --base "origin/$BASE_REF" "${ctx[@]}"
-
       - name: Mint a dedicated app token for reporting
         id: app-token
         # Optional, and only when a dedicated Bastion GitHub App is configured (the
         # BASTION_APP_ID / BASTION_APP_PRIVATE_KEY secrets). Posting the check runs
         # under a distinct app gives them their own check suite, so the PR renders
         # them under the app's name (e.g. "Bastion / fail-closed-gates"). Without a
-        # dedicated app the report step below falls back to the default GITHUB_TOKEN,
-        # which still posts but, because every workflow shares the one github-actions
-        # app identity, GitHub buckets the API-created check runs into whichever of
-        # this commit's check suites it picks (often a sibling workflow like
-        # "Security"). The mint runs on `always()` so reporting works even when the
-        # review blocked and failed the job above. See docs/developer-guide/github-adapter.md.
-        if: ${{ always() && env.HAS_BASTION_APP == 'true' }}
+        # dedicated app the action's report step falls back to the default
+        # GITHUB_TOKEN, which still posts but, because every workflow shares the one
+        # github-actions app identity, GitHub buckets the API-created check runs
+        # into whichever of this commit's check suites it picks (often a sibling
+        # workflow like "Security"). See docs/developer-guide/github-adapter.md.
+        if: env.HAS_BASTION_APP == 'true'
         uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.BASTION_APP_ID }}
           private-key: ${{ secrets.BASTION_APP_PRIVATE_KEY }}
 
-      - name: Report the review to the pull request
-        # Runs even when the review blocked (and so failed the job above), so the PR
-        # always gets the comment and the per-reviewer checks. It reads the run that
-        # `bastion review` just persisted under BASTION_DATA_DIR; if no run was
-        # recorded (an earlier infrastructure failure) it prints a notice and exits 0
-        # rather than piling a second error on top of the real one. Creating check
-        # runs needs a GitHub App installation token (a classic PAT cannot); both the
-        # minted dedicated-app token and the default GITHUB_TOKEN qualify, so this
-        # uses the dedicated-app token when present and falls back to GITHUB_TOKEN
-        # otherwise. GITHUB_API_URL is provided by Actions.
-        #
-        # `github report` landed after v0.1.0, so until a release that includes it
-        # becomes the latest, the installed binary will not have the subcommand.
-        # When an older engine lacks the subcommand, the report step exits 0, and
-        # reporting starts once the latest release includes the command. The
-        # capability probe is the only tolerated failure; once the subcommand
-        # exists, a real posting error fails the step.
-        if: always()
-        env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
-          BASTION_DATA_DIR: ${{ github.workspace }}/.bastion
-        run: |
-          set -euo pipefail
-          if ! bastion github report --help >/dev/null 2>&1; then
-            echo "::notice::bastion engine ${BASTION_ENGINE_VERSION:-unknown} has no 'github report'; skipping PR comment and checks until the latest release includes it."
-            exit 0
-          fi
-          # `bastion github report` reads its own posting identity from the check-run
-          # responses, so it decides on its own whether to nudge toward a dedicated
-          # app; the workflow does not need to tell it.
-          bastion github report \
-            --repo "${{ github.repository }}" \
-            --pr "${{ github.event.pull_request.number }}" \
-            --sha "${{ github.event.pull_request.head.sha }}"
-
-      - name: Upload the run
-        if: always()
-        uses: actions/upload-artifact@v7
+      # Fetches the attestation notes ref, restores this branch's prior run
+      # (prior-finding recall and incremental carry), reviews, uploads the run
+      # artifact, reports to the PR, and fails on a blocked review, in that
+      # order, so the comment and checks land even when the gate blocks.
+      - name: Review and report
+        uses: ./
         with:
-          name: bastion-run
-          path: ${{ github.workspace }}/.bastion/runs/**
-          # The data dir is dot-prefixed (`.bastion`), so its files are hidden;
-          # without this the upload would silently exclude every run and the
-          # restore step on the next push would download nothing.
-          include-hidden-files: true
-          if-no-files-found: warn
+          report-token: ${{ steps.app-token.outputs.token || github.token }}

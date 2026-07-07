@@ -21,6 +21,10 @@ set -euo pipefail
 #
 # The musl build is statically linked and has no glibc version dependency, so
 # 'musl' runs on any Linux regardless of how old the host glibc is.
+#
+# Supported hosts: Linux, macOS, and Windows under a bash environment (Git
+# Bash, or `shell: bash` on a CI runner), where it installs bastion.exe. For
+# plain PowerShell on Windows, use scripts/install.ps1 instead.
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -159,8 +163,10 @@ detect_platform() {
       os="apple-darwin"
       ;;
     MINGW* | MSYS* | CYGWIN*)
-      fail "Windows is not supported by this installer. Use the PowerShell installer instead:
-  irm https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.ps1 | iex"
+      # Git Bash / MSYS on Windows: install the Windows build. Plain PowerShell
+      # users should prefer scripts/install.ps1; this path exists for bash-based
+      # environments (Git Bash terminals, `shell: bash` on Windows CI runners).
+      os="pc-windows-gnu"
       ;;
     *)
       fail "Unsupported operating system: $kernel"
@@ -178,6 +184,11 @@ detect_platform() {
       fail "Unsupported architecture: $machine"
       ;;
   esac
+
+  # Only an x86_64 Windows build is published.
+  if [[ "$os" == "pc-windows-gnu" && "$arch" != "x86_64" ]]; then
+    fail "Unsupported architecture on Windows: $machine (only x86_64 builds are published)"
+  fi
 
   # Select the C runtime variant on Linux. By default this is autodetected (see
   # detect_linux_libc); `--libc` or $BASTION_LIBC can force it. Forcing 'musl'
@@ -305,7 +316,11 @@ install_binary() {
   local bin_dir="$3"
   local tmp_dir="$4"
   local archive_name="bastion-${platform}.tar.gz"
+  # The Windows archive ships bastion.exe; every other platform ships bastion.
   local binary_name="bastion"
+  case "$platform" in
+    *pc-windows*) binary_name="bastion.exe" ;;
+  esac
 
   version="${version#v}"
   local tag="v${version}"
@@ -354,16 +369,16 @@ install_binary() {
   if [[ -z "$extracted_binary" ]]; then
     fail "Could not find $binary_name in the extracted archive"
   fi
-  cp "$extracted_binary" "$bin_dir/bastion"
-  chmod +x "$bin_dir/bastion"
+  cp "$extracted_binary" "$bin_dir/$binary_name"
+  chmod +x "$bin_dir/$binary_name"
 
   # Clean up
   cd - > /dev/null
   rm -rf "$workdir"
 
   local installed_version
-  installed_version=$("$bin_dir/bastion" --version 2>/dev/null || echo "bastion")
-  info "Installed '$installed_version' to '$bin_dir/bastion'"
+  installed_version=$("$bin_dir/$binary_name" --version 2>/dev/null || echo "bastion")
+  info "Installed '$installed_version' to '$bin_dir/$binary_name'"
 
   # Check if bin_dir is in PATH
   if [[ ":$PATH:" != *":$bin_dir:"* ]]; then

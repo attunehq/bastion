@@ -1,0 +1,334 @@
+# The Bastion GitHub Action: the packaged form of the adapter workflow described
+# in docs/developer-guide/github-adapter.md and docs/user-guide/continuous-integration.md.
+#
+# The contract mirrors a local `bastion review`: the consumer owns the checkout
+# and the backend credential, and the action owns the engine and the review.
+# Before this action runs, the workflow must:
+#
+#   1. Check out the PR head with full history: actions/checkout with
+#      `fetch-depth: 0` and `ref` set to the pull request's head SHA. Full
+#      history resolves the base for the changeset diff; the head commit, not
+#      the synthetic merge commit, is what attestation replay binds to.
+#   2. Install and authenticate the backend CLI the repository's reviewers pin
+#      (claude, codex, or pi), exactly as a contributor would locally. The
+#      action never touches backend credentials.
+#
+# The action then installs a published bastion release, fetches the attestation
+# notes ref, restores the branch's prior run (prior-finding recall and
+# incremental carry), runs `bastion review`, uploads the run artifact, posts the
+# results with `bastion github report`, and only then fails the step if the
+# review blocked, so the PR comment and check runs land even for a blocked
+# review. The step's failure is the merge gate.
+name: Bastion
+author: Jessica Black
+description: >-
+  Agentic code review as a merge gate: run the repository's Bastion reviewers
+  over a pull request, post the verdicts back to the PR as a sticky comment and
+  check runs, and fail when a gate blocks.
+
+branding:
+  icon: shield
+  color: gray-dark
+
+inputs:
+  version:
+    description: >-
+      The bastion release to install. Defaults to the release named by this
+      action's own ref: `@vX.Y.Z` installs that exact engine, a floating major
+      like `@v0` installs the newest stable release in that major, and any
+      other ref (a branch, a commit SHA, `uses: ./`) installs the latest
+      stable release. Pass an exact tag (for example `v0.3.0`) or `latest` to
+      override.
+    required: false
+    default: ""
+  github-token:
+    description: >-
+      Token for everything except posting the report: resolving and restoring
+      the branch's prior run artifact (`actions: read`) and gathering the PR's
+      description and discussion as reviewer context (`pull-requests: read`).
+      The default job token works.
+    required: false
+    default: ${{ github.token }}
+  report-token:
+    description: >-
+      Token `bastion github report` posts with (`pull-requests: write` and
+      `checks: write`; creating check runs needs a GitHub App installation
+      token, which both the default job token and a dedicated-app token are).
+      Set this to a dedicated Bastion app's minted token so the check runs
+      group under the app's own name; when empty, `github-token` is used.
+    required: false
+    default: ""
+  base:
+    description: >-
+      The base to diff against, passed to `bastion review --base`. Defaults to
+      `origin/<the PR's base branch>`.
+    required: false
+    default: ""
+  report:
+    description: >-
+      Whether to run `bastion github report` after the review. Disable to gate
+      on the job's pass/fail alone, with no PR comment or check runs.
+    required: false
+    default: "true"
+  run-history:
+    description: >-
+      Whether to persist the run store across pushes: restore the branch's most
+      recent prior run before reviewing and upload this run as an artifact
+      after. Without it every push reviews fresh, with no prior-finding recall
+      and no incremental carry.
+    required: false
+    default: "true"
+  artifact-name:
+    description: The name of the run artifact to restore and upload.
+    required: false
+    default: bastion-run
+
+outputs:
+  version:
+    description: The engine release the action installed (for example v0.3.0).
+    value: ${{ steps.install.outputs.version }}
+  exit-code:
+    description: >-
+      The exit code of `bastion review`: 0 for a pass, non-zero for a blocked
+      gate or a failed review. The action's own failure already gates the job;
+      this exists for workflows that set `continue-on-error` and branch on the
+      outcome themselves.
+    value: ${{ steps.review.outputs.exit-code }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check the invocation
+      shell: bash
+      env:
+        EVENT: ${{ github.event_name }}
+      run: |
+        set -euo pipefail
+        # pull_request_target is deliberately rejected, not merely unsupported:
+        # it hands repository secrets to a workflow triggered by fork code, and
+        # an agentic backend must never run over untrusted code with a live
+        # credential.
+        if [ "$EVENT" != "pull_request" ]; then
+          echo "::error::the bastion action supports pull_request events only (got '$EVENT')."
+          exit 1
+        fi
+        if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+          echo "::error::no git checkout found; run actions/checkout before this action, with fetch-depth: 0 and ref set to the pull request's head SHA."
+          exit 1
+        fi
+
+    - name: Install the bastion engine
+      id: install
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+        ACTION_REF: ${{ github.action_ref }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        repo="jssblck/bastion"
+        want="$INPUT_VERSION"
+        if [ -z "$want" ]; then
+          if [[ "$ACTION_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            # An exact release ref: the action version pins the engine version.
+            want="$ACTION_REF"
+          elif [[ "$ACTION_REF" =~ ^v[0-9]+$ ]]; then
+            # A floating major tag: the newest stable release in that major, so
+            # `@v0` never silently adopts a release from the next major.
+            want="$(gh release list --repo "$repo" --exclude-drafts --exclude-pre-releases \
+              --limit 100 --json tagName \
+              --jq "[.[] | select(.tagName | startswith(\"$ACTION_REF.\"))][0].tagName // empty")"
+            if [ -z "$want" ]; then
+              echo "::error::no published stable release found under the $ACTION_REF major"
+              exit 1
+            fi
+          else
+            # A branch, a commit SHA, or a local `uses: ./`: no release to map
+            # the ref to, so track the latest stable release. To pin the engine
+            # from a SHA-pinned action, set the `version` input.
+            want="latest"
+          fi
+        fi
+        if [ "$want" = "latest" ]; then
+          # Resolve the tag from the /releases/latest redirect rather than the
+          # JSON API, which is tightly rate limited for unauthenticated callers.
+          url="$(curl -sSfL -o /dev/null -w '%{url_effective}' "https://github.com/$repo/releases/latest")"
+          want="${url##*/tag/}"
+          if [ -z "$want" ] || [ "$want" = "$url" ]; then
+            echo "::error::could not resolve the latest bastion release (redirect landed on $url)"
+            exit 1
+          fi
+        fi
+        want="v${want#v}"
+        echo "Installing bastion engine $want"
+        bin_dir="${RUNNER_TEMP//\\//}/bastion-bin"
+        mkdir -p "$bin_dir"
+        # The bundled installer verifies the release checksum and picks the
+        # platform build (including the static musl build on old-glibc hosts).
+        bash "${GITHUB_ACTION_PATH//\\//}/scripts/install.sh" -v "$want" -b "$bin_dir"
+        # GITHUB_PATH entries are used verbatim by later steps of every shell,
+        # so on Windows the msys-style path must be converted back to native.
+        if [ "$RUNNER_OS" = "Windows" ]; then
+          cygpath -w "$bin_dir" >> "$GITHUB_PATH"
+        else
+          echo "$bin_dir" >> "$GITHUB_PATH"
+        fi
+        echo "version=$want" >> "$GITHUB_OUTPUT"
+
+    - name: Verify the engine
+      shell: bash
+      run: bastion --version
+
+    # actions/checkout does not fetch notes by default. Tolerant only of the
+    # expected case (most PRs carry no attestation note, so the ref does not
+    # exist on the remote yet): probe for the ref first and fetch only when it
+    # is present, so a genuinely unreachable remote still fails the step
+    # instead of being swallowed by a blanket `|| true`.
+    - name: Fetch the attestation notes ref
+      shell: bash
+      run: |
+        set -euo pipefail
+        # `git ls-remote --exit-code` exits 2 for "no matching refs" but also
+        # exits nonzero for a genuine network or auth failure, so the status
+        # must be captured and inspected rather than used directly as an `if`
+        # condition: that would misreport every failure as an absent ref and
+        # silently skip the fetch instead of failing the step.
+        set +e
+        git ls-remote --exit-code origin refs/notes/bastion >/dev/null
+        status=$?
+        set -e
+        case "$status" in
+          0) git fetch origin +refs/notes/bastion:refs/notes/bastion ;;
+          2) echo "::notice::no refs/notes/bastion on origin yet; skipping attestation notes fetch" ;;
+          *) exit "$status" ;;
+        esac
+
+    # Bring the branch's most recent prior run into the data directory. A fresh
+    # Actions runner starts with an empty store, so without this two things
+    # reset on every push: a reviewer's recall of the findings it raised last
+    # push, and incremental carry (an unchanged reviewer reusing its prior pass
+    # instead of re-executing). The lookup goes by artifact name and branch, not
+    # workflow name, so the action works from any workflow unmodified.
+    - name: Restore the branch's prior run
+      if: inputs.run-history == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        # Workflow context goes through the environment, never spliced into the
+        # script text, so an attacker-chosen branch name cannot inject shell.
+        HEAD_REF: ${{ github.head_ref }}
+        RUN_ID: ${{ github.run_id }}
+        ARTIFACT_NAME: ${{ inputs.artifact-name }}
+      run: |
+        set -euo pipefail
+        runs_dir="${GITHUB_WORKSPACE//\\//}/.bastion/runs"
+        mkdir -p "$runs_dir"
+        # Expected absence (a first push, an expired artifact) is non-fatal, but
+        # a real listing failure (auth, API, permissions) is surfaced as a
+        # notice rather than silently masquerading as "no prior run" and
+        # disabling prior-finding recall.
+        if ! prior="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$ARTIFACT_NAME&per_page=100" \
+          --jq '[.artifacts[]
+            | select((.expired | not)
+                and .workflow_run.head_branch == env.HEAD_REF
+                and (.workflow_run.id | tostring) != env.RUN_ID)][0].workflow_run.id // empty')"; then
+          echo "::notice::could not list prior run artifacts; reviewing without prior findings"
+          prior=
+        fi
+        if [ -n "$prior" ]; then
+          gh run download "$prior" -n "$ARTIFACT_NAME" -D "$runs_dir" \
+            || echo "::notice::no prior $ARTIFACT_NAME artifact to restore (first run or expired)"
+        fi
+
+    - name: Review
+      id: review
+      shell: bash
+      env:
+        # Keep run history inside the workspace so it can be uploaded as an
+        # artifact instead of landing in the runner's per-user data directory.
+        BASTION_DATA_DIR: ${{ github.workspace }}/.bastion
+        # Lets the review gather the PR's description and discussion as
+        # reviewer context (read-only; best effort, so a failure here never
+        # fails the review).
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        INPUT_BASE: ${{ inputs.base }}
+        BASE_REF: ${{ github.base_ref }}
+        REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      # Deliberately no BASTION_*_BIN overrides: a backend-path override marks
+      # the run's seal with a test seam, and a seam-tainted seal is disqualified
+      # from being carried forward on the next push. The consumer's backend CLI
+      # must simply be on PATH, which resolves clean.
+      run: |
+        set -uo pipefail
+        base="$INPUT_BASE"
+        if [ -z "$base" ]; then
+          base="origin/$BASE_REF"
+        fi
+        # Probe the help text for the PR-context flags rather than assuming: a
+        # consumer can pin an engine that predates them, and such an engine
+        # still reviews with the diff and prior findings alone. Capture and
+        # match in-shell: a `... | grep -q` pipeline under pipefail can SIGPIPE
+        # the producer when grep exits on the first match, which would falsely
+        # fail the probe.
+        help="$(bastion review --help 2>/dev/null || true)"
+        code=0
+        if [[ "$help" == *"--repo"* ]]; then
+          bastion review --base "$base" --repo "$REPO" --pr "$PR_NUMBER" || code=$?
+        else
+          bastion review --base "$base" || code=$?
+        fi
+        # Defer the failure: the upload and report steps below must land even
+        # for a blocked review, so the final step fails the action with this
+        # code after they run.
+        echo "exit-code=$code" >> "$GITHUB_OUTPUT"
+        if [ "$code" -ne 0 ]; then
+          echo "::notice::bastion review exited $code; failing after the run is uploaded and reported"
+        fi
+
+    # Persist this run so the next push can restore it (see the restore step
+    # above). The data dir is dot-prefixed, so hidden files must be included or
+    # the upload is empty and the next restore finds nothing to carry from.
+    - name: Upload the run
+      if: inputs.run-history == 'true'
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ github.workspace }}/.bastion/runs/**
+        include-hidden-files: true
+        if-no-files-found: warn
+
+    - name: Report to the pull request
+      if: inputs.report == 'true'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.report-token || inputs.github-token }}
+        BASTION_DATA_DIR: ${{ github.workspace }}/.bastion
+        REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        ENGINE: ${{ steps.install.outputs.version }}
+      run: |
+        set -euo pipefail
+        # The capability probe is the only tolerated failure, for consumers who
+        # pin an engine that predates the subcommand; once it exists, a real
+        # posting error fails the step (and so the gate: gates fail closed).
+        if ! bastion github report --help >/dev/null 2>&1; then
+          echo "::warning::bastion engine $ENGINE has no 'github report' subcommand; skipping the PR comment and check runs. Pin a newer engine via the action ref or the 'version' input."
+          exit 0
+        fi
+        bastion github report --repo "$REPO" --pr "$PR_NUMBER" --sha "$HEAD_SHA"
+
+    # The deferred merge gate: now that the run is uploaded and reported, a
+    # blocked or failed review fails the action, and with it the job.
+    - name: Gate on the review
+      shell: bash
+      env:
+        CODE: ${{ steps.review.outputs.exit-code }}
+      run: |
+        set -euo pipefail
+        if [ "$CODE" -ne 0 ]; then
+          echo "::error::bastion review exited $CODE (a blocked gate or a failed review); see the review log and the PR comment."
+          exit "$CODE"
+        fi
+        echo "bastion review passed"

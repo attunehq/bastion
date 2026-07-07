@@ -96,6 +96,20 @@ cargo build --release
 ./target/release/bastion --version
 ```
 
+## In CI
+
+The GitHub Action runs the repository's reviewers over each pull request and
+posts the verdicts back as a sticky comment and check runs; its failure is the
+merge gate. You check out the PR head and authenticate your backend CLI, and
+the action does the rest:
+
+```yaml
+- uses: jssblck/bastion@v0
+```
+
+The [continuous integration chapter](docs/user-guide/continuous-integration.md)
+covers the full workflow, per-author billing, and branch protection.
+
 ## Documentation
 
 - **[User guide](docs/user-guide/README.md)**: using Bastion on your project.
