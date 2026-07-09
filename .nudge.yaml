@@ -3,19 +3,22 @@
 #
 # Layering (see AGENTS.md and the code-craft new-project-defaults skill): a rule
 # lives at the lowest layer that can express it faithfully. clippy owns the Rust
-# lints; the `prose-anti-slop` bastion gate owns prose-voice judgment; nudge
-# owns the rules that are purely mechanical yet have no native linter. The em/en
-# dash ban is exactly that: a pure-lexical rule with zero ambiguity. It is wired
-# into CI via `nudge check` (see .github/workflows/ci.yml and the `just check`
-# recipe), so it gates every commit regardless of who or what wrote the code.
+# lints; prose-voice judgment is write-time discipline via the `stop-slop`
+# skill; nudge owns the rules that are purely mechanical yet have no native
+# linter. The em/en dash ban is exactly that: a pure-lexical rule with zero
+# ambiguity. It is wired into CI via `nudge check` (see
+# .github/workflows/ci.yml and the `just check` recipe), so it gates every
+# commit regardless of who or what wrote the code.
 #
 # Note on the literal "--" used as a dash: it is deliberately NOT a nudge rule.
 # A regex cannot tell a prose "clause -- clause" from the shell end-of-options
 # token (`cargo run -- review`, `cargo clippy --all-targets -- -D warnings`,
 # `bash -s -- -b`), which appears throughout the install and CI command examples,
 # and Nudge has no Markdown tree-sitter grammar to scope a query to prose. So
-# that one stays at the judgment layer: the `prose-anti-slop` gate in
-# .bastion.yaml flags it, since it can tell a separator from a dash.
+# that one stays at the judgment layer: the write-time `stop-slop` pass catches
+# it, since a reader can tell a separator from a dash where a regex cannot.
+# (The registry once carried a `prose-anti-slop` gate as a review-time backstop;
+# it was retired to fit the review token budget.)
 
 version: 1
 
@@ -58,9 +61,11 @@ rules:
       # --- Site top-level docs (README, DESIGN) ---
       - { hook: PreToolUse, tool: Write, file: "site/*.md", content: *dash }
       - { hook: PreToolUse, tool: Edit,  file: "site/*.md", new_content: *dash }
-      # --- The reviewer registry ---
-      - { hook: PreToolUse, tool: Write, file: "bastion/*.yaml", content: *dash }
-      - { hook: PreToolUse, tool: Edit,  file: "bastion/*.yaml", new_content: *dash }
+      # --- The reviewer registry (root-level; both spellings are honored) ---
+      - { hook: PreToolUse, tool: Write, file: ".bastion.yaml", content: *dash }
+      - { hook: PreToolUse, tool: Edit,  file: ".bastion.yaml", new_content: *dash }
+      - { hook: PreToolUse, tool: Write, file: ".bastion.yml", content: *dash }
+      - { hook: PreToolUse, tool: Edit,  file: ".bastion.yml", new_content: *dash }
       # --- First-party skill source. Only the bundled skill source under skills/**
       # is gated: that is what `bastion skills install` embeds and ships into a
       # consuming repo. The top-level skill dirs themselves (.agents/skills/ and

@@ -17,17 +17,29 @@
 # subscription; see the authentication notes in
 # docs/developer-guide/github-adapter.md. Adapt it to your repository.
 #
-# The registry is deliberately small. An LLM reviewer runs on every matched
-# changeset forever, so each one has to earn its tokens: a reviewer exists here
-# only when the defect it catches is real, recurring, and needs judgment. A
-# defect a deterministic check can catch belongs in a lint, not here:
+# The registry is deliberately minimal: two reviewers, chosen by catch record.
+# An LLM reviewer runs on every matched changeset forever, so under a
+# subscription token budget the bar for keeping one is a history of real
+# catches on this repository's PRs, not a plausible concern. The two that
+# clear it: `fail-closed-gates` caught shipping safety bugs (the dirty-worktree
+# attestation replay, the carry content-binding holes, verdicts laundered
+# through replay), and `user-docs-in-sync` repeatedly caught the user guide
+# contradicting shipped behavior, once surfacing a real code bug (`bastion
+# validate` documented as rejecting unknown registry fields the loader
+# silently accepted).
+#
+# Concerns cut from the registry live at cheaper layers. Deterministic checks:
 # unwrap/expect discipline and `# Errors` docs are clippy lints in Cargo.toml,
 # Unicode-dash policy is `nudge check`, user-guide frontmatter and link
-# integrity is `tests/user_guide_integrity.rs`, and the skills mirror is
-# `tests/skills_mirror.rs`. Broad code-quality concerns (module boundaries,
-# parse-don't-validate, test coverage) are enforced at write time by the
-# repo-local skills under `.agents/skills/` rather than at review time, where
-# each opinion costs a full review cycle.
+# integrity is tests/user_guide_integrity.rs, the skills mirror is
+# tests/skills_mirror.rs, embedded-asset line endings are
+# tests/embedded_asset_eol.rs plus the .gitattributes LF pin, and the
+# installers are exercised end to end on every platform by
+# .github/workflows/installers.yml. Write-time discipline: broad code quality
+# (module boundaries, parse-don't-validate, test coverage) is the repo-local
+# skills under .agents/skills/, and prose voice is the stop-slop skill applied
+# when the text is written. Retired without a replacement: the site-integrity
+# mechanical checks, which never blocked once across the project's history.
 
 # Let CI replay a signed `bastion attest` run instead of re-executing
 # reviewers; see docs/developer-guide/attestation.md.
@@ -47,18 +59,23 @@ defaults:
 
 reviewers:
   # The one reviewer with a proven record of catching shipping bugs (the
-  # dirty-worktree attestation hole, the seal-time TOCTOU), so it keeps high
-  # effort. Its trigger is the trust boundary its prompt already declares as
-  # its scope, not all of src/: the modules where a verdict is produced live,
-  # aggregated, sealed, and attested. A change elsewhere cannot violate the
-  # invariant, so it should not pay for this reviewer.
+  # dirty-worktree attestation hole, the seal-time TOCTOU, the carry binding
+  # holes), so it keeps high effort. Its trigger is the trust boundary its
+  # prompt already declares as its scope, not all of src/: the modules where a
+  # verdict is produced live, reused, aggregated, sealed, and attested. A
+  # change elsewhere cannot violate the invariant, so it should not pay for
+  # this reviewer. The runner and commands entries are directory globs because
+  # those modules are split into directories; a single-file glob here once went
+  # silently stale after such a split, and src/routing.rs pins these globs
+  # against the real module paths so that cannot recur.
   - name: fail-closed-gates
     trigger:
       [
-        src/runner.rs,
+        src/runner/**,
         src/backend/**,
         src/verdict.rs,
-        src/commands.rs,
+        src/commands/**,
+        src/carry.rs,
         src/seal.rs,
         src/attest/**,
       ]
@@ -70,9 +87,11 @@ reviewers:
       open, and every verdict is internally consistent. That invariant is
       established where a verdict is PRODUCED LIVE during a review: the backends
       that parse a reviewer's output, the runner that applies fail-closed (gate)
-      and fail-open (advisor) policy to each result, and the aggregation that folds
-      the resolved rows into the one merge decision the runner persists. That live
-      path is the trust boundary, and it is the scope of this reviewer.
+      and fail-open (advisor) policy to each result, the carry and attestation
+      paths that decide when a prior verdict may stand in for a live one, and the
+      aggregation that folds the resolved rows into the one merge decision the
+      runner persists. That live path is the trust boundary, and it is the scope
+      of this reviewer.
 
       Review only changes to that live-decision path. Block the PR if any of these
       could happen there:
@@ -105,70 +124,6 @@ reviewers:
       block, advisors never gate, and any rendering surface faithfully reflects the
       recorded decision without turning a block into a pass.
 
-  - name: release-surface-robustness
-    trigger:
-      [
-        scripts/**,
-        ".github/workflows/release.yml",
-        ".github/workflows/installers.yml",
-      ]
-    mode: gate
-    backend: codex
-    prompt: |
-      Review changes to the public install and release path (the install
-      scripts and the release/installer workflows) for robustness. Block the PR
-      if any of the following hold; otherwise approve it.
-
-      - An installer downloads a release artifact without verifying its SHA-256
-        checksum, or treats a missing, unparseable, or mismatched checksum as
-        anything other than a hard failure. Checksum problems must fail closed,
-        never warn and continue.
-      - Resolving the latest release (or any release metadata) depends on a
-        rate-limited, unauthenticated endpoint that fails from shared IPs and CI
-        runners (notably api.github.com, which 403s at 60 requests/hour/IP)
-        when a non-rate-limited path exists (the github.com /releases/latest
-        redirect resolves the tag without the API).
-      - The bash installer (scripts/install.sh) and the PowerShell installer
-        (scripts/install.ps1) have drifted out of sync in their options, archive
-        names, default install locations, or fail-closed behavior; or either
-        installer's archive names and platform targets disagree with what the
-        release workflow's build matrix actually produces.
-
-  - name: embedded-asset-line-endings
-    trigger: [skills/**, src/skills.rs, .gitattributes]
-    mode: gate
-    backend: codex
-    prompt: |
-      Bastion embeds text assets into the binary with `include_str!` (the bundled
-      skills under skills/<slug>/SKILL.md) and then compares an installed copy
-      against the embedded source byte for byte to drive the `bastion skills check`
-      drift guard. Line endings are the footgun: git's `core.autocrlf` checks these
-      assets out as CRLF on Windows, so an embedded asset that is parsed by exact
-      bytes, or a byte-for-byte comparison that does not normalize newlines, breaks
-      on Windows while passing in Linux CI. You are running in the repository, so
-      inspect the changed assets, the embedding/compare code, and .gitattributes
-      directly.
-
-      This is a gate. Block the PR if any of the following is definitely true for
-      the change; otherwise approve it. When you cannot confirm a problem, approve.
-
-      - A newly embedded text asset (a new `include_str!` of a file under skills/
-        or similar) whose exact bytes are parsed or compared has no LF pin: there
-        is no matching `text eol=lf` entry in .gitattributes covering it, AND the
-        code does not normalize CRLF to LF before parsing or comparing. At least
-        one of the two defenses must be present.
-      - A `.gitattributes` change removes or weakens the `eol=lf` pin on an
-        embedded, byte-compared asset (for example deleting the skills/**/SKILL.md
-        rule or broadening it back to a native-eol default).
-      - A byte-for-byte equality check against embedded asset content (the install
-        idempotence check or the drift `check`) is introduced or changed so that it
-        compares raw bytes without normalizing newlines, which would report a CRLF
-        checkout of identical content as drift.
-
-      Judge only line-ending stability of embedded, byte-compared assets. Ordinary
-      source edits, prose-only asset wording changes, or comparisons that already
-      normalize newlines are not violations, so approve them.
-
   # The docs gate. Its code-side trigger is the user-visible surface (the CLI
   # tree, the handlers, the registry schema, the verdict/event schema), not all
   # of src/: an internal change to the runner or a backend cannot make the user
@@ -177,7 +132,7 @@ reviewers:
     trigger:
       [
         src/cli.rs,
-        src/commands.rs,
+        src/commands/**,
         src/config.rs,
         src/reviewer.rs,
         src/verdict.rs,
@@ -214,192 +169,3 @@ reviewers:
       user-guide update, so approve it. When the change is user-visible and the
       matching docs were updated (or already cover it), approve. When you block,
       name the exact command, flag, or field and the chapter that must change.
-
-  # Prose quality, one pass. This gate carries two checklists that used to be
-  # separate reviewers reading the same files: AI-register "slop" (structural
-  # tells, not vocabulary) and snapshot discipline (docs describe the shipped
-  # release in plain present tense and never advertise unbuilt features). The
-  # trigger covers first-party user-facing prose only; repository-internal
-  # markdown (AGENTS.md, .github templates) is the maintainer's own surface and
-  # is not worth a review pass. Unicode-dash policy is not in this prompt at
-  # all: `nudge check` enforces it mechanically. A gate: each false block costs
-  # the author a full review cycle, so the prompt demands confidence before a
-  # flag and borderline constructions pass.
-  #
-  # For skills, only the bundled source under skills/** is reviewed: that is
-  # what `bastion skills install` ships into a consuming repo. The top-level
-  # skill dirs (.agents/skills/** and .claude/skills/**, kept as exact mirrors;
-  # see tests/skills_mirror.rs) hold installed copies and vendored upstream
-  # trees this project does not police.
-  - name: prose-anti-slop
-    trigger:
-      [
-        site/src/**/*.astro,
-        docs/**/*.md,
-        site/**/*.md,
-        skills/**/*.md,
-        README.md,
-        CONTRIBUTING.md,
-        SECURITY.md,
-        CODE_OF_CONDUCT.md,
-      ]
-    mode: gate
-    backend: codex
-    prompt: |
-      As a gate, review only the user-facing PROSE in the changed files, on two
-      axes: AI-register "slop" (the structural tics that make copy read as
-      machine-written) and, for files under docs/, snapshot discipline (the docs
-      describe the shipped release as it is). You are running in the repository,
-      so you can check whether something a doc describes actually exists in the
-      code.
-
-      Decision:
-
-      - If the changed prose carries one or more of the defects below, return
-        verdict: block. Enumerate EVERY instance across all changed prose in
-        this single pass: emit one blocking finding per instance, each naming the
-        file, the line or sentence, which defect it is, and the fix (a shorter
-        rewrite that keeps every fact, a present-tense rewrite, or a deletion).
-        Do not stop after the first one; a partial list costs the author another
-        full review cycle per remaining defect.
-      - If the changed prose is clean, return verdict: pass.
-      - Flag a construction only when you are confident it is a defect, not
-        merely when it resembles one. A false block costs the author a full
-        review cycle, so a sentence that could read either way passes.
-
-      SLOP TELLS (all changed prose):
-
-      - Virtue or character framing: prose that asserts the product is honest,
-        trustworthy, principled, humble, or "knows its edges" instead of stating
-        what it does. State the mechanism and let it speak.
-      - Manufactured antithesis ("X, not Y") where the second half is a strawman
-        or a vibe rather than a real, distinct, true alternative. Cut those. KEEP
-        contrasts where both halves name real opposed behaviors: in this repo
-        "gates block, advisors comment" and "gates fail closed, advisors fail
-        open" are real and must stay.
-      - Aphorism openers or closers: a section that opens or closes on a tidy
-        general maxim ("attention is scarce...", "the more you ask, the less it
-        catches"). Cut the maxim; the surrounding fact already carries it. The
-        test for a maxim is generality: it would read equally true pasted into
-        another product's docs. A first sentence that states a rule specific to
-        this system ("An attestation is not a pass token") is a topic sentence,
-        not an aphorism; keep it.
-      - Triadic parallelism and rule-of-three cadence used for rhythm rather than
-        because there are exactly three real, distinct items.
-      - The dramatic colon: a setup-then-payoff staged for suspense in
-        marketing-register copy ("runs locally, end to end: capture to
-        definition"). Discriminate here: this project bans dashes, so a colon
-        is the standard recast for an expansion, a definition, a list, or a
-        mechanism, and a colon doing that plain work is not a tell. Flag a
-        colon only when the fragment after it is a punchline rather than
-        information a reader needs.
-      - Uniform clipped-fragment headers (every header a short declarative with a
-        terminal period). Suggest varying them; some can be plain noun phrases.
-      - The meta-pattern: every sentence doing rhetorical work. Real copy is
-        lumpier and lets some sentences be flat and informational.
-
-      SNAPSHOT DEFECTS (changed files under docs/ only). Documentation is
-      reference material read on a specific version, so it must not narrate
-      against a moving present or advertise features that do not exist:
-
-      - Temporal framing of current behavior: "X now ships / is now / just
-        landed", "recently", "newly", floating "today" or "currently" meaning
-        "in this version", change-tracking headers ("What ships today"). The fix
-        is plain present tense.
-      - Speculative future features: a named artifact that is not shipped (a
-        packaged GitHub Action, a GitHub App), a described behavior the code
-        does not do (live progress, a rendering marked "target" or "when it
-        lands"), or a roadmap list. The fix is to DELETE it, not soften it: a
-        doc should not advertise what was never built.
-      - The one allowed exception (do NOT flag): a short present-tense note
-        about incomplete behavior that hangs off a configuration or schema
-        option a user can already set (a `capabilities` flag, a `backend`
-        value, a registry key): "you can set X, but today it fails closed"
-        prevents a surprise, so it stays. The test is whether the note is tied
-        to a real user-settable surface, not whether it mentions the future.
-      - Do NOT flag temporal words that are not about Bastion's feature
-        evolution: "the latest run", "recent runs" (the run index), tutorial
-        narration to the reader ("you now have a working reviewer"), or general
-        statements about the world rather than the product.
-
-      Discipline:
-
-      - Touch only prose. Leave code blocks, YAML, CLI examples, command flags,
-        tables, and quoted or third-party material exactly as they are.
-      - Do not over-correct. Flat, fragment-phobic, antithesis-phobic prose is its
-        own tell; one beat of personality per section is fine. Block defects, not
-        every stylistic choice.
-      - Apply the test: if a fact survives the rewrite and the copy got shorter,
-        the cut was slop. If a rewrite would drop information, do not suggest it.
-      - Respect your own prior findings. Prose that applies a rewrite this gate
-        suggested on an earlier run is presumptively clean; do not re-flag it
-        under a different tell unless the new reading is unambiguous slop.
-      - If the `stop-slop` skill is available in your context, use it for the full
-        reference and the before/after examples.
-
-  # Site integrity, one pass. Three narrow mechanical concerns that share a
-  # surface (the Astro site), merged so a site-touching change runs one
-  # reviewer instead of three: column alignment in tabular views, deploy-
-  # trigger coverage for externally-sourced content, and the generated Open
-  # Graph card staying in sync with the site copy it mirrors. Each concern
-  # only applies when its files are in the changeset; the others pass silently.
-  - name: site-integrity
-    trigger:
-      [
-        site/src/**/*.astro,
-        site/src/content.config.ts,
-        site/scripts/og-gen.mjs,
-        site/public/og.png,
-        ".github/workflows/site.yml",
-      ]
-    mode: gate
-    backend: codex
-    prompt: |
-      As a gate, review the changed site files for three mechanical defects. You
-      are running in the repository, so read the referenced files directly. Each
-      concern applies only when the changeset touches its files; when you cannot
-      confirm a problem, approve. Block the PR if any of the following is
-      definitely true; otherwise approve it.
-
-      CONCERN 1, table column drift (changed .astro components). A tabular,
-      column-aligned view (a column header row plus repeating data rows whose
-      cells are meant to line up: a registry, a ledger, a results grid) must
-      share one set of column tracks. When the header and each row are their own
-      element, each with its own `display: grid; grid-template-columns: ...`,
-      any content-sized (`auto`) or flexible (`fr`) track resolves per row, so a
-      row with wider content (a badge, a longer label) silently drifts out of
-      alignment with the rows above it. Block a changed file that introduces or
-      keeps such a per-row grid rather than one of: a real `<table>`
-      (`thead`/`tbody`, one set of column widths), or a single grid container
-      whose header and rows are subgrids or use `display: contents`. Do NOT
-      block: non-tabular layouts (page grids, card layouts), independent cards
-      that need no cross-row alignment, per-row grids whose every track is a
-      fixed length (fixed tracks cannot drift), markdown tables, and existing
-      `<table>` markup. When you block, name the file, the header and row
-      classes, and which fix fits.
-
-      CONCERN 2, deploy-trigger coverage (content.config.ts or site.yml
-      changed). The site is single-sourced: site/src/content.config.ts loads
-      guide content with a glob whose `base` points outside site/ (today
-      ../docs/user-guide), and the "Deploy site" workflow only redeploys on a
-      push matching its `paths:` filter. Block if, after this change,
-      content.config.ts globs content from a directory outside site/ that is
-      NOT covered by the push `paths:` filter in .github/workflows/site.yml
-      while that filter is restrictive (declares `paths:` at all). A glob base
-      under site/ is covered by the existing `site/**` entry. When you block,
-      name the base directory that is read and the `paths:` entry to add.
-
-      CONCERN 3, Open Graph card sync (og-gen.mjs, og.png, Hero.astro,
-      Base.astro, or Footer.astro changed). The card at site/public/og.png is
-      generated by site/scripts/og-gen.mjs, whose template hard-codes strings
-      that restate site copy: the hero headline (site/src/components/Hero.astro),
-      the default title / og:title (site/src/layouts/Base.astro), and the footer
-      tag line and domain (site/src/components/Footer.astro). Block on either:
-      CONTRADICTION, the change edits mirrored site copy so a generator string
-      now states something the site no longer says, and the template was not
-      updated; or STALE RENDER, the change edits a hard-coded copy string in
-      og-gen.mjs but does not also modify site/public/og.png (rerunning `node
-      scripts/og-gen.mjs` is the fix). The card need not match word for word: a
-      deliberately shorter card line stating the same fact is fine, so block
-      only on a real contradiction, not a wording difference. Styling, layout,
-      color, or font changes to either file are not violations.
