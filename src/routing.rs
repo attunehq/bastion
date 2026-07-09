@@ -145,71 +145,110 @@ mod tests {
     }
 
     #[test]
-    fn the_shipped_prose_gate_routes_on_prose_and_not_code() {
-        // prose-anti-slop is a gate, so its trigger globs are load-bearing: a
-        // changeset that should be reviewed for slop must actually route to it,
-        // and a code-only changeset must not. A typo in those globs would silently
-        // stop the gate from running, so pin both directions against the shipped
-        // registry.
+    fn the_shipped_safety_gate_routes_on_the_trust_boundary() {
+        // fail-closed-gates is the safety gate, so its trigger globs are
+        // load-bearing: a change to the live-decision path must actually route
+        // to it. A stale glob fails silently; the original trigger listed
+        // `src/runner.rs`, and when the runner became the `src/runner/`
+        // directory the gate quietly stopped reviewing runner changes. Pin the
+        // globs against the real module paths so a module split cannot detach
+        // the gate again.
         let config = shipped_registry();
         let router = Router::compile(&config.reviewers).expect("triggers compile");
 
-        for prose in [
-            "site/src/components/Hero.astro",
-            "site/DESIGN.md",
-            "docs/user-guide/concepts.md",
-            "docs/developer-guide/architecture.md",
-            "skills/using-bastion/SKILL.md",
-            "README.md",
-            "CONTRIBUTING.md",
-            "SECURITY.md",
-            "CODE_OF_CONDUCT.md",
+        for boundary in [
+            "src/runner/mod.rs",
+            "src/runner/verdicts.rs",
+            "src/runner/persist.rs",
+            "src/backend/mod.rs",
+            "src/backend/codex.rs",
+            "src/backend/container/mod.rs",
+            "src/verdict.rs",
+            "src/commands/review.rs",
+            "src/carry.rs",
+            "src/seal.rs",
+            "src/attest/replay.rs",
         ] {
-            let names = matched_names(&router, prose);
+            let names = matched_names(&router, boundary);
             assert!(
-                names.iter().any(|n| n == "prose-anti-slop"),
-                "prose path {prose} should route to prose-anti-slop, got {names:?}"
+                names.iter().any(|n| n == "fail-closed-gates"),
+                "trust-boundary path {boundary} should route to fail-closed-gates, got {names:?}"
             );
         }
 
-        // Code never routes to the prose gate; neither do repository-internal
-        // markdown (agent guidance, PR templates), the vendored skill trees, or
-        // the stop-slop skill's own reference files, which carry intentional
-        // "before" slop the gate must not flag.
+        // A change that cannot violate the invariant must not pay for the
+        // reviewer: docs, the site, and src modules off the live-decision path.
         for excluded in [
-            "src/main.rs",
-            "Cargo.toml",
-            ".bastion.yaml",
-            "AGENTS.md",
-            "CLAUDE.md",
-            ".github/PULL_REQUEST_TEMPLATE.md",
-            ".agents/skills/parse-dont-validate/SKILL.md",
-            ".agents/skills/readme.md",
-            ".claude/skills/stop-slop/references/examples.md",
+            "src/cli.rs",
+            "src/render.rs",
+            "src/github/mod.rs",
+            "docs/user-guide/concepts.md",
+            "site/src/components/Hero.astro",
+            "README.md",
         ] {
             let names = matched_names(&router, excluded);
             assert!(
-                !names.iter().any(|n| n == "prose-anti-slop"),
-                "excluded path {excluded} must not route to prose-anti-slop, got {names:?}"
+                !names.iter().any(|n| n == "fail-closed-gates"),
+                "excluded path {excluded} must not route to fail-closed-gates, got {names:?}"
             );
         }
     }
 
     #[test]
-    fn the_shipped_prose_reviewer_is_governed_as_a_gate() {
-        // The whole point of routing slop to this reviewer is that it can block.
-        // If it were demoted to an advisor its findings would be clamped to a
-        // pass, so guard the mode here.
+    fn the_shipped_docs_gate_routes_on_the_user_surface() {
+        // user-docs-in-sync triggers on the user-visible surface plus the guide
+        // itself, and must not fire on internal modules a user cannot observe.
         let config = shipped_registry();
-        let reviewer = config
-            .reviewers
-            .iter()
-            .find(|r| r.name == "prose-anti-slop")
-            .expect("prose-anti-slop is in the shipped registry");
-        assert_eq!(
-            reviewer.mode,
-            Mode::Gate,
-            "prose-anti-slop is governed as a gate, so slop blocks the merge"
-        );
+        let router = Router::compile(&config.reviewers).expect("triggers compile");
+
+        for surface in [
+            "src/cli.rs",
+            "src/commands/review.rs",
+            "src/config.rs",
+            "src/reviewer.rs",
+            "src/verdict.rs",
+            "src/event.rs",
+            "docs/user-guide/concepts.md",
+        ] {
+            let names = matched_names(&router, surface);
+            assert!(
+                names.iter().any(|n| n == "user-docs-in-sync"),
+                "user-surface path {surface} should route to user-docs-in-sync, got {names:?}"
+            );
+        }
+
+        for excluded in [
+            "src/runner/mod.rs",
+            "src/backend/codex.rs",
+            "docs/developer-guide/architecture.md",
+            "README.md",
+        ] {
+            let names = matched_names(&router, excluded);
+            assert!(
+                !names.iter().any(|n| n == "user-docs-in-sync"),
+                "excluded path {excluded} must not route to user-docs-in-sync, got {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_shipped_reviewers_are_governed_as_gates() {
+        // Both shipped reviewers exist to block: the safety gate on a
+        // fail-closed violation, the docs gate on user-guide drift. Demoted to
+        // an advisor either would have its findings clamped to a pass, so
+        // guard the mode here.
+        let config = shipped_registry();
+        for name in ["fail-closed-gates", "user-docs-in-sync"] {
+            let reviewer = config
+                .reviewers
+                .iter()
+                .find(|r| r.name == name)
+                .unwrap_or_else(|| panic!("{name} is in the shipped registry"));
+            assert_eq!(
+                reviewer.mode,
+                Mode::Gate,
+                "{name} is governed as a gate, so its findings block the merge"
+            );
+        }
     }
 }

@@ -76,10 +76,10 @@ Guidance that follows, so we stop re-deriving it:
 - `action.yml`: the composite GitHub Action consumers pin (`jssblck/bastion@v0`).
   Its inputs and outputs are a downstream surface like the CLI; the consumer-facing
   reference is `docs/user-guide/continuous-integration.md`. Sequencing lesson for
-  any future pinnable artifact: snapshot discipline (the `prose-anti-slop` gate)
-  keeps it out of `docs/` until a published release contains it, so ship the
-  artifact with raw-mechanism docs first and flip the docs in a follow-up once
-  the release exists.
+  any future pinnable artifact: snapshot discipline (docs describe only the
+  shipped release) keeps it out of `docs/` until a published release contains
+  it, so ship the artifact with raw-mechanism docs first and flip the docs in a
+  follow-up once the release exists.
 - `.agents/skills/readme.md`: repo-local Rust coding skills and their provenance.
 - `CLAUDE.md` is a bare `@AGENTS.md` import so guidance does not drift between
   agent surfaces.
@@ -118,6 +118,17 @@ bastion update
 bastion update --check
 ```
 
+When a branch's changeset triggers reviewers, close the review loop locally
+before pushing: run `bastion review --base main`, and once it is green, run
+`bastion attest` and push the note alongside the branch
+(`git push origin refs/notes/bastion`). The CI gate then verifies and replays
+the attested run instead of re-executing the reviewers, so the review tokens
+are spent once. Two mechanics matter: attestation binds to HEAD's committed
+tree, so attest after the final commit; and the seal secret is per-release
+while CI runs the latest published release, so keep the local binary current
+with `bastion update` or CI cannot verify the seal and falls back to a fresh
+run.
+
 Targeted checks when relevant:
 
 - Versioning changes: run `bastion --version`.
@@ -127,8 +138,8 @@ Targeted checks when relevant:
 - Rule changes: validate `.nudge.yaml` with `nudge validate`, then confirm
   `nudge check` is clean. `nudge` enforces the mechanical conventions in
   `.nudge.yaml` (today: no Unicode dashes in authored text) as a CI gate and an
-  agent-time hook; the `prose-anti-slop` gate in `.bastion.yaml` covers the
-  prose-voice judgment a regex cannot.
+  agent-time hook; the prose-voice judgment a regex cannot express is
+  write-time discipline via the `stop-slop` skill.
 
 ## Architecture map
 
@@ -184,8 +195,9 @@ second copy to drift against.
 - Keep user-facing prose (the marketing site, the guides, the README) free of
   AI-register slop: state mechanisms, not the product's character. Follow the
   `stop-slop` skill (under `.claude/skills/stop-slop/`, mirrored to
-  `.agents/skills/`), which catches the structural tells. The `prose-anti-slop`
-  gate in `.bastion.yaml` blocks the merge on slop in changed prose.
+  `.agents/skills/`), which catches the structural tells. This write-time pass
+  is the only enforcement layer; the registry's review-time prose gate was
+  retired to fit the review token budget.
 - Use plain ASCII quotes in docs, comments, and generated text. No em dashes or
   en dashes, and no literal `--` used as a dash in prose; recast with a comma, a
   colon, or parentheses.
