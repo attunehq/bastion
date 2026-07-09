@@ -1,0 +1,73 @@
+name: Site build
+
+# Build the marketing site on pull requests, mirroring the `npm ci` +
+# `npm run build` that Deploy site (site.yml) runs on push to main. The required
+# PR checks (ci.yml, bastion.yml) never install the site's npm dependencies, so a
+# dependency bump that breaks the build (for example a major version whose peer
+# range the pinned Astro toolchain does not accept) passes every gate and only
+# fails later at the Pages deploy. This job runs the same build the deploy does,
+# so that class of break blocks the merge instead.
+#
+# It runs on every pull request with no path filter, so the "Site build" check
+# always reports and can be a required status check without wedging PRs that do
+# not touch the site: a required check that never reports would block forever.
+# When none of the site's build inputs changed, the install and build steps skip
+# and the job still reports success. The detected inputs mirror the Deploy site
+# trigger paths.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+# One build per PR; a new push cancels the previous run.
+concurrency:
+  group: site-build-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Site build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history so the PR base commit resolves for the change detection
+          # below.
+          fetch-depth: 0
+
+      # Only the site's build inputs matter, so a Rust-only or docs-only PR reports
+      # success without an npm install. The guide is single-sourced from
+      # docs/user-guide (see site/src/content.config.ts), so a change there also
+      # changes the built site; this mirrors the Deploy site trigger paths.
+      - name: Detect site build inputs
+        id: inputs
+        run: |
+          set -euo pipefail
+          base='${{ github.event.pull_request.base.sha }}'
+          if git diff --name-only "$base" HEAD \
+            | grep -qE '^(site/|docs/user-guide/|\.github/workflows/site-build\.yml)'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No site build inputs changed; skipping the build."
+          fi
+
+      - uses: actions/setup-node@v6
+        if: steps.inputs.outputs.changed == 'true'
+        with:
+          # Match Deploy site: the current LTS line Astro supports.
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      # `npm ci` fails closed on a lockfile/manifest mismatch or a peer-dependency
+      # conflict, which is the class of break this gate exists to catch; the build
+      # then proves the site still compiles.
+      - name: Build the site
+        if: steps.inputs.outputs.changed == 'true'
+        working-directory: site
+        run: |
+          npm ci
+          npm run build
