@@ -1,0 +1,7 @@
+{"kind":"bastion-attestation","schema":1,"version":"v0.5.6","attested_at":"2026-07-10T18:56:32Z","public_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBKBzABH32MQTbq+FOccyzJgLh1eBK/hFwDz06bi3LYB jssblck-github-local-GRACE-2026-06-23","seal":{"version":"v0.5.6","head_tree":"f5a9577dd871666c6402f4b2e9d2fac53ad14194","base_tree":"5bd61a3ba8bb9a094e8ce47eb76f0cea2007d53b","patch_id":"dc7bccf876bbc3053592eaf933b03dc210b919a6","config_hash":"9b44f597d05f1504c8a64f3a7a4ccd5cc2e4158a11983af76f70a03a6720f648","seams":false,"dirty":false,"reviewers":["fail-closed-gates"],"mac":"66f12a949064805e4c8f2f0753eba947c77db44588a3825828889c3d9bd2a6c9"},"events":{"fail-closed-gates":{"duration_ms":70489,"findings":[],"has_transcript":true,"reviewer":"fail-closed-gates","run":"r-4ce58cb","scope_digest":"b2f7a8d70b08ed0a5ae58a27f191ec88f9007be1ac112fcdc42a35ddd2ff180d","summary":"The changeset only corrects the Codex auth hint and preserves fail-closed handling for missing live verdicts.","type":"reviewer.resolved","usage":{"cache_read":158464,"cost_usd":0.0,"tokens_in":196612,"tokens_out":2197},"verdict":"pass"}}}
+-----BEGIN SSH SIGNATURE-----
+U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgEoHMAEffYxBNur4U5xzLMmAuHV
+4Er+EXAPPTpuLctgEAAAAHYmFzdGlvbgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gtZWQy
+NTUxOQAAAEDihS7bq3nsnV4P/PES3DzDIFuYGleKDYx37oRCZ4PuN+AR0QoVM8tz5OT6Ze
+KqwwDFvmt9vDgtZ9ONLBhVl4AA
+-----END SSH SIGNATURE-----
