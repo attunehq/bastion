@@ -197,26 +197,34 @@ impl<R: CommandRunner> CodexBackend<R> {
         let output = self.runner.run(spec).await?;
         let session = CodexSession::parse(&output.stdout).ok();
         if !output.success() {
-            let message = codex_failure_message(session.as_ref(), &output);
-            bail!("{message}");
+            bail!("{}", codex_failure_message(session.as_ref(), &output));
         }
         let session = session.ok_or_else(|| eyre!("codex produced no output to parse"))?;
-        if let Some(reason) = &session.failure {
-            let message = classify_codex_failure(reason);
-            bail!("{message}");
+        if session.failure.is_some() {
+            bail!("{}", codex_failure_message(Some(&session), &output));
         }
         Ok(session)
     }
 }
 
-/// Build the error for a Codex run that exited non-zero.
+/// Build the fail-closed message for a Codex run that produced no verdict.
 ///
-/// Codex writes its real failure (an auth or usage-limit error) as an in-band JSON
-/// event on stdout and leaves stderr empty, so the exit status alone is not
-/// actionable. Prefer the parsed in-band reason; fall back to stderr, then to the
-/// last line of stdout, so the operator always sees *why* the reviewer failed.
+/// Codex reports a fatal failure on whichever channel fits the failure: an auth or
+/// usage-limit error arrives as an in-band JSON `error` / `turn.failed` event on
+/// stdout (with an empty stderr), while an invalidated token surfaces as a `401`
+/// tracing line on stderr. So the reason is taken from the in-band event first, then
+/// stderr, then the last line of stdout, and classified uniformly: an auth or quota
+/// failure names the fix regardless of which channel carried it, and any other
+/// failure surfaces its reason with the exit status. The exit status alone is never
+/// actionable, so it is never the whole message.
 fn codex_failure_message(session: Option<&CodexSession>, output: &CommandOutput) -> String {
-    if let Some(reason) = session.and_then(|session| session.failure.as_deref()) {
+    let in_band = session
+        .and_then(|session| session.failure.as_deref())
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty());
+    if let Some(reason) = in_band {
+        // The in-band event is Codex's own authoritative reason; the exit status adds
+        // nothing, so report the reason directly (classified for auth).
         return classify_codex_failure(reason);
     }
     let code = output
@@ -224,42 +232,52 @@ fn codex_failure_message(session: Option<&CodexSession>, output: &CommandOutput)
         .map_or_else(|| "signal".to_string(), |code| code.to_string());
     let stderr = output.stderr.trim();
     let detail = if stderr.is_empty() {
-        let tail = last_nonempty_line(&output.stdout);
-        if tail.is_empty() {
-            "no diagnostic output"
-        } else {
-            tail
-        }
+        last_nonempty_line(&output.stdout)
     } else {
         stderr
     };
-    format!("codex exited with status {code}: {detail}")
+    if looks_like_auth_failure(detail) {
+        // An auth failure reported on stderr (e.g. a `401 token_invalidated`) still
+        // gets the credential hint, so the channel Codex chose does not change the fix.
+        return auth_failure_message(detail);
+    }
+    if detail.is_empty() {
+        format!("codex exited with status {code}: no diagnostic output")
+    } else {
+        format!("codex exited with status {code}: {detail}")
+    }
 }
 
-/// Turn a Codex failure reason into an actionable message, prefixing a credential
-/// hint when it looks like an auth or usage-limit failure.
+/// Turn an in-band Codex failure reason into an actionable message: the credential
+/// hint when it looks like an auth or usage-limit failure, otherwise the reason with
+/// a plain "no verdict" framing.
 ///
-/// The recurring failure is credential drift: the local Codex auth expired (or the
-/// account is out of quota) while Bastion kept launching Codex, which then exits with
-/// the reason in band. This never fabricates a pass (the caller still fails closed);
-/// it just converts an opaque block into one that names the fix, so a transient auth
-/// problem is diagnosed on the first failure instead of retried blindly.
+/// The recurring failure is credential drift: the stored Codex auth was invalidated
+/// (a fresh local login rotates the token that a CI secret or a second machine still
+/// holds) or the account is out of quota, while Bastion keeps launching Codex, which
+/// then reports the reason and exits. This never fabricates a pass (the caller still
+/// fails closed); it converts an opaque block into one that names the fix, so a
+/// transient auth problem is diagnosed on the first failure instead of retried blindly.
 fn classify_codex_failure(reason: &str) -> String {
-    let reason = reason.trim();
     if looks_like_auth_failure(reason) {
-        format!(
-            "codex could not authenticate or is out of quota, so it produced no review. \
-             Refresh Codex credentials (run `codex login`, or set OPENAI_API_KEY / \
-             CODEX_API_KEY) and retry. Codex reported: {reason}"
-        )
+        auth_failure_message(reason)
     } else {
         format!("codex failed before producing a verdict. Codex reported: {reason}")
     }
 }
 
+/// The credential-drift message: what happened, the fix, and the reason Codex gave.
+fn auth_failure_message(reason: &str) -> String {
+    format!(
+        "codex could not authenticate or is out of quota, so it produced no review. \
+         Refresh Codex credentials (run `codex login`, or set OPENAI_API_KEY / \
+         CODEX_API_KEY) and retry. Codex reported: {reason}"
+    )
+}
+
 /// Whether a Codex failure reason reads as an authentication or usage-limit problem,
 /// rather than an unrelated runtime error. Matched case-insensitively against the
-/// phrases Codex uses for expired/absent credentials and exhausted quota.
+/// phrases Codex uses for expired/absent/invalidated credentials and exhausted quota.
 fn looks_like_auth_failure(reason: &str) -> bool {
     let reason = reason.to_ascii_lowercase();
     const MARKERS: &[&str] = &[
@@ -271,12 +289,14 @@ fn looks_like_auth_failure(reason: &str) -> bool {
         "log in",
         "login",
         "sign in",
+        "signing in",
         "unauthorized",
         "401",
         "403",
         "forbidden",
         "authenticat",
         "invalid api key",
+        "invalidated",
         "expired",
     ];
     MARKERS.iter().any(|marker| reason.contains(marker))
@@ -1208,6 +1228,30 @@ findings:
             "plain: {err}"
         );
         assert!(!err.contains("codex login"), "no spurious auth hint: {err}");
+    }
+
+    #[tokio::test]
+    async fn stderr_channel_auth_error_gets_the_credential_hint() {
+        // Codex reports an invalidated token on stderr (a `401` tracing line), not as
+        // an in-band event, so stderr must be classified too. This is the exact
+        // failure a stale CI/secret credential produced: without classification it
+        // read as a generic "exited with status 1" and the fix was not named.
+        let failed = CommandOutput {
+            code: Some(1),
+            stdout: String::new(),
+            stderr: "ERROR codex_models_manager: failed to refresh available models: \
+                     unexpected status 401 Unauthorized: Your authentication token has \
+                     been invalidated. Please try signing in again."
+                .to_string(),
+        };
+        let (outcome, _) = review_with(&reviewer(), [failed]).await;
+        let err = outcome.expect_err("fails closed").to_string();
+        assert!(err.contains("codex login"), "actionable hint: {err}");
+        assert!(err.contains("invalidated"), "reason surfaced: {err}");
+        assert!(
+            !err.contains("exited with status"),
+            "auth failures drop the bare status framing: {err}"
+        );
     }
 
     #[tokio::test]
