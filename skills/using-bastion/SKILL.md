@@ -1,6 +1,6 @@
 ---
 name: using-bastion
-description: Use when working in a repository that uses Bastion for agentic code review (a .bastion.yaml exists, or `bastion` is on PATH). Covers the local loop: run `bastion review --format jsonl`, read the streamed findings, fix what blocks, and reach a green gate before opening a PR. Also covers inspecting saved runs and the rule that reviewers are governed policy you must not edit just to pass a gate.
+description: Use when working in a repository that uses Bastion for agentic code review (a .bastion.yaml exists, or `bastion` is on PATH). First decide whether to run the gate locally at all: each reviewer is a paid agent, and running the same changeset locally and in CI spends the tokens twice. Covers that decision, the local loop (`bastion review --format jsonl`, read findings, fix, reach green), attesting a green run so CI replays it instead of re-reviewing, and the rule that reviewers are governed policy you must not edit just to pass a gate.
 ---
 
 <!-- BASTION_SKILL_PROVENANCE -->
@@ -9,13 +9,69 @@ description: Use when working in a repository that uses Bastion for agentic code
 
 Bastion is an agentic code-review gate. It runs a set of single-concern reviewers
 over your changeset and aggregates their verdicts into one pass-or-block decision.
-The same reviewers run locally and in CI, so a green local run means CI will largely
-just confirm it. Your job as the authoring agent is to reach that green gate before
-you open a PR.
+Every reviewer is a paid agent invocation, so the first thing to settle is where
+the review runs, not just how. Running the same changeset through the gate locally
+and again in CI pays for every reviewer twice, and CI re-reviews each pushed commit,
+so running locally and also letting CI run multiplies the spend without adding
+safety. Decide where the gate runs before you run it.
+
+## Decide where to run the gate
+
+Work through these in order and stop at the first that matches. The two facts you
+need are whether this repository runs Bastion in CI and whether it has attestation
+turned on; how to read each is in "Detecting the two conditions" below.
+
+1. **Attestation is enabled.** Run the gate locally, reach green, then **attest the
+   reviewed commit** so CI verifies and replays your run instead of re-reviewing it.
+   The reviewers execute once (in your loop), and CI reuses that result, so a local
+   run does not double the spend. Prefer this path whenever the registry opts in.
+   The loop is below; the attest step is in "Attesting a green run" and is not
+   optional here, it is what keeps CI from re-running the reviewers.
+
+2. **Bastion is not configured in CI.** Run the gate locally. It is the only place
+   Bastion runs, so there is nothing to double up with, and a local run is how the
+   changeset gets reviewed at all before you open the PR.
+
+3. **Bastion is in CI but attestation is not enabled.** Do **not** run the gate
+   locally. CI will review every pushed commit regardless of what you do, so a local
+   run is pure duplicate spend that buys nothing CI is not already going to do. Push
+   your branch, open the PR, and let CI be the single place the gate runs; read its
+   findings from the PR check and its sticky comment, fix what blocks, and push
+   again. CI's incremental carry means the unchanged reviewers on your next push cost
+   nothing, so iterating through CI is the cheap loop here, not a local re-run on top
+   of it.
+
+4. **A local run fails, at any point.** If Bastion cannot run locally (a spawn or
+   auth failure, a timeout, a crash, or an attestation you cannot complete because no
+   registered signing key is available), do **not** retry the local run in a loop.
+   Fall back to letting CI run the gate (as in case 3) and move on. Looping on a
+   failing local run is exactly the runaway that multiplies spend; stop after the
+   first failure and let CI be the single place. This is the agent-level version of
+   the spend caps and circuit breakers Bastion enforces in the launcher: when local
+   execution is not working, stop rather than keep paying to retry.
+
+### Detecting the two conditions
+
+- **Is attestation enabled?** Check the reviewer registry at the repository root,
+  `.bastion.yaml` (its `.bastion.yml` spelling is also honored), for a top-level
+  `attestations: true`. Present and true means enabled; absent or false means not.
+
+- **Is Bastion configured in CI?** Look under `.github/workflows/` for a workflow
+  that runs Bastion: the packaged action (a step with `uses: jssblck/bastion@...`) is
+  the usual form, but a raw `bastion github` or `bastion review` invocation in a
+  workflow step counts too. If no workflow runs Bastion, it is a local-only tool here
+  (case 2). Note that attestation being enabled implies CI runs Bastion, since
+  attestation exists only for CI to replay: if you saw `attestations: true`, you are
+  in case 1 and need not separately confirm the workflow.
+
+Only cases 1 and 2 have you run `bastion review` locally. The rest of this skill is
+the local loop for those two cases; in case 3 you are working from CI's PR report
+instead, and in case 4 you have already fallen back to CI.
 
 ## The loop
 
-Run the review, read what blocks, fix it, run again, until it passes:
+When you are running locally (case 1 or 2), run the review, read what blocks, fix
+it, run again, until it passes:
 
 ```sh
 bastion review --base <branch> --format jsonl
@@ -26,6 +82,9 @@ bastion review --base <branch> --format jsonl
   resolves. Always use it: the default human format is for a person watching.
 - The process exits zero when the gate passes and non-zero when it blocks, so you
   can branch on the exit code alone when you only need pass or fail.
+
+If this command itself fails to run (it cannot spawn a backend, it times out, it
+crashes), that is case 4: stop and fall back to CI rather than retrying locally.
 
 ## Reading the stream
 
@@ -49,7 +108,7 @@ need to open anything else.
 3. For every `reviewer.resolved` with `verdict: "block"`, fix the code its
    `findings` point at.
 4. Re-run. Loop until `run.completed.verdict` is `pass` (exit zero).
-5. Then open your PR.
+5. Then attest (case 1) and open your PR.
 
 Do not open transcripts to do this. The findings already say what to change.
 
@@ -73,10 +132,16 @@ let it work.
   with a normal `bastion review` (the unchanged passes carry, so the final full
   run is still cheap). An unknown or untriggered name is an error, not a no-op.
 
-## Attesting a green run, if the registry opts in
+## Attesting a green run
 
-Check `.bastion.yaml` for a top-level `attestations: true`. When it is set, sign
-a clean local run and CI replays it instead of re-running every reviewer.
+This is the step that makes case 1 (attestation enabled) cheap: it is what lets CI
+trust your local run instead of re-reviewing the changeset. Skipping it in case 1
+throws away the reason you ran locally, because CI then resolves the reviewers the
+ordinary way and you have paid for the review twice.
+
+Attestation is available when the registry sets a top-level `attestations: true` (the
+same check from "Detecting the two conditions"). When it is set, sign a clean local
+run and CI replays it instead of re-running every reviewer:
 
 ```sh
 bastion attest
@@ -98,12 +163,11 @@ that has moved on (a new commit, a changed registry) since the review. Do not
 work around a refusal.
 Re-run `bastion review` and attest that fresh run instead.
 
-Attesting is optional even when the registry allows it. If you skip these two
-commands, CI resolves reviewers the ordinary way (an unchanged prior pass still
-carries, the rest execute) and says nothing about attestation: an un-attested PR
-is the ordinary case, not a problem to flag. The report warns only when an
-attestation was offered and refused, for example a note that no longer matches
-CI's checkout. See
+If you cannot attest at all, because there is no signing key registered with the
+forge, or signing fails, treat it as case 4: do not keep retrying, and let CI run
+the gate. CI reviewing the changeset once is the correct fallback; the report warns
+only when an attestation was offered and refused, for example a note that no longer
+matches CI's checkout. See
 [Attesting a run for CI](https://github.com/jssblck/bastion/blob/main/docs/user-guide/local-workflow.md#attesting-a-run-for-ci)
 for the full mechanics and trust model.
 
@@ -159,5 +223,8 @@ to explain away per change.
   to the human who owns the policy; do not route around it.
 - **Gates fail closed.** A gate that errors or times out blocks, exactly as if it
   had found a problem. A block is a normal outcome, not a crash: read it and fix it.
-- **Green locally, then PR.** The whole point of the local loop is that CI confirms
-  rather than surprises. Do not open the PR until `run.completed.verdict` is `pass`.
+- **Run the gate in one place.** Decide where it runs before you run it (the section
+  at the top). When you do run locally, reach `run.completed.verdict: pass` before
+  you open the PR, and in case 1 attest so CI replays rather than re-reviews. Do not
+  run locally on top of a CI gate that will re-review anyway, and do not loop on a
+  failing local run; both just multiply the spend.
