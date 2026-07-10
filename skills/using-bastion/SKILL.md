@@ -71,7 +71,9 @@ instead, and in case 4 you have already fallen back to CI.
 ## The loop
 
 When you are running locally (case 1 or 2), run the review, read what blocks, fix
-it, run again, until it passes:
+it, run again, until it passes. In case 1, sync with the base branch before the
+final run, since that is the run you will attest ("Sync with the base branch
+first", below, has the steps and the reason):
 
 ```sh
 bastion review --base <branch> --format jsonl
@@ -138,6 +140,35 @@ This is the step that makes case 1 (attestation enabled) cheap: it is what lets 
 trust your local run instead of re-reviewing the changeset. Skipping it in case 1
 throws away the reason you ran locally, because CI then resolves the reviewers the
 ordinary way and you have paid for the review twice.
+
+### Sync with the base branch first
+
+CI re-derives the changeset from its own checkout when it verifies the note: the
+merge base against the PR's base branch, the diff's patch id, and HEAD's tree all
+have to match what your run sealed. A review against a stale view of the base
+seals a merge base CI will not derive, so CI refuses the note and executes every
+reviewer fresh, which is the duplicate spend you ran locally to avoid. Nothing
+warns you at attest time; the refusal happens in CI, after the tokens are spent.
+
+So before the final review you intend to attest:
+
+```sh
+git fetch origin
+git rebase origin/<base>   # or merge it in; get up to date with the base tip
+```
+
+Then run that final review against the fetched ref (`--base origin/main` rather
+than `--base main`): a local `main` that lags `origin/main` seals a merge base CI
+will not derive, even on an up-to-date branch. Sync first, then review, then
+attest; a rebase or merge moves HEAD, and the note binds to the reviewed HEAD, so
+syncing after the review invalidates the run you meant to attest.
+
+If the base branch moves again before CI runs and the PR reports an attestation
+fallback naming the base, repeat the sequence: sync, re-run `bastion review`
+(unchanged reviewers carry forward, so the re-run is cheap), re-attest, and push
+the note again.
+
+### Signing and pushing the note
 
 Attestation is available when the registry sets a top-level `attestations: true` (the
 same check from "Detecting the two conditions"). When it is set, sign a clean local
