@@ -270,8 +270,9 @@ fn classify_codex_failure(reason: &str) -> String {
 fn auth_failure_message(reason: &str) -> String {
     format!(
         "codex could not authenticate or is out of quota, so it produced no review. \
-         Refresh Codex credentials (run `codex login`, or set OPENAI_API_KEY / \
-         CODEX_API_KEY) and retry. Codex reported: {reason}"
+         Refresh Codex credentials (run `codex login`, use `codex login \
+         --with-api-key` to store an API key, or set `CODEX_API_KEY` for this \
+         invocation) and retry. Codex reported: {reason}"
     )
 }
 
@@ -1303,6 +1304,18 @@ findings:
         let (outcome, _) = review_with(&reviewer(), [failed]).await;
         let err = outcome.expect_err("fails closed").to_string();
         assert!(err.contains("codex login"), "actionable hint: {err}");
+        assert!(
+            err.contains("codex login --with-api-key"),
+            "stored API-key hint: {err}"
+        );
+        assert!(
+            err.contains("CODEX_API_KEY"),
+            "single-invocation credential: {err}"
+        );
+        assert!(
+            !err.contains("OPENAI_API_KEY"),
+            "must not recommend an unsupported codex exec credential: {err}"
+        );
         assert!(err.contains("invalidated"), "reason surfaced: {err}");
         assert!(
             !err.contains("exited with status"),
