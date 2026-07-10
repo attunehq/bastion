@@ -447,8 +447,11 @@ reviewers:
   # ...
 ```
 
-This works only for a review over committed content. To use attestation, commit the
-final change, run `bastion review`, then run `bastion attest` (see [The local
+This works only for a review over committed content, on a branch that is up to
+date with the base: CI re-derives the merge base from the PR's base branch and
+refuses a note sealed against a stale one. To use attestation, commit the final
+change, fetch and sync with the base branch, run `bastion review` against the
+fetched base, then run `bastion attest` (see [The local
 workflow](./local-workflow.md#attesting-a-run-for-ci)). A review over a dirty
 working tree still runs and still seals, but the seal records that the tree
 was dirty, and `bastion attest` refuses to sign it; attest the clean,

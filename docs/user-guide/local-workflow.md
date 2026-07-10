@@ -319,11 +319,25 @@ you can sign your last green local run so CI reuses it instead of re-running
 every reviewer:
 
 ```sh
-git commit -am "final change"   # attest needs a review over committed content
-bastion review --base main      # ends green
-bastion attest                  # signs the run that just finished
+git commit -am "final change"        # attest needs a review over committed content
+git fetch origin
+git rebase origin/main               # or merge; get up to date with the base tip
+bastion review --base origin/main    # ends green
+bastion attest                       # signs the run that just finished
 git push origin refs/notes/bastion
 ```
+
+The sequence syncs with the base branch before the review because CI does not
+take the note's word for what was reviewed: it re-derives the merge base against
+the PR's base branch, the diff's patch id, and HEAD's tree from its own checkout,
+and replays only when all of them match what the run sealed. A review against a
+stale view of the base seals a merge base CI will not derive, so CI refuses the
+note and runs every reviewer fresh, the duplicate spend attestation exists to
+avoid. Diff against `origin/main` after fetching rather than a local `main` ref,
+which can lag it. And sync before the review, not after: a rebase or merge moves
+HEAD, and the note binds to the reviewed HEAD. If the base moves again before CI
+runs and the PR reports an attestation fallback, repeat the sequence; unchanged
+reviewers carry forward, so the re-run is cheap.
 
 `bastion attest [RUN]` takes an optional run id positional; omit it and it signs
 the latest recorded run, which is what you want right after `bastion review`.

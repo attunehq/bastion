@@ -123,11 +123,14 @@ before pushing: run `bastion review --base main`, and once it is green, run
 `bastion attest` and push the note alongside the branch
 (`git push origin refs/notes/bastion`). The CI gate then verifies and replays
 the attested run instead of re-executing the reviewers, so the review tokens
-are spent once. Two mechanics matter: attestation binds to HEAD's committed
-tree, so attest after the final commit; and the seal secret is per-release
-while CI runs the latest published release, so keep the local binary current
-with `bastion update` or CI cannot verify the seal and falls back to a fresh
-run.
+are spent once. Three mechanics matter: CI re-derives the merge base from the
+PR's base branch and refuses a note sealed against a stale one, so before the
+run you attest, fetch and get the branch up to date with `origin/main`, and
+review against `origin/main` rather than a local `main` that can lag it;
+attestation binds to HEAD's committed tree, so attest after the final commit;
+and the seal secret is per-release while CI runs the latest published release,
+so keep the local binary current with `bastion update` or CI cannot verify the
+seal and falls back to a fresh run.
 
 Targeted checks when relevant:
 
