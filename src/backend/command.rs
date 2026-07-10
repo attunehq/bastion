@@ -179,27 +179,53 @@ pub(crate) fn resolve_executable(program: &OsStr) -> OsString {
     if !cfg!(windows) {
         return program.to_os_string();
     }
-    let path = Path::new(program);
-    // A name with a directory component or an extension is already concrete.
-    if path.is_absolute() || path.components().count() > 1 || path.extension().is_some() {
-        return program.to_os_string();
-    }
     let Some(path_var) = std::env::var_os("PATH") else {
         return program.to_os_string();
     };
-    let exts = std::env::var_os("PATHEXT").unwrap_or_else(|| OsString::from(".COM;.EXE;.BAT;.CMD"));
-    let exts = exts.to_string_lossy();
-    for dir in std::env::split_paths(&path_var) {
-        for ext in exts.split(';').filter(|e| !e.is_empty()) {
+    let path_dirs: Vec<PathBuf> = std::env::split_paths(&path_var).collect();
+    let pathext =
+        std::env::var_os("PATHEXT").unwrap_or_else(|| OsString::from(".COM;.EXE;.BAT;.CMD"));
+    let pathext = pathext.to_string_lossy();
+    resolve_windows_executable(program, &path_dirs, &pathext, |candidate| {
+        candidate.is_file()
+    })
+    .unwrap_or_else(|| program.to_os_string())
+}
+
+/// Resolve a bare Windows command name against a PATH directory list and PATHEXT,
+/// mirroring the shell lookup the OS spawner skips.
+///
+/// Returns `Some(full_path)` for the first `dir\name+ext` the `exists` predicate
+/// accepts, trying extensions in PATHEXT order so a native `.exe` wins over a `.cmd`
+/// shim. Returns `None` when `program` is already concrete (absolute, has a directory
+/// component, or already carries an extension) or when nothing matches, so the caller
+/// leaves it unchanged.
+///
+/// Split out and pure over its inputs (the path list, the PATHEXT string, and a
+/// file-exists predicate) so the resolution decision, the crux of the Windows launch
+/// fix, is unit-tested without mutating the process environment or touching the real
+/// filesystem, the way the rest of this seam is exercised.
+fn resolve_windows_executable(
+    program: &OsStr,
+    path_dirs: &[PathBuf],
+    pathext: &str,
+    exists: impl Fn(&Path) -> bool,
+) -> Option<OsString> {
+    let path = Path::new(program);
+    if path.is_absolute() || path.components().count() > 1 || path.extension().is_some() {
+        return None;
+    }
+    for dir in path_dirs {
+        for ext in pathext.split(';').filter(|ext| !ext.is_empty()) {
             let mut name = program.to_os_string();
             name.push(ext);
             let candidate = dir.join(&name);
-            if candidate.is_file() {
-                return candidate.into_os_string();
+            if exists(&candidate) {
+                return Some(candidate.into_os_string());
             }
         }
     }
-    program.to_os_string()
+    None
 }
 
 /// Resolve the program path for a backend CLI, honoring an environment override.
@@ -299,6 +325,95 @@ mod tests {
         // `execvp` already searches PATH for a bare name, so we leave it alone.
         let p = OsString::from("sh");
         assert_eq!(resolve_executable(&p), p);
+    }
+
+    // -- Windows resolution decision (pure, no env or filesystem) --------------
+    //
+    // These run on every host: `resolve_windows_executable` is decoupled from the
+    // process environment and the real filesystem, so the Windows launch decision
+    // is asserted directly instead of depending on what happens to be installed.
+
+    #[test]
+    fn resolve_windows_executable_resolves_a_bare_name_to_a_cmd_shim() {
+        // The regression at the heart of the Windows launch bug: an npm `codex` is a
+        // `codex.cmd` shim with no `.exe`, and the OS spawner does not consult
+        // PATHEXT, so a bare `codex` must be resolved to the full `.cmd` path here or
+        // the spawn fails "program not found" and every Codex reviewer fails closed.
+        let dir = PathBuf::from(r"C:\npm");
+        let dirs = [dir.clone()];
+        let only_cmd = |candidate: &Path| candidate == dir.join("codex.CMD");
+        let resolved =
+            resolve_windows_executable(OsStr::new("codex"), &dirs, ".COM;.EXE;.BAT;.CMD", only_cmd)
+                .expect("resolves the bare name to the shim");
+        assert_eq!(resolved, dir.join("codex.CMD").into_os_string());
+    }
+
+    #[test]
+    fn resolve_windows_executable_prefers_a_native_exe_over_a_cmd_shim() {
+        // PATHEXT order decides, so a real `.exe` wins over a `.cmd` shim in the same
+        // directory: we route through cmd.exe only when there is no native binary.
+        let dir = PathBuf::from(r"C:\bin");
+        let dirs = [dir.clone()];
+        let both = |candidate: &Path| {
+            candidate == dir.join("agent.EXE") || candidate == dir.join("agent.CMD")
+        };
+        let resolved =
+            resolve_windows_executable(OsStr::new("agent"), &dirs, ".COM;.EXE;.BAT;.CMD", both)
+                .expect("resolves");
+        assert_eq!(resolved, dir.join("agent.EXE").into_os_string());
+    }
+
+    #[test]
+    fn resolve_windows_executable_leaves_concrete_programs_unchanged() {
+        let dirs = [PathBuf::from(r"C:\bin")];
+        // Already carries an extension: concrete, so no resolution.
+        assert!(
+            resolve_windows_executable(OsStr::new("codex.cmd"), &dirs, ".CMD", |_| true).is_none()
+        );
+        // Has a directory component: concrete.
+        assert!(
+            resolve_windows_executable(OsStr::new("sub/codex"), &dirs, ".CMD", |_| true).is_none()
+        );
+    }
+
+    #[test]
+    fn resolve_windows_executable_returns_none_when_nothing_matches() {
+        let dirs = [PathBuf::from(r"C:\bin")];
+        assert!(
+            resolve_windows_executable(OsStr::new("nope"), &dirs, ".EXE;.CMD", |_| false).is_none()
+        );
+    }
+
+    // -- Real-subprocess `.cmd` execution --------------------------------------
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn system_runner_executes_a_cmd_shim_directly() {
+        // The believed-impossible case ("a `.cmd` shim can't be spawned directly by a
+        // native binary"): a resolved `codex.cmd` is handed to the runner as a
+        // concrete path. `std` routes a `.cmd`/`.bat` through cmd.exe with correct
+        // argument escaping, so it does run. Drive a real `.cmd` end-to-end, with a
+        // prompt on stdin exactly as the backends do, to guard against a regression
+        // that would make every Windows Codex reviewer fail to launch.
+        let tmp = tempfile::tempdir().unwrap();
+        let shim = tmp.path().join("verdict-shim.cmd");
+        std::fs::write(&shim, "@echo off\r\necho hello-from-cmd-shim\r\n").unwrap();
+
+        let mut spec = CommandSpec::new(&shim, tmp.path());
+        spec.stdin("a prompt the shim ignores");
+
+        let output = SystemCommandRunner.run(&spec).await.expect("cmd shim runs");
+        assert!(
+            output.success(),
+            "code={:?} stderr={:?}",
+            output.code,
+            output.stderr
+        );
+        assert!(
+            output.stdout.contains("hello-from-cmd-shim"),
+            "stdout={:?}",
+            output.stdout
+        );
     }
 
     #[tokio::test]

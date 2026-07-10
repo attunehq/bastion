@@ -37,7 +37,7 @@ use serde::Deserialize;
 use crate::reviewer::{self};
 use crate::verdict::{Money, Usage, Verdict};
 
-use super::command::{CommandRunner, CommandSpec, resolve_program};
+use super::command::{CommandOutput, CommandRunner, CommandSpec, resolve_program};
 use super::{Backend, ReviewOutcome, ReviewRequest};
 
 /// Environment variable that overrides the `codex` program path (tests point this
@@ -184,19 +184,112 @@ impl<R: CommandRunner> CodexBackend<R> {
     }
 
     /// Run one Codex invocation and parse its event stream into a session.
+    ///
+    /// Codex reports a fatal auth or usage-limit failure *in band*: a JSON `error` /
+    /// `turn.failed` event on stdout, an empty stderr, and a non-zero exit. So the
+    /// stream is parsed even on failure (that is where the actionable reason lives),
+    /// and a run that carried such an error is failed closed with a classified,
+    /// actionable message rather than an opaque `exited with status 1:` and nothing
+    /// after the colon. A zero exit that still carried a fatal error event produced no
+    /// real review either, so it fails the same way instead of reprompting into the
+    /// identical failure and spending a second review turn on it.
     async fn run_once(&self, spec: &CommandSpec) -> Result<CodexSession> {
         let output = self.runner.run(spec).await?;
+        let session = CodexSession::parse(&output.stdout).ok();
         if !output.success() {
-            bail!(
-                "codex exited with status {}: {}",
-                output
-                    .code
-                    .map_or_else(|| "signal".to_string(), |c| c.to_string()),
-                output.stderr.trim(),
-            );
+            let message = codex_failure_message(session.as_ref(), &output);
+            bail!("{message}");
         }
-        CodexSession::parse(&output.stdout)
+        let session = session.ok_or_else(|| eyre!("codex produced no output to parse"))?;
+        if let Some(reason) = &session.failure {
+            let message = classify_codex_failure(reason);
+            bail!("{message}");
+        }
+        Ok(session)
     }
+}
+
+/// Build the error for a Codex run that exited non-zero.
+///
+/// Codex writes its real failure (an auth or usage-limit error) as an in-band JSON
+/// event on stdout and leaves stderr empty, so the exit status alone is not
+/// actionable. Prefer the parsed in-band reason; fall back to stderr, then to the
+/// last line of stdout, so the operator always sees *why* the reviewer failed.
+fn codex_failure_message(session: Option<&CodexSession>, output: &CommandOutput) -> String {
+    if let Some(reason) = session.and_then(|session| session.failure.as_deref()) {
+        return classify_codex_failure(reason);
+    }
+    let code = output
+        .code
+        .map_or_else(|| "signal".to_string(), |code| code.to_string());
+    let stderr = output.stderr.trim();
+    let detail = if stderr.is_empty() {
+        let tail = last_nonempty_line(&output.stdout);
+        if tail.is_empty() {
+            "no diagnostic output"
+        } else {
+            tail
+        }
+    } else {
+        stderr
+    };
+    format!("codex exited with status {code}: {detail}")
+}
+
+/// Turn a Codex failure reason into an actionable message, prefixing a credential
+/// hint when it looks like an auth or usage-limit failure.
+///
+/// The recurring failure is credential drift: the local Codex auth expired (or the
+/// account is out of quota) while Bastion kept launching Codex, which then exits with
+/// the reason in band. This never fabricates a pass (the caller still fails closed);
+/// it just converts an opaque block into one that names the fix, so a transient auth
+/// problem is diagnosed on the first failure instead of retried blindly.
+fn classify_codex_failure(reason: &str) -> String {
+    let reason = reason.trim();
+    if looks_like_auth_failure(reason) {
+        format!(
+            "codex could not authenticate or is out of quota, so it produced no review. \
+             Refresh Codex credentials (run `codex login`, or set OPENAI_API_KEY / \
+             CODEX_API_KEY) and retry. Codex reported: {reason}"
+        )
+    } else {
+        format!("codex failed before producing a verdict. Codex reported: {reason}")
+    }
+}
+
+/// Whether a Codex failure reason reads as an authentication or usage-limit problem,
+/// rather than an unrelated runtime error. Matched case-insensitively against the
+/// phrases Codex uses for expired/absent credentials and exhausted quota.
+fn looks_like_auth_failure(reason: &str) -> bool {
+    let reason = reason.to_ascii_lowercase();
+    const MARKERS: &[&str] = &[
+        "usage limit",
+        "quota",
+        "out of credit",
+        "credits",
+        "not logged in",
+        "log in",
+        "login",
+        "sign in",
+        "unauthorized",
+        "401",
+        "403",
+        "forbidden",
+        "authenticat",
+        "invalid api key",
+        "expired",
+    ];
+    MARKERS.iter().any(|marker| reason.contains(marker))
+}
+
+/// The last non-empty, trimmed line of `text`, or `""` when there is none. Used as a
+/// last-resort diagnostic when a failing Codex run left no parsed error and no stderr.
+fn last_nonempty_line(text: &str) -> &str {
+    text.lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
 }
 
 impl<R: CommandRunner> Backend for CodexBackend<R> {
@@ -272,6 +365,12 @@ struct CodexSession {
     usage: Option<Usage>,
     /// The thread/session id, when Codex reported it, for resuming on a reprompt.
     thread_id: Option<String>,
+    /// A fatal error Codex reported in band (an `error` or `turn.failed` event, e.g.
+    /// an auth or usage-limit failure), captured so the backend can surface *why* the
+    /// run produced no verdict instead of an opaque non-zero exit. The first such
+    /// message wins: it is the root cause, and a trailing `turn.failed` that echoes it
+    /// must not overwrite it.
+    failure: Option<String>,
 }
 
 impl CodexSession {
@@ -325,6 +424,14 @@ impl CodexSession {
     fn record_reasoning(&mut self, text: &str) {
         self.transcript.push_str(text);
         self.transcript.push('\n');
+    }
+
+    /// Record a fatal in-band error, keeping the first non-empty one (the root cause;
+    /// a later `turn.failed` typically echoes the same text).
+    fn record_failure(&mut self, message: String) {
+        if self.failure.is_none() && !message.trim().is_empty() {
+            self.failure = Some(message);
+        }
     }
 
     /// Record token/cost usage.
@@ -384,6 +491,22 @@ enum CodexEvent {
         /// Token usage for the turn.
         usage: CodexUsage,
     },
+    /// A turn failed without producing a verdict; carries the failure reason (e.g. an
+    /// auth or usage-limit error). Distinct from a malformed verdict: this is Codex
+    /// itself reporting it could not run the turn, so the backend fails closed on it.
+    #[serde(rename = "turn.failed")]
+    TurnFailed {
+        /// The failure, with a human-readable message.
+        error: CodexError,
+    },
+    /// A standalone fatal error event (both the current and legacy schemas emit one
+    /// alongside `turn.failed`, e.g. `"You've hit your usage limit"`).
+    #[serde(rename = "error")]
+    Error {
+        /// The error message.
+        #[serde(default)]
+        message: String,
+    },
     /// A message from the agent (legacy flat schema).
     #[serde(rename = "agent_message")]
     AgentMessage {
@@ -436,6 +559,15 @@ enum CodexItem {
     Other,
 }
 
+/// The error payload of a `turn.failed` event: a human-readable failure message.
+#[derive(Debug, Deserialize)]
+struct CodexError {
+    /// The failure message; defaulted so a malformed payload still parses (and is
+    /// simply ignored as empty) rather than breaking the whole event.
+    #[serde(default)]
+    message: String,
+}
+
 /// Token usage as carried by a `turn.completed` event in the current schema.
 #[derive(Debug, Deserialize)]
 struct CodexUsage {
@@ -471,6 +603,8 @@ impl CodexEvent {
                     usage.cost_usd,
                 );
             }
+            CodexEvent::TurnFailed { error } => acc.record_failure(error.message),
+            CodexEvent::Error { message } => acc.record_failure(message),
             CodexEvent::AgentMessage { message } => acc.record_message(message),
             CodexEvent::AgentReasoning { text } => acc.record_reasoning(&text),
             CodexEvent::TokenCount {
@@ -993,6 +1127,119 @@ findings:
         assert!(err.to_string().contains("boom"));
     }
 
+    /// A JSON-lines stream that ends in a fatal `turn.failed` (with a matching
+    /// standalone `error` event), the shape Codex emits when a turn cannot run.
+    fn failed_stream(message: &str) -> String {
+        let mut out = String::new();
+        let started = serde_json::json!({ "type": "thread.started", "thread_id": "th-fail" });
+        out.push_str(&serde_json::to_string(&started).unwrap());
+        out.push('\n');
+        let error = serde_json::json!({ "type": "error", "message": message });
+        out.push_str(&serde_json::to_string(&error).unwrap());
+        out.push('\n');
+        let failed = serde_json::json!({
+            "type": "turn.failed",
+            "error": { "message": message },
+        });
+        out.push_str(&serde_json::to_string(&failed).unwrap());
+        out.push('\n');
+        out
+    }
+
+    #[tokio::test]
+    async fn auth_failure_event_surfaces_an_actionable_error() {
+        // The reproduced failure: Codex hits a usage/auth limit, reports it as an
+        // in-band JSON event on stdout, leaves stderr empty, and exits non-zero. The
+        // backend must fail closed with the reason and a credential hint, not an
+        // opaque "exited with status 1:" and nothing after the colon.
+        let stream = failed_stream(
+            "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage.",
+        );
+        let failed = CommandOutput {
+            code: Some(1),
+            stdout: stream,
+            stderr: String::new(),
+        };
+        let (outcome, specs) = review_with(&reviewer(), [failed]).await;
+        let err = outcome.expect_err("auth failure fails closed").to_string();
+        assert!(err.contains("usage limit"), "reason surfaced: {err}");
+        assert!(err.contains("codex login"), "actionable hint: {err}");
+        assert!(
+            err.to_lowercase().contains("authenticate") || err.contains("quota"),
+            "classified as auth/quota: {err}"
+        );
+        // No wasted reprompt: the failure is terminal, so only one invocation runs.
+        assert_eq!(specs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn zero_exit_with_error_event_fails_closed_without_reprompting() {
+        // Codex can exit zero yet still report a fatal error and no verdict. That is
+        // not a malformed verdict to reprompt for; it produced no review, so fail
+        // closed on the first pass rather than spending a second review turn.
+        let stream = failed_stream("Unauthorized: please sign in again.");
+        let ok_but_failed = CommandOutput {
+            code: Some(0),
+            stdout: stream,
+            stderr: String::new(),
+        };
+        let (outcome, specs) = review_with(&reviewer(), [ok_but_failed]).await;
+        let err = outcome.expect_err("fails closed").to_string();
+        assert!(err.contains("sign in"), "reason surfaced: {err}");
+        assert!(err.contains("codex login"), "actionable hint: {err}");
+        assert_eq!(specs.len(), 1, "no reprompt on a terminal failure");
+    }
+
+    #[tokio::test]
+    async fn a_generic_runtime_failure_is_not_mislabeled_as_auth() {
+        // A non-auth failure must surface plainly, without the credential hint, so the
+        // operator is not sent to `codex login` for an unrelated crash.
+        let stream = failed_stream("internal error: model stream disconnected");
+        let failed = CommandOutput {
+            code: Some(1),
+            stdout: stream,
+            stderr: String::new(),
+        };
+        let (outcome, _) = review_with(&reviewer(), [failed]).await;
+        let err = outcome.expect_err("fails closed").to_string();
+        assert!(err.contains("model stream disconnected"), "reason: {err}");
+        assert!(
+            err.contains("failed before producing a verdict"),
+            "plain: {err}"
+        );
+        assert!(!err.contains("codex login"), "no spurious auth hint: {err}");
+    }
+
+    #[tokio::test]
+    async fn nonzero_exit_with_empty_stderr_falls_back_to_stdout_tail() {
+        // A non-zero exit that left no parsed error event and an empty stderr must
+        // still say something: fall back to the last line of stdout rather than
+        // emitting "exited with status 1:" with an empty reason.
+        let failed = CommandOutput {
+            code: Some(1),
+            stdout: "some progress line\nfatal: could not start\n".to_string(),
+            stderr: String::new(),
+        };
+        let (outcome, _) = review_with(&reviewer(), [failed]).await;
+        let err = outcome.expect_err("fails closed").to_string();
+        assert!(
+            err.contains("fatal: could not start"),
+            "tail surfaced: {err}"
+        );
+    }
+
+    #[test]
+    fn looks_like_auth_failure_matches_credential_phrases_only() {
+        assert!(looks_like_auth_failure("You've hit your usage limit"));
+        assert!(looks_like_auth_failure("401 Unauthorized"));
+        assert!(looks_like_auth_failure("Please log in to continue"));
+        assert!(looks_like_auth_failure("your API token has expired"));
+        assert!(!looks_like_auth_failure(
+            "internal error: stream disconnected"
+        ));
+        assert!(!looks_like_auth_failure("timed out after 900s"));
+    }
+
     #[tokio::test]
     async fn prompt_inputs_are_interpolated_and_schema_appended() {
         let mut reviewer = reviewer();
@@ -1092,17 +1339,16 @@ findings:
 
     /// Write a fake `codex` program into `dir` that echoes a fixed JSON event
     /// stream and exits zero. Returns the `(program, base_args)` to invoke it by:
-    /// on Windows a `.cmd` driven through `cmd /c`; elsewhere a `chmod +x` script.
+    /// on Windows the `.cmd` shim spawned *directly* (the production path, exercising
+    /// that a resolved `.cmd` executes without a manual `cmd /c` wrapper); elsewhere a
+    /// `chmod +x` script.
     fn write_fake_codex(dir: &Path) -> (PathBuf, Vec<String>) {
         let line = r#"{"type":"agent_message","message":"```yaml\nverdict: pass\nsummary: from a real process\n```"}"#;
         if cfg!(windows) {
             let path = dir.join("fake_codex.cmd");
             let script = format!("@echo off\r\necho {line}\r\n");
             std::fs::write(&path, script).unwrap();
-            (
-                PathBuf::from("cmd"),
-                vec!["/c".to_string(), path.to_string_lossy().into_owned()],
-            )
+            (path, Vec::new())
         } else {
             let path = dir.join("fake_codex.sh");
             let script = format!("#!/bin/sh\ncat <<'EOF'\n{line}\nEOF\n");
