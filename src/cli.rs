@@ -80,6 +80,10 @@ pub enum Command {
         /// passes forward).
         #[arg(long)]
         fresh: bool,
+        /// Continue when a local branch base does not contain its freshly fetched
+        /// upstream. The outdated-base warning is still emitted and recorded.
+        #[arg(long)]
+        review_outdated: bool,
     },
     /// Parse the reviewer registry and report any problems, without running a
     /// reviewer or spending a model call.
@@ -251,6 +255,7 @@ pub async fn run() -> Result<ExitCode> {
             pr,
             reviewers,
             fresh,
+            review_outdated,
         } => {
             let cwd = std::env::current_dir().wrap_err("determining the current directory")?;
             // Parse the `--repo`/`--pr` pair into a GitHub source at the boundary so an
@@ -282,6 +287,7 @@ pub async fn run() -> Result<ExitCode> {
                 github,
                 only: reviewers,
                 fresh,
+                review_outdated,
                 includes: cli.includes,
             };
             let decision = crate::commands::review(&layout, &cwd, options, review_user_dir).await?;
@@ -453,13 +459,29 @@ mod tests {
         let cli = Cli::parse_from(["bastion", "review"]);
         match cli.command {
             Command::Review {
-                reviewers, fresh, ..
+                reviewers,
+                fresh,
+                review_outdated,
+                ..
             } => {
                 assert!(reviewers.is_empty());
                 assert!(!fresh);
+                assert!(!review_outdated);
             }
             other => panic!("expected review, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn review_outdated_is_an_explicit_opt_in() {
+        let cli = Cli::parse_from(["bastion", "review", "--review-outdated"]);
+        assert!(matches!(
+            cli.command,
+            Command::Review {
+                review_outdated: true,
+                ..
+            }
+        ));
     }
 
     #[test]

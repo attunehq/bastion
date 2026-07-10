@@ -14,6 +14,16 @@ The guiding rule carries over: Bastion does not own your environment, it plugs i
 
 The intended use is the loop from the core design: an agent runs `bastion review`, reads the stream, fixes what blocks, runs it again, and repeats until it is green, before ever opening a PR.
 
+Before routing, `base_freshness.rs` resolves the base. A local branch with a
+configured upstream and a remote-tracking base are fetched from their remote. A
+local branch must contain the fetched upstream tip; otherwise the command exits
+before a run starts. `--review-outdated` permits the run but preserves a
+`run.base-warning` event. Explicit commits, tags, and local branches without an
+upstream skip the check. The runner fetches the same upstream after reviewer
+execution. If its tip changed, the review completes normally and records another
+`run.base-warning`; the local stream renders it and the GitHub reporter adds it
+to the sticky comment. There is no repeated polling during a run.
+
 ### Incremental re-review
 
 The loop's dominant cost is re-executing reviewers that already passed: after fixing one reviewer's findings, a naive re-run re-executes the whole triggered set even though most of it judged content the fix never touched. So a purely local `bastion review` is incremental by default. Every reviewer that resolves to a real verdict is stamped with a *scope digest* (best effort: a reviewer that crashed, timed out, or returned garbage resolves with no digest, and a digest that fails to compute only makes its reviewer uncarryable): a hash of the reviewer's own effective definition, the merge-base commit, the diffs of exactly the changed files its trigger matched (working tree against both the merge base and the base branch's current tip, so a base that advances on covered files invalidates the carry; untracked matched files encoded by kind, executable bit, and content, a symlink by its target), and the `merge_base..HEAD` commit messages that touched those files (the trigger-scoped slice of the stated intent the prompt carries). Reviewers judge the live working tree, so the runner re-derives every digest after the reviewers finish and stamps only the ones that still match: a fresh verdict whose tree changed mid-run loses its stamp (the next run executes that reviewer again), and a *carried* verdict in that situation fails closed outright, since the pass it reused no longer describes the tree the run reports on. On the next run of the same branch, a reviewer whose prior verdict was a **pass** and whose digest is unchanged is *carried*: its prior verdict folds into the run (`"carried": true` on `reviewer.resolved`, no usage, zero duration) without a backend executing, and it still counts in the gate tally. A reviewer whose scoped content changed, which always includes the ones that blocked (the fix touched the files they flagged), executes fresh. Blocks are never carried: re-confirming a block is exactly the loop's next question.

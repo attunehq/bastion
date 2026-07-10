@@ -27,6 +27,15 @@ again, until green.
 bastion review --base main
 ```
 
+Before spending a model call, `bastion review` fetches the remote for a local
+branch base or remote-tracking base. A local branch must contain its configured
+upstream tip. If it is behind or diverged, Bastion exits with an error that asks
+you to rebase against the updated remote. An explicit commit, tag, or local
+branch without an upstream has no upstream to check. Bastion fetches once more
+after the review; if the upstream moved during the run, the completed review
+stands and a `run.base-warning` event asks you to rebase and review again. CI
+includes the same warning in the sticky PR comment.
+
 `bastion review` computes the changeset (working tree vs. `--base`, including
 uncommitted and untracked files), selects the reviewers whose triggers match, and
 renders progress and verdicts. Matched reviewers run in parallel with per-reviewer
@@ -48,6 +57,7 @@ otherwise executing fresh (see
 - `--include <path>` (repeatable): merge an extra reviewer registry file into the repository registry, like an `include:` entry in the root file except that a relative path resolves against the current directory (see [Splitting the registry across files](./authoring-reviewers.md#splitting-the-registry-across-files)). The extra reviewers become part of the effective repository configuration for the run, so `bastion attest` needs the same `--include` flags to re-derive the same configuration hash.
 - `--reviewer <name>` (repeatable; alias `--only`): run only these triggered reviewers. An unknown or untriggered name is an error. Excluding a triggered reviewer makes the run *partial* (see below).
 - `--fresh`: disable the incremental carry below, so no reviewer reuses a prior pass (local or CI). It does not affect attestation replay: a `--repo`/`--pr` run still replays reviewers a verified attestation covers.
+- `--review-outdated`: continue when a local branch base is behind or diverged from its upstream. Bastion still emits and records the outdated-base warning. The post-review check for an upstream move also remains enabled.
 
 ### Re-runs are incremental
 

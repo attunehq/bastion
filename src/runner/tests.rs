@@ -131,6 +131,8 @@ fn ctx(reviewers: &[&Reviewer]) -> ExecContext {
         carried: Default::default(),
         scope_digests: Default::default(),
         attestation_fallback: None,
+        base_warning: None,
+        base_freshness: None,
         limits: SpawnLimits::default(),
     }
 }

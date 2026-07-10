@@ -191,6 +191,10 @@ pub struct ExecContext {
     /// which reviewers execute fresh), so without this the persisted `run.jsonl`
     /// would silently drop the one event that explains why nothing replayed.
     pub attestation_fallback: Option<RunEvent>,
+    /// An outdated-base warning already rendered before reviewer execution.
+    pub base_warning: Option<RunEvent>,
+    /// The start-time upstream snapshot sampled again after reviewer execution.
+    pub base_freshness: Option<crate::base_freshness::BaseFreshness>,
     /// The per-run agent-launch caps ([`SpawnLimits`]) the runner enforces through
     /// the spawn governor it builds for this run. The caller reads them from the
     /// effective registry; a run with none configured takes the conservative
@@ -342,7 +346,10 @@ pub async fn execute_with(
     // decided and rendered before any reviewer was dispatched) followed by the
     // retained `reviewer.started` events, so a replay sees the same sequence the
     // live `emit` produced.
-    let mut events = Vec::with_capacity(started_events.len() + resolved.len() + 3);
+    let mut events = Vec::with_capacity(started_events.len() + resolved.len() + 5);
+    if let Some(warning) = ctx.base_warning.clone() {
+        events.push(warning);
+    }
     if let Some(fallback) = ctx.attestation_fallback.clone() {
         events.push(fallback);
     }
@@ -379,6 +386,19 @@ pub async fn execute_with(
             reviewers,
             public_key: audit.public_key.clone(),
             attested_at: audit.attested_at.clone(),
+        };
+        emit(&event);
+        events.push(event);
+    }
+
+    if let Some(reason) = ctx
+        .base_freshness
+        .as_ref()
+        .and_then(crate::base_freshness::BaseFreshness::post_review_warning)
+    {
+        let event = RunEvent::BaseWarning {
+            run: ctx.run.clone(),
+            reason,
         };
         emit(&event);
         events.push(event);

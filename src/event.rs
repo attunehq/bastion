@@ -179,6 +179,16 @@ pub enum RunEvent {
         /// seal mismatch, a stale binding, and so on).
         reason: String,
     },
+    /// A non-blocking warning about the review base. Emitted when
+    /// `--review-outdated` permits an already-outdated base or when the fetched
+    /// upstream moves while reviewers are running.
+    #[serde(rename = "run.base-warning")]
+    BaseWarning {
+        /// The run id.
+        run: RunId,
+        /// A plain-English description with the base, upstream, and recovery.
+        reason: String,
+    },
     /// The aggregate outcome: the local equivalent of the `bastion` check.
     #[serde(rename = "run.completed")]
     RunCompleted {
@@ -224,6 +234,7 @@ impl RunEvent {
             | RunEvent::ReviewerResolved { run, .. }
             | RunEvent::AttestationReplayed { run, .. }
             | RunEvent::AttestationFallback { run, .. }
+            | RunEvent::BaseWarning { run, .. }
             | RunEvent::RunCompleted { run, .. } => run,
         }
     }

@@ -296,6 +296,23 @@ fn comment_folds_in_a_skills_warning_when_given_one() {
 }
 
 #[test]
+fn comment_surfaces_review_base_warnings() {
+    let mut events = sample_events();
+    events.insert(
+        events.len() - 1,
+        RunEvent::BaseWarning {
+            run: RunId("r-1234".into()),
+            reason: "upstream 'refs/remotes/origin/main' moved while the review was running; rebase and review again".into(),
+        },
+    );
+
+    let body = comment_body(&digest(&events), false, None);
+    assert!(body.contains("> [!WARNING]"));
+    assert!(body.contains("upstream 'refs/remotes/origin/main' moved"));
+    assert!(body.contains("rebase and review again"));
+}
+
+#[test]
 fn comment_folds_in_a_skills_warning_on_a_zero_reviewer_run() {
     // The zero-reviewer comment returns early through its own branch; the warning
     // is inserted before that branch, so it must still ride a no-reviewer run.

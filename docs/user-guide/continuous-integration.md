@@ -153,7 +153,10 @@ The action then, in order:
    re-executing). Best effort: a first push restores nothing and every reviewer
    runs fresh.
 4. **Runs `bastion review`**, diffing against the PR's base and feeding the
-   reviewers the PR's description and discussion via `--repo`/`--pr`.
+   reviewers the PR's description and discussion via `--repo`/`--pr`. Bastion
+   fetches the remote-tracking base before the review and samples it again at
+   the end. If it moved during the run, the sticky comment warns that the branch
+   should be rebased and reviewed again.
 5. **Uploads the run as an artifact**, so the next push can restore it and so
    the full transcripts are kept.
 6. **Runs `bastion github report`**, posting the sticky comment and the

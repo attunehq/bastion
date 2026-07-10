@@ -38,6 +38,7 @@
 
 pub mod attest;
 pub mod backend;
+pub mod base_freshness;
 pub mod carry;
 pub mod cli;
 pub mod commands;

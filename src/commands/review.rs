@@ -49,6 +49,9 @@ pub struct ReviewOptions {
     /// reviewer executes even when its trigger-scoped diff is unchanged since
     /// the branch's previous run ([`crate::carry`]).
     pub fresh: bool,
+    /// Permit a review against a local branch that is behind or diverged from
+    /// its freshly fetched upstream. The warning remains visible and persisted.
+    pub review_outdated: bool,
     /// Extra registry files merged into the repository layer (`--include`,
     /// repeatable), as if the repository registry's `include:` array listed
     /// them. Part of the effective repository config, so they move the config
@@ -113,10 +116,27 @@ pub async fn review(
         github,
         only,
         fresh,
+        review_outdated,
         includes,
     } = options;
     let base = base.as_str();
     let repo_root = git::repo_root(cwd)?;
+    let base_status = crate::base_freshness::check(&repo_root, base)?;
+    if let crate::base_freshness::BaseStatus::Outdated {
+        freshness,
+        base_commit,
+        upstream_commit,
+    } = &base_status
+        && !review_outdated
+    {
+        bail!(
+            "review base '{}' is outdated: it resolves to {}, but its freshly fetched upstream '{}' is at {}. Rebase your changes against the updated remote and retry, or pass --review-outdated to review anyway",
+            freshness.base(),
+            base_commit,
+            freshness.upstream(),
+            upstream_commit,
+        );
+    }
     warn_on_stale_skills(&repo_root);
     let branch = git::current_branch(&repo_root)?;
     let (_sources, repo_attestation, config) =
@@ -151,6 +171,15 @@ pub async fn review(
         reviewers: reviewer_refs.clone(),
     };
     render::write_event(&mut out, format, &started)?;
+    let base_warning = base_status
+        .outdated_warning()
+        .map(|reason| RunEvent::BaseWarning {
+            run: run.clone(),
+            reason,
+        });
+    if let Some(warning) = &base_warning {
+        render::write_event(&mut out, format, warning)?;
+    }
 
     if matched.is_empty() {
         // No reviewer triggered: a trivial, honest pass. Persist it so the run is
@@ -170,8 +199,22 @@ pub async fn review(
             cache_read: 0,
             cost_usd: Money::from_cents(0),
         };
+        let moved_warning = base_status
+            .freshness()
+            .and_then(crate::base_freshness::BaseFreshness::post_review_warning)
+            .map(|reason| RunEvent::BaseWarning {
+                run: run.clone(),
+                reason,
+            });
+        if let Some(warning) = &moved_warning {
+            render::write_event(&mut out, format, warning)?;
+        }
         render::write_event(&mut out, format, &completed)?;
-        store::write_run(layout, &run, &[started, completed])?;
+        let mut events = vec![started];
+        events.extend(base_warning);
+        events.extend(moved_warning);
+        events.push(completed);
+        store::write_run(layout, &run, &events)?;
         return Ok(Decision::Pass);
     }
 
@@ -301,6 +344,8 @@ pub async fn review(
         scope_digests,
         digest_probe,
         attestation_fallback,
+        base_warning,
+        base_freshness: base_status.freshness().cloned(),
         limits: config.limits,
     };
 

@@ -27,6 +27,7 @@ through it.
 | [`src/context.rs`](../../src/context.rs) | The transport-neutral review context (`ReviewContext`): the author's stated intent, the surrounding discussion (`ContextComment` with a generic `Standing`), and a reviewer's prior findings (`PriorFinding`, keyed by a content-derived `FindingId`). A producer fills it; the backends consume it through `render_for`. Everything in it is untrusted input. |
 | [`src/event.rs`](../../src/event.rs) | The run-event schema streamed as JSONL and persisted to `run.jsonl`. |
 | [`src/git.rs`](../../src/git.rs) | The git queries the CLI needs (changed files, branch, repo root, and the `base..HEAD` commit messages that serve as local intent when there is no PR body). |
+| [`src/base_freshness.rs`](../../src/base_freshness.rs) | Fetches a branch base's configured upstream before review, rejects a base that does not contain the fetched tip unless `--review-outdated` is set, and samples the same upstream after review for the non-blocking `run.base-warning` race notice. Explicit commit bases have no upstream check. |
 | [`src/paths.rs`](../../src/paths.rs) | The data-directory layout (`Layout`), resolved by platform convention or `BASTION_DATA_DIR`. Maps a reviewer name to a portable run-store path component (`path_component`), so the `repo:` merge sentinel cannot produce an unwritable path; `config.rs` enforces that distinct names never collapse to the same component. |
 | [`src/store.rs`](../../src/store.rs) | Run-history persistence: writing/reading `run.jsonl`, listing and pruning runs, and resolving a branch's most recent run once per review (`latest_run_on_branch`), from which the review context takes its prior findings (`findings_from_events`) and carry planning takes the run to reuse. |
 | [`src/render.rs`](../../src/render.rs) | Human and JSONL output (`Format`). |
@@ -83,7 +84,11 @@ Following one review top to bottom touches most of the crate:
    are absent. The merged set is parsed into
    `Config` and validated (unique names, unique run-store path components, and
    non-empty prompts). Malformed input fails here, before any agent runs.
-3. **Compute the changeset** (`git.rs`). Bastion asks git for the files that differ
+3. **Check the base and compute the changeset** (`base_freshness.rs`, `git.rs`).
+   A local branch base with a configured upstream and a remote-tracking base are
+   fetched before routing. A local branch that does not contain the fetched tip
+   errors unless `--review-outdated` is set. Explicit commits have no upstream
+   check. Bastion then asks git for the files that differ
    from `--base` (tracked edits *and* untracked files, committed or not) plus the
    current branch and repo root.
 4. **Route** (`routing.rs`). Each reviewer's trigger globs are compiled and matched
@@ -161,7 +166,10 @@ Following one review top to bottom touches most of the crate:
    (with a synthetic blocking finding); an advisor that fails is dropped. A replayed
    verdict carries the same policy as if it had executed, so a replayed block still
    blocks. The aggregate is `block` if any gate blocked, else `pass`.
-8. **Emit & persist** (`render.rs`, `store.rs`, `seal.rs`). Events stream out as
+8. **Emit & persist** (`base_freshness.rs`, `render.rs`, `store.rs`, `seal.rs`).
+   After reviewer execution, Bastion fetches the same upstream once. A moved tip
+   emits a non-blocking `run.base-warning`, which is persisted for the GitHub
+   comment. Events stream out as
    human text or JSONL as they happen; the full event stream, plus per-reviewer
    transcript, verdict, and metadata, is written under the run's directory, and
    `latest` is updated. The runner then seals an eligible run on a best-effort

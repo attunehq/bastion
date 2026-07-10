@@ -106,6 +106,7 @@ fn write_event_human<W: Write>(out: &mut W, event: &RunEvent) -> io::Result<()> 
         RunEvent::AttestationFallback { reason, .. } => {
             writeln!(out, "  attestation not honored: {reason}")
         }
+        RunEvent::BaseWarning { reason, .. } => writeln!(out, "  warning: {reason}"),
         RunEvent::RunCompleted {
             verdict,
             gates,

@@ -187,6 +187,8 @@ struct RunDigest {
     /// or was simply never offered on this commit (a missing note is not a refusal
     /// and records no event), so an un-attested PR draws no attestation line.
     attestation_fallback: Option<String>,
+    /// Review-base warnings recorded before or after reviewer execution.
+    base_warnings: Vec<String>,
     /// Whether the run was narrowed to a subset of the triggered reviewers
     /// (`bastion review --reviewer`). A partial verdict must never read as a
     /// full one, on any surface.
@@ -298,6 +300,9 @@ fn digest(events: &[RunEvent]) -> RunDigest {
             }
             RunEvent::AttestationFallback { reason, .. } => {
                 digest.attestation_fallback = Some(reason.clone());
+            }
+            RunEvent::BaseWarning { reason, .. } => {
+                digest.base_warnings.push(reason.clone());
             }
         }
     }

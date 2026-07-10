@@ -37,6 +37,9 @@ pub(super) fn comment_body(
         out.push_str(&attestation_fallback_callout(reason));
         out.push('\n');
     }
+    for warning in &digest.base_warnings {
+        out.push_str(&format!("> [!WARNING]\n> {warning}\n"));
+    }
 
     // A carried reviewer never dispatched a backend this run: its prior pass was
     // reused because its trigger-scoped diff was unchanged. Flag it at comment
