@@ -131,6 +131,7 @@ fn ctx(reviewers: &[&Reviewer]) -> ExecContext {
         carried: Default::default(),
         scope_digests: Default::default(),
         attestation_fallback: None,
+        limits: SpawnLimits::default(),
     }
 }
 
@@ -1155,6 +1156,105 @@ async fn a_tree_dirtied_mid_run_still_seals_dirty_true() {
     assert!(
         seal.dirty,
         "an untracked file present at seal time must seal dirty: true even when the pre-run sample was clean"
+    );
+}
+
+// -----------------------------------------------------------------------
+// Spawn caps: a tripped governor aborts the run
+// -----------------------------------------------------------------------
+
+/// A [`CommandRunner`](crate::backend::command::CommandRunner) whose every launch
+/// dies at zero tokens (exit 127, no stdout), standing in for the respawn-storm
+/// signature so the run-level abort can be exercised through the real governor.
+#[derive(Debug, Default)]
+struct DeadRunner;
+
+impl crate::backend::command::CommandRunner for DeadRunner {
+    async fn run(
+        &self,
+        _spec: &crate::backend::command::CommandSpec,
+    ) -> Result<crate::backend::command::CommandOutput> {
+        Ok(crate::backend::command::CommandOutput {
+            code: Some(127),
+            stdout: String::new(),
+            stderr: "command not found".into(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_spawn_storm_trips_the_breaker_and_aborts_the_run() {
+    use crate::backend::command::{CommandRunner as _, CommandSpec};
+    use crate::backend::governor::GovernedRunner;
+
+    let g1 = reviewer("g1", Mode::Gate);
+    let g2 = reviewer("g2", Mode::Gate);
+    let g3 = reviewer("g3", Mode::Gate);
+    let reviewers = [&g1, &g2, &g3];
+    let mut ctx = ctx(&reviewers);
+    // Trip after two consecutive dead launches; three reviewers each launch a dead
+    // agent, so the breaker trips well inside the fan-out.
+    ctx.limits = SpawnLimits {
+        max_consecutive_failures: 2,
+        ..SpawnLimits::default()
+    };
+    // Bindings that would seal a healthy full run; an aborted run must not seal.
+    ctx.seal = Some(seal_bindings(&["g1", "g2", "g3"]));
+
+    let tmp = tempfile::tempdir().unwrap();
+    let layout = Layout::with_root(tmp.path().to_path_buf());
+    std::mem::forget(tmp);
+
+    // Drive each reviewer's launch through a GovernedRunner over the run's shared
+    // governor (carried on the request), so the real cap logic runs: every launch
+    // dies at zero tokens and the shared breaker trips.
+    let exec = move |req: OwnedRequest| -> ReviewFuture {
+        Box::pin(async move {
+            let runner = GovernedRunner::new(DeadRunner, req.governor.clone());
+            let out = runner.run(&CommandSpec::new("agent", ".")).await?;
+            Err(color_eyre::eyre::eyre!(
+                "codex exited with status {}",
+                out.code.unwrap_or(-1)
+            ))
+        })
+    };
+
+    let mut events = Vec::new();
+    let result = execute_with(
+        &reviewers,
+        &ctx,
+        &layout,
+        &mut |e| events.push(e.clone()),
+        &exec,
+    )
+    .await;
+
+    let err = result.expect_err("a tripped breaker aborts the run with a clear error");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("aborted this review"), "got: {msg}");
+    assert!(
+        msg.contains("produced no output"),
+        "the abort must name the consecutive-failure cap: {msg}"
+    );
+
+    // The run is still persisted and inspectable, its aggregate a block, but it is
+    // never sealed: an aborted run must not become attestable.
+    let run = RunId("r-exec".into());
+    let persisted = crate::store::read_run(&layout, &run).unwrap();
+    assert!(
+        matches!(
+            persisted.last(),
+            Some(RunEvent::RunCompleted {
+                verdict: Decision::Block,
+                ..
+            })
+        ),
+        "an aborted run persists a blocking run.completed"
+    );
+    assert_eq!(
+        crate::store::read_seal(&layout, &run).unwrap(),
+        None,
+        "an aborted run must never seal"
     );
 }
 

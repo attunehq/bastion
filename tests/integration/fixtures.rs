@@ -256,6 +256,22 @@ pub(crate) fn registry_with_defaults(defaults: &[(&str, &str)], reviewers: &[Rev
     yaml
 }
 
+/// A registry with a top-level `limits:` block, so a scenario can prove the
+/// per-run spend caps parse and take effect through the real load path. Each
+/// `(key, value)` becomes one line under `limits:` (for example
+/// `("max_consecutive_failures", "3")`); `limits` is a sibling of `reviewers:`.
+pub(crate) fn registry_with_limits(limits: &[(&str, &str)], reviewers: &[Reviewer]) -> String {
+    let mut yaml = String::from("limits:\n");
+    for (key, value) in limits {
+        yaml.push_str(&format!("  {key}: {value}\n"));
+    }
+    yaml.push_str("reviewers:\n");
+    for reviewer in reviewers {
+        yaml.push_str(&reviewer.to_yaml());
+    }
+    yaml
+}
+
 /// A registry with the top-level `attestations: true` switch set, so a CI-path
 /// review looks up an attestation note instead of ignoring the feature entirely.
 /// `attestations` is a sibling of `reviewers:`, not a `defaults:` sub-key, so it

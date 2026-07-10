@@ -28,6 +28,7 @@ use color_eyre::eyre::{Context, Result, bail, eyre};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
+use crate::limits::SpawnLimits;
 use crate::reviewer::{Backend, Effort, ModelId, PromptSource, Reviewer};
 
 /// The canonical registry file name at the repository root.
@@ -96,6 +97,14 @@ pub struct Config {
     /// opts in explicitly. Only the root registry file may set this; an included
     /// file that tries is a load error rather than a silent no-op.
     pub attestations: bool,
+    /// The per-run agent-launch caps ([`SpawnLimits`]) the runner enforces for a
+    /// review of this repository, bounding how much a single `bastion review` can
+    /// spend on its agent fan-out. Only the root registry file may set them (like
+    /// `attestations`); any field left out takes its conservative default, and a
+    /// registry with no `limits:` block at all runs fully capped by the defaults.
+    /// They do not move the attestation hash: a cap is an operational safety net,
+    /// not review policy that changes what a reviewer concludes.
+    pub limits: SpawnLimits,
     /// The reviewers defined for this repository, in file order: the root file's
     /// first, then each include's (depth-first, in `include:` order).
     pub reviewers: Vec<Reviewer>,
@@ -135,6 +144,11 @@ struct RawFile {
     defaults: Defaults,
     #[serde(default)]
     attestations: Option<bool>,
+    /// The per-run spend caps. Like `attestations`, an `Option` so loading can
+    /// tell "the file says nothing" (defaults apply) from "the file sets them",
+    /// and only the root file may set them.
+    #[serde(default)]
+    limits: Option<SpawnLimits>,
     /// Further registry files to merge in, resolved relative to this file's
     /// directory. Includes recurse; a file reached twice (a diamond, or a cycle)
     /// merges once.
@@ -648,6 +662,7 @@ impl Loader {
         let RawFile {
             defaults,
             attestations,
+            limits,
             include,
             reviewers,
         } = raw;
@@ -658,6 +673,15 @@ impl Loader {
             // than silently ignore or honor it.
             Some(_) => bail!(
                 "{label} sets `attestations`, but only the root registry file may; move the key there"
+            ),
+            None => {}
+        }
+        match limits {
+            Some(value) if root => config.limits = value,
+            // Same reasoning as `attestations`: a spend cap buried in an included
+            // file is policy hiding away from the root. Reject it there.
+            Some(_) => bail!(
+                "{label} sets `limits`, but only the root registry file may; move the key there"
             ),
             None => {}
         }

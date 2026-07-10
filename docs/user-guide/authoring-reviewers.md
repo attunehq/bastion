@@ -18,8 +18,8 @@ fields you will reach for only occasionally.
 The repository's reviewers live in a file at its root: `.bastion.yaml` (the
 `.bastion.yml` spelling is also honored). Bastion finds it by walking up from the
 current directory, so the command works anywhere inside the repo. The file is a
-top-level mapping with a `reviewers:` list plus three optional keys, `defaults:`,
-`attestations:`, and `include:`:
+top-level mapping with a `reviewers:` list plus four optional keys, `defaults:`,
+`attestations:`, `limits:`, and `include:`:
 
 ```yaml
 attestations: true   # optional, default off; see below
@@ -27,6 +27,9 @@ attestations: true   # optional, default off; see below
 defaults:             # optional; see "Registry-wide defaults"
   model: gpt-5
   effort: high
+
+limits:               # optional; see "Bounding a run's spend"
+  max_concurrent: 8
 
 include:              # optional; see "Splitting the registry across files"
   - reviewers/security.yaml
@@ -49,6 +52,11 @@ signed local run instead of re-executing every reviewer; see [Attesting a run
 so CI can replay it](./continuous-integration.md#attesting-a-run-so-ci-can-replay-it).
 Only the root registry file may set it; an included file that tries is a load
 error.
+
+`limits:` bounds how much one `bastion review` may spend on its agent fan-out, so
+a broken or looping run fails fast instead of multiplying cost; see [Bounding a
+run's spend](#bounding-a-runs-spend). Conservative defaults apply even with no
+`limits:` block, and like `attestations:`, only the root registry file may set it.
 
 Reviewer **names must be unique** across the merged registry (the root file plus
 everything it includes); a duplicate name is a load error that names both files. A
@@ -74,8 +82,8 @@ A registry can spread across files without changing what it means. The top-level
 `include:` array names further registry files whose reviewers merge into the
 including file's, in order: the including file's own reviewers first, then each
 include's. An included file has the same schema as the root one (its own
-`reviewers:`, `defaults:`, and even `include:`, so includes nest), with one
-exception: only the root file may set `attestations:`.
+`reviewers:`, `defaults:`, and even `include:`, so includes nest), with two
+exceptions: only the root file may set `attestations:` or `limits:`.
 
 ```yaml
 # .bastion.yaml
@@ -196,6 +204,46 @@ pin a `backend`; an inherited model under `backend: any` is rejected the same wa
 an explicit one is. `defaults` sits *above* each backend's own built-in default
 (Opus 4.8 at `high` effort on Claude Code), so the resolution order is: the
 reviewer's own field, then `defaults`, then the backend default.
+
+## Bounding a run's spend
+
+Every reviewer shells out to an agent, and an agent run costs tokens. Nothing in
+the routing bounds the *total* cost of a fan-out on its own: a reviewer whose
+agent fails to start is retried, a transient spawn or authentication failure can
+turn into a respawn loop, and a run that is quietly broken keeps launching agents
+until something outside Bastion notices. An optional top-level `limits:` block is
+the spend cap that stops that. Every field is optional and takes a conservative
+default, so a registry with no `limits:` block still runs fully capped:
+
+```yaml
+limits:
+  max_concurrent: 8            # most agents running at once (default 8)
+  max_total_spawns: 60         # most agent launches in one review run (default 60)
+  max_consecutive_failures: 4  # dead launches in a row before aborting (default 4)
+```
+
+- **`max_concurrent`** bounds how many agents run at the same time, and so the
+  peak concurrent spend. A run with more matched reviewers than this still runs
+  them all; the extras queue until a slot frees.
+- **`max_total_spawns`** caps how many agent launches one review run may make in
+  total. Every launch counts, including a reprompt for a malformed verdict and a
+  launch that dies immediately, so a respawn storm trips this even though its
+  spawns did no real work. A healthy full run spends a small fraction of the
+  default.
+- **`max_consecutive_failures`** trips a breaker when this many agent launches in
+  a row produce no output at all: the signature of a broken or unauthenticated
+  agent CLI (an exit-127, a failed login) that launches, dies at zero tokens, and
+  would otherwise be retried forever. A single productive launch resets the count,
+  so an occasional transient failure never trips it.
+
+Reaching any cap **aborts the whole run** with a clear error rather than
+continuing to spend: the run is recorded (every reviewer that had launched fails
+closed) but never sealed, and `bastion review` exits non-zero. The message names
+what was capped, how many agents launched, and why it stopped. The defaults leave
+a healthy run untouched while turning a runaway one into a loud, fast failure; set
+the block only if your fan-out is genuinely larger than the defaults allow, or if
+you want tighter caps than the defaults. Like `attestations:`, only the root
+registry file may set `limits:`.
 
 ## The required fields
 

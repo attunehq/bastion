@@ -301,6 +301,7 @@ pub async fn review(
         scope_digests,
         digest_probe,
         attestation_fallback,
+        limits: config.limits,
     };
 
     // The runner streams the per-reviewer and completion events; render each as it

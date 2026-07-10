@@ -31,7 +31,8 @@ through it.
 | [`src/store.rs`](../../src/store.rs) | Run-history persistence: writing/reading `run.jsonl`, listing and pruning runs, and resolving a branch's most recent run once per review (`latest_run_on_branch`), from which the review context takes its prior findings (`findings_from_events`) and carry planning takes the run to reuse. |
 | [`src/render.rs`](../../src/render.rs) | Human and JSONL output (`Format`). |
 | [`src/text.rs`](../../src/text.rs) | Shared text helpers (`truncate`), used by `render.rs` and the GitHub reporter. |
-| [`src/runner/`](../../src/runner/) | The parallel, timeout-bounded runner: fans matched reviewers out over a `JoinSet`, fails closed on error/timeout, streams events, folds in replayed and carried verdicts, persists each run, and seals an eligible (full, never partial) run on a best-effort basis at persist time. `mod.rs` is the orchestration core; `verdicts.rs`, `seal.rs`, and `persist.rs` split out verdict folding, run sealing, and persistence. |
+| [`src/runner/`](../../src/runner/) | The parallel, timeout-bounded runner: fans matched reviewers out over a `JoinSet`, fails closed on error/timeout, streams events, folds in replayed and carried verdicts, persists each run, and seals an eligible (full, never partial) run on a best-effort basis at persist time. It also builds one per-run [`SpawnGovernor`](../../src/backend/governor.rs) from the effective [`SpawnLimits`](../../src/limits.rs) and aborts a run (persisted, never sealed) whose fan-out trips a cap. `mod.rs` is the orchestration core; `verdicts.rs`, `seal.rs`, and `persist.rs` split out verdict folding, run sealing, and persistence. |
+| [`src/limits.rs`](../../src/limits.rs) | The per-run spend caps (`SpawnLimits`): the concurrency, total-launch, and consecutive-dead-launch ceilings that bound one review's agent fan-out. Parsed from the root registry's optional `limits:` block (conservative defaults otherwise), enforced by the spawn governor. Not part of the attestation hash: a cap is an operational safety net, not review policy. |
 | [`src/carry.rs`](../../src/carry.rs) | Incremental re-review: computes each triggered reviewer's trigger-scoped diff digest (`scope_digest`) and plans which prior passes carry forward on a re-run of the same branch (`plan`). Both local and CI runs; a repository reviewer carries only from a prior run whose seal verifies. See [the local surface](./local-surface.md#incremental-re-review). |
 | [`src/seal.rs`](../../src/seal.rs) | The run seal: an HMAC-SHA256 over a canonical digest of the committed HEAD tree, the merge-base tree, the `base..HEAD` patch-id, the effective reviewer config, whether a test seam was active, whether the working tree was dirty (sampled before reviewers ran and again at seal time, dirty if either sample was), and the resolved reviewer events, keyed by a secret embedded in the binary at build time. Sealed by the runner, verified by `bastion attest` and CI; a run sealed dirty cannot be attested. See [Attestation](./attestation.md). |
 | [`src/attest/`](../../src/attest/) | Attestation, split by concern: `mod.rs` is the `bastion attest` flow (verifies a run's seal, re-derives the repository state, signs a bundle, writes the git note), `bundle.rs` the bundle and note envelope, `sign.rs` SSH signing and signing-key resolution, and `replay.rs` the CI-side verify-and-replay planner (`plan`, `AttestationOutcome`) plus note lookup. See [Attestation](./attestation.md). |
@@ -140,12 +141,15 @@ Following one review top to bottom touches most of the crate:
     stay complementary (replay reuses the author's signed local run, carry reuses
     CI's own prior run). See
     [the local surface](./local-surface.md#incremental-re-review).
-6. **Run** (`runner/`). `execute` spawns every matched reviewer that is neither
-   replaying nor carrying onto a `JoinSet`, bounds each by its `timeout` (default
-   15m), and emits `reviewer.started` up front (including for replayed and carried
-   reviewers, so the plan reads the same either way). Each spawned task calls `backend::dispatch`
+6. **Run** (`runner/`). `execute` builds one per-run `SpawnGovernor` from the
+   effective `SpawnLimits` (`src/backend/governor.rs`, `src/limits.rs`), then spawns
+   every matched reviewer that is neither replaying nor carrying onto a `JoinSet`,
+   bounds each by its `timeout` (default 15m), and emits `reviewer.started` up front
+   (including for replayed and carried reviewers, so the plan reads the same either
+   way). Each spawned task calls `backend::dispatch`
    (`backend/mod.rs`), which resolves the reviewer's `ExecutionPlan` (failing closed
-   on an unprovisioned capability tier), selects the concrete backend, and runs the
+   on an unprovisioned capability tier), selects the concrete backend, wraps its
+   subprocess seam in the shared governor, and runs the
    agent either natively or inside a container for a reviewer with a `runner` block
    and `capabilities.network: true` (`backend/container/`; see
    [Containers](./containers.md)). A replayed or carried reviewer skips dispatch
