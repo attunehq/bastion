@@ -1019,6 +1019,28 @@ findings:
     }
 
     #[tokio::test]
+    async fn a_reprompt_that_fails_with_an_error_event_is_classified() {
+        // Symmetry with the first pass: if the reprompt turn itself hits a fatal error
+        // (e.g. the auth expired between passes) and produces no verdict, the classified
+        // reason is surfaced, not the generic "did not emit a schema-conforming verdict".
+        let malformed = ok_output(stream(&["I forgot the schema."], None));
+        let auth_failed = ok_output(failed_stream("Unauthorized: your session has expired."));
+        let (outcome, specs) = review_with(&reviewer(), [malformed, auth_failed]).await;
+        let err = outcome
+            .expect_err("fails closed on a failed reprompt")
+            .to_string();
+        assert!(
+            err.contains("codex login"),
+            "actionable hint on the reprompt: {err}"
+        );
+        assert!(
+            !err.contains("did not emit a schema-conforming verdict"),
+            "the specific reason wins over the generic message: {err}"
+        );
+        assert_eq!(specs.len(), 2);
+    }
+
+    #[tokio::test]
     async fn malformed_output_triggers_one_reprompt_then_succeeds() {
         let bad = ok_output(stream(&["I reviewed it but forgot the schema."], None));
         let good = ok_output(stream(
