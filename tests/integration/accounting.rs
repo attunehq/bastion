@@ -291,3 +291,92 @@ fn a_large_mixed_registry_resolves_every_reviewer_and_persists() {
         );
     }
 }
+
+/// The spend safety net, end to end: a respawn storm of dead agent launches trips
+/// the consecutive-failure breaker and aborts the whole run with a clear error,
+/// instead of spending through every reviewer. This is the incident's signature
+/// (an agent that launches, dies at zero tokens, and would otherwise keep being
+/// retried) reproduced through the real dispatch path and the registry's own
+/// `limits:` block.
+#[test]
+fn a_respawn_storm_of_dead_launches_trips_the_breaker_and_aborts() {
+    let Some(fake) = tooling() else { return };
+
+    // Five gate reviewers whose fake agent crashes (exits non-zero with no stdout,
+    // the dead-spawn signature), with the breaker set to trip after three in a row.
+    let names = ["storm0", "storm1", "storm2", "storm3", "storm4"];
+    let reviewers: Vec<Reviewer> = names
+        .iter()
+        .map(|name| Reviewer::new(name, "codex", "gate").behavior("crash"))
+        .collect();
+    let repo = TestRepo::new(&registry_with_limits(
+        &[("max_consecutive_failures", "3")],
+        &reviewers,
+    ));
+
+    let run = repo.review(fake);
+
+    assert_eq!(
+        run.code,
+        Some(1),
+        "an aborted run exits non-zero; stderr:\n{}",
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains("aborted this review"),
+        "the abort must be surfaced loudly on stderr; stderr:\n{}",
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains("produced no output"),
+        "the abort must name the dead-spawn breaker; stderr:\n{}",
+        run.stderr
+    );
+
+    // The run is still persisted with a blocking aggregate (every launched reviewer
+    // failed closed), but it is never sealed: an aborted run must not be attestable.
+    let (decision, _gates, _cost) = run.completed();
+    assert_eq!(decision, Decision::Block);
+    let run_id = repo.latest_run_id();
+    assert!(
+        bastion::store::read_seal(&repo.layout(), &run_id)
+            .unwrap()
+            .is_none(),
+        "an aborted run must never seal"
+    );
+}
+
+/// A registry `limits:` block sets the caps: a run under a generous breaker never
+/// trips on the same dead launches that abort it under a strict one, proving the
+/// configured cap (not just the built-in default) is what takes effect.
+#[test]
+fn a_generous_limit_lets_a_run_that_a_strict_one_would_abort_complete() {
+    let Some(fake) = tooling() else { return };
+
+    // Two crashing gates: dead launches, but only two, so a breaker that tolerates
+    // three consecutive failures never trips. The run completes as an ordinary
+    // fail-closed block rather than an abort.
+    let reviewers = vec![
+        Reviewer::new("crash-a", "codex", "gate").behavior("crash"),
+        Reviewer::new("crash-b", "codex", "gate").behavior("crash"),
+    ];
+    let repo = TestRepo::new(&registry_with_limits(
+        &[("max_consecutive_failures", "3")],
+        &reviewers,
+    ));
+
+    let run = repo.review(fake);
+
+    // A block, not an abort: exit non-zero, but no abort error on stderr.
+    assert_eq!(run.code, Some(1), "stderr:\n{}", run.stderr);
+    assert!(
+        !run.stderr.contains("aborted this review"),
+        "two dead launches must not trip a breaker set to three; stderr:\n{}",
+        run.stderr
+    );
+    let (decision, gates, _cost) = run.completed();
+    assert_eq!(decision, Decision::Block);
+    assert_eq!(gates.total, 2);
+    assert_eq!(gates.blocked, 2, "both crashing gates fail closed");
+    assert_eq!(run.resolved_count(), 2, "every reviewer still resolved");
+}

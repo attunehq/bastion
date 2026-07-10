@@ -19,6 +19,7 @@ stays pure orchestration.
 | --- | --- |
 | [`mod.rs`](../../src/backend/mod.rs) | The `Backend` trait, `ReviewRequest`/`ReviewOutcome`, `MockBackend`, `dispatch`, and the shared prompt/helpers (`changeset_preamble`, `EXHAUSTIVE_FINDINGS_INSTRUCTION`, `context_segment`, `interpolate`, `money_from_dollars`). |
 | [`command.rs`](../../src/backend/command.rs) | The `CommandRunner` subprocess seam: `CommandSpec` and `SystemCommandRunner`, plus a fake runner for tests. |
+| [`governor.rs`](../../src/backend/governor.rs) | The spawn governor: `GovernedRunner` (a `CommandRunner` decorator) and `SpawnGovernor`, the per-run spend caps enforced at the seam. See [The spawn governor](#the-spawn-governor). |
 | [`claude_code.rs`](../../src/backend/claude_code.rs) | The Claude Code backend. |
 | [`codex.rs`](../../src/backend/codex.rs) | The Codex backend. |
 | [`pi.rs`](../../src/backend/pi.rs) | The Pi backend. |
@@ -48,14 +49,21 @@ fabricated pass.
 ## Dispatch
 
 `dispatch` resolves the reviewer's [`ExecutionPlan`](./containers.md), then selects
-a concrete backend:
+a concrete backend. It takes the run's shared [`SpawnGovernor`](#the-spawn-governor)
+and wraps the host `SystemCommandRunner` in a `GovernedRunner` so every launch on
+either path passes through the spend caps:
 
 ```rust
 match ExecutionPlan::resolve(request.reviewer)? {
-    ExecutionPlan::Native        => run_backend(request, SystemCommandRunner, Program::HostDefault).await,
+    ExecutionPlan::Native        => {
+        let runner = GovernedRunner::new(SystemCommandRunner, governor.clone());
+        run_backend(request, runner, Program::HostDefault).await
+    }
     ExecutionPlan::Container(plan) => {
-        let image = plan.ensure_image(&engine, &SystemCommandRunner, repo_root).await?;
-        run_backend(request, ContainerRunner::new(..., image, ...), Program::InContainer).await
+        // The image build shells out too, so it is governed like any other launch.
+        let base  = GovernedRunner::new(SystemCommandRunner, governor.clone());
+        let image = plan.ensure_image(&engine, &base, repo_root).await?;
+        run_backend(request, ContainerRunner::new(base, ..., image, ...), Program::InContainer).await
     }
 }
 ```
@@ -112,6 +120,37 @@ The `BASTION_CLAUDE_BIN`/`BASTION_CODEX_BIN`/`BASTION_PI_BIN` overrides that poi
 backend at a fake executable are recorded in the run seal as an active test seam
 (`src/seal.rs`); a run sealed with one active cannot be attested (see
 [Attestation](./attestation.md)).
+
+### The spawn governor
+
+Because every agent launch is a `CommandRunner::run` call, that seam is also the one
+place to *bound* launches. [`governor.rs`](../../src/backend/governor.rs) defines
+`GovernedRunner<R>`, a `CommandRunner` decorator wrapping the real runner, and
+`SpawnGovernor`, the per-run state it shares. One `Arc<SpawnGovernor>` is built in the
+runner (`src/runner/mod.rs`) for the whole review and threaded through `dispatch` so
+every reviewer, container image build included, draws from the same budget.
+
+`GovernedRunner::run` does three things around the inner call: it `admit`s (awaiting a
+concurrency permit and refusing once a cap has tripped), runs the inner runner, then
+`record`s whether the launch was a *dead spawn*. A dead spawn is the incident's
+signature: a process that exits non-zero having produced no stdout (`Err`, or a
+non-success `CommandOutput` with empty stdout), the shape of an agent CLI that dies at
+0 tokens on a bad install, a failed login, or exit 127. The caps come from
+[`SpawnLimits`](../../src/limits.rs): `max_concurrent` bounds fan-out width via a
+semaphore, `max_total_spawns` caps launch attempts over the whole run, and
+`max_consecutive_failures` trips the moment that many dead spawns land back to back. A
+productive launch resets the consecutive counter, so a run that is merely slow or has
+the odd failure is unaffected; only a genuine respawn storm trips it.
+
+Crucially the counter increments on *every* admitted launch, dead ones included, so a
+loop that respawns a crashing CLI still marches toward `max_total_spawns` and trips the
+consecutive breaker fast. When a cap trips, `admit` refuses further launches and the
+runner aborts the whole review: it forces the aggregate to `block`, skips the run seal
+(an aborted run is not attestable, like a partial one), and returns a loud error naming
+what was capped and how many agents launched. This is the fail-closed direction: the
+gate blocks, it does not silently pass. See [Bounding a run's
+spend](../user-guide/authoring-reviewers.md#bounding-a-runs-spend) for the operator
+view and the defaults.
 
 `ContainerRunner`'s drop guard is the one exception to this seam. `ContainerGuard`
 runs the container teardown (`docker rm -f`) with a direct `std::process::Command` in

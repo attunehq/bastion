@@ -20,6 +20,8 @@
 //! - [`render`]: turning events into human or JSONL output.
 //! - [`backend`]: the agent execution boundary (Claude Code and siblings).
 //! - [`runner`]: the parallel, timeout-bounded runner and aggregation.
+//! - [`limits`]: the per-run spend caps that bound a review's agent fan-out, so a
+//!   broken or respawning run fails loud and fast instead of multiplying cost.
 //! - [`carry`]: incremental re-review, carrying a prior pass forward when a
 //!   reviewer's trigger-scoped diff is unchanged since the branch's last run.
 //! - [`seal`]: the run seal, an HMAC over everything a verdict depends on, that
@@ -44,6 +46,7 @@ pub mod context;
 pub mod event;
 pub mod git;
 pub mod github;
+pub mod limits;
 pub mod paths;
 pub mod render;
 pub mod reviewer;

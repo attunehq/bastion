@@ -13,19 +13,30 @@
 //! crashes, times out, or returns an invalid verdict resolves to **block**, never
 //! a silent pass; an advisor that does the same is ignored.
 //!
+//! The runner also bounds a run's *total* cost. It builds one
+//! [`SpawnGovernor`](crate::backend::governor::SpawnGovernor) per run from the
+//! effective [`SpawnLimits`], shared across every reviewer, so the per-run caps
+//! (concurrency, total launches, and a consecutive-dead-launch breaker) bound the
+//! aggregate agent fan-out. A tripped cap aborts the run: it is persisted (every
+//! affected reviewer failed closed) but never sealed, and [`execute`] returns a
+//! clear error instead of letting a broken, respawning fan-out multiply cost.
+//!
 //! The backend boundary (the [`Backend`] trait, [`ReviewRequest`]/[`ReviewOutcome`],
 //! [`MockBackend`], and dispatch) lives in [`crate::backend`] and is re-exported
 //! here for the call sites that predate the split.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use color_eyre::eyre::{Context, Result};
+use color_eyre::eyre::{Context, Result, eyre};
 use tokio::task::JoinSet;
 
+use crate::backend::governor::SpawnGovernor;
 use crate::backend::{self, ReviewOutcome, ReviewRequest};
 use crate::context::ReviewContext;
 use crate::event::{Gates, ReviewerRef, RunEvent, RunId};
+use crate::limits::SpawnLimits;
 use crate::paths::Layout;
 use crate::reviewer::{Mode, Reviewer};
 use crate::seal::SealBindings;
@@ -73,6 +84,10 @@ pub struct OwnedRequest {
     /// reviewer from the run's [`ExecContext`]; each reviewer's prompt scopes it to
     /// its own concern.
     pub context: ReviewContext,
+    /// The run's shared spawn governor, so every agent launch this request makes
+    /// (including a backend reprompt) counts against the run-wide caps. Cloned from
+    /// the one governor [`execute_with`] builds, so all reviewers share it.
+    pub governor: Arc<SpawnGovernor>,
 }
 
 impl OwnedRequest {
@@ -86,7 +101,7 @@ impl OwnedRequest {
                 base: &self.base,
                 context: &self.context,
             };
-            backend::dispatch(&request).await
+            backend::dispatch(&request, &self.governor).await
         })
     }
 }
@@ -176,6 +191,11 @@ pub struct ExecContext {
     /// which reviewers execute fresh), so without this the persisted `run.jsonl`
     /// would silently drop the one event that explains why nothing replayed.
     pub attestation_fallback: Option<RunEvent>,
+    /// The per-run agent-launch caps ([`SpawnLimits`]) the runner enforces through
+    /// the spawn governor it builds for this run. The caller reads them from the
+    /// effective registry; a run with none configured takes the conservative
+    /// defaults.
+    pub limits: SpawnLimits,
 }
 
 /// The inputs [`crate::carry::scope_digest`] needs beyond the reviewer itself,
@@ -269,9 +289,10 @@ impl Resolved {
 ///
 /// # Errors
 ///
-/// Returns an error only if persistence fails; backend failures are absorbed into
-/// the aggregate per the fail-closed/fail-open policy and never surface as an
-/// error here.
+/// Returns an error if persistence fails, or if the run's spawn governor trips a
+/// per-run cap (a respawn storm or an exhausted launch budget) and aborts the run.
+/// An ordinary backend failure is *not* an error here: it is absorbed into the
+/// aggregate per the fail-closed/fail-open policy.
 pub async fn execute(
     matched: &[&Reviewer],
     ctx: &ExecContext,
@@ -290,7 +311,9 @@ pub async fn execute(
 ///
 /// # Errors
 ///
-/// Returns an error only if persisting the run fails.
+/// Returns an error if persisting the run fails, or if the spawn governor trips a
+/// per-run cap and aborts the run (persisted, unsealed, then surfaced as a clear
+/// top-level error).
 pub async fn execute_with(
     matched: &[&Reviewer],
     ctx: &ExecContext,
@@ -300,11 +323,17 @@ pub async fn execute_with(
 ) -> Result<Decision> {
     let run_started = Instant::now();
 
+    // One spawn governor for the whole run, shared across every reviewer so the
+    // per-run caps bound the *aggregate* fan-out, not each reviewer in isolation.
+    // It counts every agent launch through the backend runner seam, including a
+    // reprompt and a launch that dies at zero tokens.
+    let governor = Arc::new(SpawnGovernor::new(ctx.limits));
+
     // Announce every reviewer in the plan, launch the fresh set concurrently and
     // collect it in registry order, then resolve fresh + replayed + carried rows
     // and re-check each stamped scope digest against the post-run tree.
     let started_events = emit_started_events(ctx, matched, emit);
-    let results = run_fresh(matched, ctx, exec).await;
+    let results = run_fresh(matched, ctx, exec, &governor).await;
     let mut resolved = resolve_all(matched, ctx, results);
     recheck_scope_digests(&mut resolved, ctx);
 
@@ -356,9 +385,13 @@ pub async fn execute_with(
     }
 
     // Aggregate: all gates must pass. A replayed block still blocks the run;
-    // replay never changes an outcome.
+    // replay never changes an outcome. A tripped spawn governor forces a block
+    // regardless of the tally: the run did not complete a real review of the
+    // changeset (it aborted mid-fan-out), so it must never report a pass, even if
+    // every reviewer left standing was an advisor.
+    let breaker = governor.tripped();
     let gates = tally(&resolved);
-    let aggregate = if gates.blocked == 0 {
+    let aggregate = if breaker.is_none() && gates.blocked == 0 {
         Decision::Pass
     } else {
         Decision::Block
@@ -386,7 +419,26 @@ pub async fn execute_with(
     stream.push(completed);
     persist_run(layout, &ctx.run, ctx, &stream)?;
 
-    seal_run(layout, ctx, &stream);
+    // An aborted run is never sealed: like a partial run, its aggregate does not
+    // speak for a full, honest review of the changeset, so it must not become
+    // attestable. Persist it first (it stays inspectable), then skip the seal.
+    if breaker.is_none() {
+        seal_run(layout, ctx, &stream);
+    }
+
+    // A tripped breaker is a run-level failure, not a code-review verdict: surface
+    // it loudly so a broken, respawning fan-out stops with a clear error instead of
+    // being mistaken for an ordinary block. The run is already persisted with every
+    // affected reviewer failed closed; this is the top-level "we stopped, and why".
+    if let Some(reason) = breaker {
+        return Err(eyre!(
+            "bastion aborted this review after launching {} agent(s): {reason}. \
+             No further reviewers were launched and the run was not sealed. This is \
+             usually a broken or unauthenticated agent CLI (a bad install, a failed \
+             login, or exit 127); fix that before re-running.",
+            governor.launched(),
+        ));
+    }
 
     Ok(aggregate)
 }
@@ -442,6 +494,7 @@ async fn run_fresh(
     matched: &[&Reviewer],
     ctx: &ExecContext,
     exec: &ReviewFn,
+    governor: &Arc<SpawnGovernor>,
 ) -> Vec<Option<ReviewTaskResult>> {
     let mut set: JoinSet<(usize, ReviewTaskResult)> = JoinSet::new();
     for (index, reviewer) in matched.iter().enumerate() {
@@ -451,6 +504,7 @@ async fn run_fresh(
             repo_root: ctx.repo_root.clone(),
             base: ctx.base.clone(),
             context: ctx.context.clone(),
+            governor: governor.clone(),
         };
         let timeout = reviewer.timeout.unwrap_or(DEFAULT_TIMEOUT);
         let future = exec(request);

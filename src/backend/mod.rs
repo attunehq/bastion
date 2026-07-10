@@ -13,10 +13,12 @@ pub mod claude_code;
 pub mod codex;
 pub mod command;
 pub mod container;
+pub mod governor;
 pub mod pi;
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use color_eyre::eyre::Result;
 
@@ -29,6 +31,7 @@ use self::claude_code::ClaudeCodeBackend;
 use self::codex::CodexBackend;
 use self::command::{CommandRunner, SystemCommandRunner};
 use self::container::{ContainerEngine, ContainerRunner, ExecutionPlan, credential_passthrough};
+use self::governor::{GovernedRunner, SpawnGovernor};
 use self::pi::PiBackend;
 
 /// Everything a backend is handed to run one reviewer.
@@ -118,31 +121,42 @@ impl Backend for MockBackend {
 /// subprocess seam in a [`ContainerRunner`], so the identical backend code runs
 /// inside the image with its program resolved on the container's `PATH`.
 ///
+/// Every agent launch, native or containerized, runs through a [`GovernedRunner`]
+/// over the shared `governor`, so the run's [`SpawnLimits`](crate::limits::SpawnLimits)
+/// bound the whole fan-out: a launch refused by a tripped breaker or an exhausted
+/// cap returns an error here, which becomes a fail-closed reviewer and, run-wide, an
+/// aborted review rather than an endless retry.
+///
 /// # Errors
 ///
 /// Returns an error if the reviewer opts into a tier this build does not provision or
 /// declares an invalid `runner` (a `runner` with neither source, an absolute or
 /// repo-escaping `dockerfile`, or an option-like `image`; all from the
-/// [`ExecutionPlan::resolve`] preflight), if the container image cannot be built, or if
-/// the selected backend fails to run or cannot produce a verdict. The runner turns any
-/// of these into a fail-closed block for gates.
-pub async fn dispatch(request: &ReviewRequest<'_>) -> Result<ReviewOutcome> {
+/// [`ExecutionPlan::resolve`] preflight), if the container image cannot be built, if the
+/// spawn governor refuses the launch (a tripped breaker or an exhausted cap), or if the
+/// selected backend fails to run or cannot produce a verdict. The runner turns any of
+/// these into a fail-closed block for gates.
+pub async fn dispatch(
+    request: &ReviewRequest<'_>,
+    governor: &Arc<SpawnGovernor>,
+) -> Result<ReviewOutcome> {
     match ExecutionPlan::resolve(request.reviewer)? {
         ExecutionPlan::Native => {
-            run_backend(request, SystemCommandRunner, Program::HostDefault).await
+            let runner = GovernedRunner::new(SystemCommandRunner, governor.clone());
+            run_backend(request, runner, Program::HostDefault).await
         }
         ExecutionPlan::Container(plan) => {
             let engine = ContainerEngine::from_env();
-            let image = plan
-                .ensure_image(&engine, &SystemCommandRunner, request.repo_root)
-                .await?;
+            // The image build shells out too, so it is governed like any other launch:
+            // a `docker build` that fails to start counts toward the same caps.
+            let base = GovernedRunner::new(SystemCommandRunner, governor.clone());
+            let image = plan.ensure_image(&engine, &base, request.repo_root).await?;
             tracing::debug!(
                 reviewer = %request.reviewer.name,
                 image = %image,
                 "running reviewer in a container"
             );
-            let runner =
-                ContainerRunner::new(SystemCommandRunner, engine, image, credential_passthrough());
+            let runner = ContainerRunner::new(base, engine, image, credential_passthrough());
             run_backend(request, runner, Program::InContainer).await
         }
     }
@@ -644,7 +658,9 @@ findings: []
             base: "main",
             context: crate::context::ReviewContext::empty(),
         };
-        let err = dispatch(&request).await.unwrap_err();
+        let err = dispatch(&request, &SpawnGovernor::shared_default())
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("skills"));
     }
 

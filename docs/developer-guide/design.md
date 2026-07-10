@@ -183,7 +183,8 @@ reviewers:
 > `inputs` values are literal strings (no shell `$VAR` expansion). `Config` also
 > parses a top-level `attestations` flag and `Reviewer` an `attestation: never`
 > field; both are honored by the CI verify-and-replay planner (see
-> [Attestation](./attestation.md)). See the
+> [Attestation](./attestation.md)). A top-level `limits` block sets the
+> per-run spend caps (see [Bounding a run's spend](#bounding-a-runs-spend)). See the
 > [honored-fields table](./backends.md#what-a-backend-applies-from-the-profile).
 
 ---
@@ -260,6 +261,18 @@ A reviewer enumerates every finding it can identify for the changeset in one pas
 Bastion requests the structured output, then parses the final agent turn against the schema requested. If the reviewer agent doesn't provide complying output, Bastion re-runs the same session with a new turn explaining the schema again and asking for just the structured output of the work already performed.
 
 Reviewer agents that continually fail (either unable to produce structured output, timeouts, or simple execution failures) are failed closed if they are a gate, and skipped if they are an advisor.
+
+### Bounding a run's spend
+
+Per-reviewer fail-closed handling caps the cost of *one* reviewer, but not the cost of a run that keeps launching agents. A backend CLI that dies at zero tokens (a bad install, a failed login, an exit-127 auth failure) can be respawned in a retry loop, and each respawn is a fresh billable session even though it produces nothing. Without a run-level bound, that loop burns the token budget unattended.
+
+Bastion enforces three caps over a single review run at the agent-spawn seam (`CommandRunner::run`, the one place every launch passes through), so the count includes *every* launch attempt, dead spawns included:
+
+- **`max_concurrent`** bounds how many agents run at once (fan-out width).
+- **`max_total_spawns`** caps total launch attempts before the run aborts.
+- **`max_consecutive_failures`** is the circuit breaker: that many *dead spawns* (a non-zero exit with no output, the zero-token signature) in a row trips it. A single productive launch resets the counter, so an occasional failure or a merely slow run is unaffected; only a genuine respawn storm trips it.
+
+The caps come from a `limits:` block in the root registry, with conservative defaults (see [Bounding a run's spend](../user-guide/authoring-reviewers.md#bounding-a-runs-spend)). This is a safety net against inadvertent spend, not a review-policy input, so it does not enter the run's effective-hash the way a reviewer's prompt does. When a cap trips, the run **aborts in the fail-closed direction**: the aggregate is forced to `block`, the run is persisted but not sealed (an aborted run is no more attestable than a partial one), and the CLI exits with a loud error naming what was capped and how many agents launched. The enforcement lives in the spawn governor ([`src/backend/governor.rs`](../../src/backend/governor.rs)); the caps are [`src/limits.rs`](../../src/limits.rs).
 
 ---
 
