@@ -1,0 +1,7 @@
+{"kind":"bastion-attestation","schema":1,"version":"v0.5.5","attested_at":"2026-07-10T17:08:26Z","public_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBKBzABH32MQTbq+FOccyzJgLh1eBK/hFwDz06bi3LYB jssblck-github-local-GRACE-2026-06-23","seal":{"version":"v0.5.5","head_tree":"5bd61a3ba8bb9a094e8ce47eb76f0cea2007d53b","base_tree":"9c3a4ed4143d0e3e15dec87e148c0b702248b7d5","patch_id":"57bc631dd8236264f2cbbfeaacb05279ded6f636","config_hash":"9b44f597d05f1504c8a64f3a7a4ccd5cc2e4158a11983af76f70a03a6720f648","seams":false,"dirty":false,"reviewers":["user-docs-in-sync"],"mac":"39d44b9c291ce2cfb29a8f534f4346fc114e35158525af42eab3c69b9e5b9f17"},"events":{"user-docs-in-sync":{"duration_ms":95131,"findings":[],"has_transcript":true,"reviewer":"user-docs-in-sync","run":"r-2841d12","scope_digest":"af46a5be7625da1e40651be64c587e2e71c51024faa4978ee67b9555cd9b29b7","summary":"User-guide attestation guidance matches the existing CLI and CI replay behavior.","type":"reviewer.resolved","usage":{"cache_read":255232,"cost_usd":0.0,"tokens_in":349885,"tokens_out":3659},"verdict":"pass"}}}
+-----BEGIN SSH SIGNATURE-----
+U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgEoHMAEffYxBNur4U5xzLMmAuHV
+4Er+EXAPPTpuLctgEAAAAHYmFzdGlvbgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gtZWQy
+NTUxOQAAAEA6S1607hHSUjIjUGiT3ytYRim7Lh7CbVkg1vI1xApPa4yqnd4rcsiZUxMp+G
+RIwtyKQSEa1+mMmK7CZAlx0poP
+-----END SSH SIGNATURE-----
