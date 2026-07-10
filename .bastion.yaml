@@ -17,29 +17,29 @@
 # subscription; see the authentication notes in
 # docs/developer-guide/github-adapter.md. Adapt it to your repository.
 #
-# The registry is deliberately minimal: two reviewers, chosen by catch record.
-# An LLM reviewer runs on every matched changeset forever, so under a
-# subscription token budget the bar for keeping one is a history of real
-# catches on this repository's PRs, not a plausible concern. The two that
-# clear it: `fail-closed-gates` caught shipping safety bugs (the dirty-worktree
-# attestation replay, the carry content-binding holes, verdicts laundered
-# through replay), and `user-docs-in-sync` repeatedly caught the user guide
-# contradicting shipped behavior, once surfacing a real code bug (`bastion
-# validate` documented as rejecting unknown registry fields the loader
-# silently accepted).
+# The registry stays small on purpose. An LLM reviewer runs on every matched
+# changeset forever, so under a subscription token budget a reviewer earns its
+# place with a history of real catches on this repository's PRs, not a plausible
+# concern. Both reviewers here clear that bar. `fail-closed-gates` guards the
+# safety invariant that gates fail closed, the class of bug where a dirty-worktree
+# attestation replay, a carry content-binding hole, or a verdict laundered through
+# replay would ship. `user-docs-in-sync` guards the user guide against drifting
+# from shipped behavior, where a contradiction can hide a real code bug (as when
+# `bastion validate` was documented as rejecting unknown registry fields the
+# loader silently accepted).
 #
-# Concerns cut from the registry live at cheaper layers. Deterministic checks:
-# unwrap/expect discipline and `# Errors` docs are clippy lints in Cargo.toml,
-# Unicode-dash policy is `nudge check`, user-guide frontmatter and link
-# integrity is tests/user_guide_integrity.rs, the skills mirror is
-# tests/skills_mirror.rs, embedded-asset line endings are
-# tests/embedded_asset_eol.rs plus the .gitattributes LF pin, and the
-# installers are exercised end to end on every platform by
-# .github/workflows/installers.yml. Write-time discipline: broad code quality
-# (module boundaries, parse-don't-validate, test coverage) is the repo-local
-# skills under .agents/skills/, and prose voice is the stop-slop skill applied
-# when the text is written. Retired without a replacement: the site-integrity
-# mechanical checks, which never blocked once across the project's history.
+# Concerns a deterministic check or write-time discipline can enforce belong at
+# those cheaper layers, not in an LLM reviewer that spends tokens on every
+# changeset. Deterministic checks: unwrap/expect discipline and `# Errors` docs
+# are clippy lints in Cargo.toml, Unicode-dash policy is `nudge check`, user-guide
+# frontmatter and link integrity is tests/user_guide_integrity.rs, the skills
+# mirror is tests/skills_mirror.rs, and embedded-asset line endings are
+# tests/embedded_asset_eol.rs plus the .gitattributes LF pin. The installers are
+# exercised end to end on every platform by .github/workflows/installers.yml.
+# Write-time discipline: broad code quality (module boundaries,
+# parse-don't-validate, test coverage) is the repo-local skills under
+# .agents/skills/, and prose voice is the stop-slop skill applied when the text is
+# written.
 
 # Let CI replay a signed `bastion attest` run instead of re-executing
 # reviewers; see docs/developer-guide/attestation.md.
@@ -58,16 +58,16 @@ defaults:
   effort: medium
 
 reviewers:
-  # The one reviewer with a proven record of catching shipping bugs (the
-  # dirty-worktree attestation hole, the seal-time TOCTOU, the carry binding
-  # holes), so it keeps high effort. Its trigger is the trust boundary its
-  # prompt already declares as its scope, not all of src/: the modules where a
-  # verdict is produced live, reused, aggregated, sealed, and attested. A
-  # change elsewhere cannot violate the invariant, so it should not pay for
-  # this reviewer. The runner and commands entries are directory globs because
-  # those modules are split into directories; a single-file glob here once went
-  # silently stale after such a split, and src/routing.rs pins these globs
-  # against the real module paths so that cannot recur.
+  # The gate on Bastion's core safety invariant, and the one reviewer whose
+  # misses ship real bugs (a dirty-worktree attestation hole, a seal-time TOCTOU,
+  # a carry binding hole), so it runs at high effort. Its trigger is the trust
+  # boundary its prompt declares as its scope, not all of src/: the modules where
+  # a verdict is produced live, reused, aggregated, sealed, and attested. A change
+  # elsewhere cannot violate the invariant, so it should not pay for this
+  # reviewer. The runner, backend, commands, and attest entries are directory
+  # globs because those modules are split into directories; src/routing.rs pins
+  # these globs against the real module paths so a module move cannot silently
+  # narrow the trigger.
   - name: fail-closed-gates
     trigger:
       [
