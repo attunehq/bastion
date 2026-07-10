@@ -199,11 +199,11 @@ impl<R: CommandRunner> CodexBackend<R> {
         if !output.success() {
             bail!("{}", codex_failure_message(session.as_ref(), &output));
         }
-        let session = session.ok_or_else(|| eyre!("codex produced no output to parse"))?;
-        if session.failure.is_some() {
-            bail!("{}", codex_failure_message(Some(&session), &output));
-        }
-        Ok(session)
+        // A zero exit is not yet success: the caller decides by whether a verdict was
+        // produced. A fatal `error` event that coexists with a valid verdict (a
+        // transient tool error the turn recovered from) must not discard the verdict,
+        // so the failure is not consulted here, only when no verdict is found.
+        session.ok_or_else(|| eyre!("codex produced no output to parse"))
     }
 }
 
@@ -295,7 +295,8 @@ fn looks_like_auth_failure(reason: &str) -> bool {
         "403",
         "forbidden",
         "authenticat",
-        "invalid api key",
+        "api key",
+        "api_key",
         "invalidated",
         "expired",
     ];
@@ -324,30 +325,42 @@ impl<R: CommandRunner> Backend for CodexBackend<R> {
         let first = self.first_spec(request, &prompt);
         let session = self.run_once(&first).await?;
 
+        // A verdict is authoritative even if the stream also carried a transient
+        // `error` event, so it is checked before any failure.
         if let Some(verdict) = session.parse_verdict() {
             return Ok(outcome(verdict, session, None));
         }
 
-        // The agent's final message was not a schema-conforming verdict. Per
-        // design.md, re-run the *same session* asking for just the structured
-        // output, then fail closed. Resume by thread id when Codex reported one;
-        // when resuming, the new turn is only the reprompt suffix (the session
-        // already holds the review). Without a thread id we fall back to a fresh
-        // session and must re-send the full prompt.
+        // No verdict. If Codex reported a fatal error (an auth or usage-limit failure,
+        // a failed turn), that is why: surface it and fail closed rather than
+        // reprompting into the identical failure and spending a second review turn.
+        if let Some(reason) = &session.failure {
+            bail!("{}", classify_codex_failure(reason));
+        }
+
+        // A well-formed run that simply omitted the schema block. Per design.md,
+        // re-run the *same session* asking for just the structured output, then fail
+        // closed. Resume by thread id when Codex reported one; when resuming, the new
+        // turn is only the reprompt suffix (the session already holds the review).
+        // Without a thread id we fall back to a fresh session and must re-send the
+        // full prompt.
         let reprompt_text = super::reprompt_text(&prompt, session.thread_id.is_some());
         let retry = self.reprompt_spec(request, session.thread_id.as_deref(), &reprompt_text);
         let retry_session = self.run_once(&retry).await?;
 
-        match retry_session.parse_verdict() {
-            Some(verdict) => Ok(outcome(verdict, retry_session, Some(&session))),
-            None => Err(eyre!(
-                "codex did not emit a schema-conforming verdict after one reprompt; \
-                 failing closed. final message was:\n{}",
-                retry_session
-                    .final_message()
-                    .unwrap_or("(no agent message)")
-            )),
+        if let Some(verdict) = retry_session.parse_verdict() {
+            return Ok(outcome(verdict, retry_session, Some(&session)));
         }
+        if let Some(reason) = &retry_session.failure {
+            bail!("{}", classify_codex_failure(reason));
+        }
+        Err(eyre!(
+            "codex did not emit a schema-conforming verdict after one reprompt; \
+             failing closed. final message was:\n{}",
+            retry_session
+                .final_message()
+                .unwrap_or("(no agent message)")
+        ))
     }
 }
 
@@ -1193,6 +1206,27 @@ findings:
     }
 
     #[tokio::test]
+    async fn a_transient_error_event_does_not_discard_a_valid_verdict() {
+        // A stream that carried a non-fatal `error` event but then completed with a
+        // real verdict on a zero exit must return that verdict, not a fail-closed
+        // block. Only the *absence* of a verdict, together with a failure, is a
+        // failure; conflating "saw an error event" with "produced no verdict" would
+        // turn a passing review into a false block.
+        let stdout = concat!(
+            "{\"type\":\"thread.started\",\"thread_id\":\"th-ok\"}\n",
+            "{\"type\":\"error\",\"message\":\"transient tool error: retrying\"}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"```yaml\\nverdict: pass\\nsummary: recovered\\n```\"}}\n",
+            "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":2,\"cached_input_tokens\":0,\"cost_usd\":0.01}}\n",
+        );
+        let (outcome, specs) = review_with(&reviewer(), [ok_output(stdout)]).await;
+        let outcome = outcome.expect("a valid verdict survives a transient error event");
+        assert_eq!(outcome.verdict.decision, Decision::Pass);
+        assert_eq!(outcome.verdict.summary, "recovered");
+        // No reprompt: the verdict was found on the first pass.
+        assert_eq!(specs.len(), 1);
+    }
+
+    #[tokio::test]
     async fn zero_exit_with_error_event_fails_closed_without_reprompting() {
         // Codex can exit zero yet still report a fatal error and no verdict. That is
         // not a malformed verdict to reprompt for; it produced no review, so fail
@@ -1278,6 +1312,11 @@ findings:
         assert!(looks_like_auth_failure("401 Unauthorized"));
         assert!(looks_like_auth_failure("Please log in to continue"));
         assert!(looks_like_auth_failure("your API token has expired"));
+        // The common OpenAI credential-error shapes, snake and spaced.
+        assert!(looks_like_auth_failure("Error: invalid_api_key provided"));
+        assert!(looks_like_auth_failure(
+            "Incorrect API key provided: sk-***"
+        ));
         assert!(!looks_like_auth_failure(
             "internal error: stream disconnected"
         ));
