@@ -57,15 +57,23 @@ pass, and whose *scope digest* is unchanged since that run, is *carried*: its
 prior verdict counts in the gate tally, the stream marks it `"carried": true`, and
 no agent runs and no tokens are spent on it. The digest covers everything the
 verdict was keyed to: the reviewer's own definition, the diff of the changed
-files its `trigger` matched (against both the merge base and the base branch's
-current tip), the commit messages that touched those files, and the content of
-untracked matched files. So an edit to a triggered file, a reworded commit that
-touched one, an edited reviewer, or a base branch that moved on covered files all
-re-run the reviewer; the ones that blocked always re-run, since your fix touched
-the files they flagged. Blocks are never carried. The boundary is the reviewer's
-`trigger`: it already declares which files the concern depends on, and carry keys
-the verdict to exactly that. A reviewer with `attestation: never` in the registry
-is never carried, and `--fresh` re-runs everything.
+files its `trigger` matched against the merge base, the commit messages that
+touched those files, and the content of untracked matched files. So an edit to
+a triggered file, a reworded commit that touched one, or an edited reviewer
+re-runs the reviewer; the ones that blocked always re-run, since your fix
+touched the files they flagged. Blocks are never carried.
+
+What deliberately does *not* re-run a reviewer: the base branch moving, or a
+rebase over it, when your scoped diff comes out identical. The digest binds the
+changeset a verdict judged, not the commit it happened to be diffed at, so a
+rebase over unrelated upstream changes carries every pass straight through,
+while one that changes the diff (a conflict resolution, upstream edits close
+enough to shift a hunk's context) re-runs the affected reviewers. What the base
+changed was reviewed by its own changesets when it merged; your reviewers judge
+only what your branch changes. The boundary is the reviewer's `trigger`: it
+already declares which files the concern depends on, and carry keys the verdict
+to exactly that. A reviewer with `attestation: never` in the registry is never
+carried, and `--fresh` re-runs everything.
 
 One extra condition applies to the repository's own reviewers (not personal
 user-level ones): they carry only from a prior run the binary sealed and can still
@@ -146,7 +154,7 @@ The event types:
 | --- | --- |
 | `run.started` | The run began; lists the reviewers in the plan: each executes, replays from a verified attestation, or carries from the branch's previous run (locally or in CI). Under `--reviewer` the list holds only the selected reviewers, and the event carries `partial: true` when that selection excludes at least one triggered reviewer. |
 | `reviewer.started` | One reviewer began: dispatched to its backend, reconstructed from a verified attestation bundle, or carried from the branch's previous run; the latter two dispatch no backend. |
-| `reviewer.resolved` | One reviewer finished; carries its `verdict`, `summary`, `findings`, `usage`, and a `has_transcript` flag. Carries `replayed: true` when the verdict came from a verified attestation, and `carried: true` when it was carried forward from the branch's previous run (local or CI) instead of a fresh execution. A reviewer that produced a real verdict this run (a fresh execution or a carried pass) is also stamped with `scope_digest`, a hash of everything the verdict was keyed to (the reviewer's definition plus its trigger-scoped diffs, commit messages, and untracked content); a later run carries a prior pass only when its own digest is identical. The field is present only when Bastion could compute the digest and it still described the reviewed tree at run end, so it is absent when the reviewer produced no verdict (a crash, a timeout, or malformed output), when the digest could not be computed (an unresolved merge base, for one), or when the scoped content changed while the run was in flight; in each case a later run cannot carry this verdict, and a replayed reviewer likewise carries none of its own. |
+| `reviewer.resolved` | One reviewer finished; carries its `verdict`, `summary`, `findings`, `usage`, and a `has_transcript` flag. Carries `replayed: true` when the verdict came from a verified attestation, and `carried: true` when it was carried forward from the branch's previous run (local or CI) instead of a fresh execution. A reviewer that produced a real verdict this run (a fresh execution or a carried pass) is also stamped with `scope_digest`, a hash of everything the verdict was keyed to (the reviewer's definition plus its trigger-scoped diffs, commit messages, and untracked content); a later run carries a prior pass only when its own digest is identical. The field is present only when Bastion could compute the digest and it still described the reviewed tree at run end, so it is absent when the reviewer produced no verdict (a crash, a timeout, or malformed output), when the digest could not be computed (an unreadable untracked file, for one), or when the scoped content changed while the run was in flight; in each case a later run cannot carry this verdict, and a replayed reviewer likewise carries none of its own. |
 | `run.completed` | The aggregate decision and the gate tally, plus the run's wall-clock `duration_ms` and the usage totals (`tokens_in`, `tokens_out`, `cache_read`, `cost_usd`) summed across reviewers. Carries `partial: true` (as does `run.started`) when `--reviewer` narrowed the run. |
 | `run.attested` | A signed local run was replayed; carries the replayed `reviewers`, the attesting `public_key`, and `attested_at`. |
 | `run.attestation-fallback` | An attestation was *offered but refused*; carries the `reason` (an unreadable or unverifiable note, an unregistered key, a stale binding, and so on). A dirty CI checkout is the one refusal that needs no note: it is checked before note lookup, so a dirty tree emits this event even when HEAD carries no note. Otherwise a commit that offered no note is not a refusal and emits no such event: it resolves through the ordinary carry-or-execute path silently. |
@@ -336,8 +344,10 @@ note and runs every reviewer fresh, the duplicate spend attestation exists to
 avoid. Diff against `origin/main` after fetching rather than a local `main` ref,
 which can lag it. And sync before the review, not after: a rebase or merge moves
 HEAD, and the note binds to the reviewed HEAD. If the base moves again before CI
-runs and the PR reports an attestation fallback, repeat the sequence; unchanged
-reviewers carry forward, so the re-run is cheap.
+runs and the PR reports an attestation fallback, repeat the sequence, and expect
+it to be cheap: a rebase moves the merge base but not your changeset, so every
+reviewer whose scoped diff comes out identical carries instead of re-running,
+and `bastion attest` signs the carried run like any other.
 
 `bastion attest [RUN]` takes an optional run id positional; omit it and it signs
 the latest recorded run, which is what you want right after `bastion review`.

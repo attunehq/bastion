@@ -119,11 +119,14 @@ Following one review top to bottom touches most of the crate:
     purely local review skips this step entirely. See [Attestation](./attestation.md).
 5b. **Plan carry** (`carry.rs`, both surfaces). Every reviewer about to run
     gets, best effort, a trigger-scoped diff digest (a digest that fails to
-    compute leaves that reviewer executing fresh and uncarryable): its own effective definition, the merge-base
-    commit, the diffs of the changed files its trigger matched against both the
-    merge base and the base tip (untracked matched files encoded by kind,
+    compute leaves that reviewer executing fresh and uncarryable): its own
+    effective definition, the diff of the changed files its trigger matched
+    against the merge base (untracked matched files encoded by kind,
     executable bit, and content), and the scoped commit messages that touched
-    those files. The runner re-derives each digest after the reviewers finish (re-scanning
+    those files. The digest deliberately binds the changeset and not the
+    merge-base commit id, so a rebase that reproduces the identical scoped
+    diff keeps the verdict carryable; see the module docs in
+    [`src/carry.rs`](../../src/carry.rs). The runner re-derives each digest after the reviewers finish (re-scanning
     the changed-file set, so a file created mid-run is seen) and stamps it onto
     `reviewer.resolved` only when the reviewer produced a real verdict and the
     digest still matches; a failed or timed-out reviewer resolves with no digest,

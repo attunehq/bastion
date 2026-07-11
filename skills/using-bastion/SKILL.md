@@ -164,9 +164,11 @@ attest; a rebase or merge moves HEAD, and the note binds to the reviewed HEAD, s
 syncing after the review invalidates the run you meant to attest.
 
 If the base branch moves again before CI runs and the PR reports an attestation
-fallback naming the base, repeat the sequence: sync, re-run `bastion review`
-(unchanged reviewers carry forward, so the re-run is cheap), re-attest, and push
-the note again.
+fallback naming the base, repeat the sequence: sync, re-run `bastion review`,
+re-attest, and push the note again. Expect the re-run to be cheap: a rebase
+moves the merge base but not your changeset, so every reviewer whose
+trigger-scoped diff comes out unchanged carries its pass forward instead of
+re-executing, and the attest signs the carried run like any other.
 
 ### Signing and pushing the note
 

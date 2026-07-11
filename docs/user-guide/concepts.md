@@ -43,11 +43,16 @@ reviewers cheap: a docs-only change wakes the docs reviewers and nothing else.
 trigger: [src/server/**, src/client/**]   # runs when server or client code changed
 ```
 
-The **changeset** is everything in your working tree that differs from the base
-branch, *including uncommitted edits and new untracked files*, not just committed
-history. This is deliberate: it lets an author loop against reviewers before
-committing anything. (Locally, this means a reviewer sees your work in progress; in
-CI the head is already committed, so the same definition gives the same result.)
+The **changeset** is everything in your working tree that differs from the point
+where your branch forked from the base branch (the merge base), *including
+uncommitted edits and new untracked files*, not just committed history. This is
+deliberate on both ends. Including uncommitted work lets an author loop against
+reviewers before committing anything. Diffing at the merge base rather than the
+base branch's tip means the changeset is only ever *your* work: changes that
+landed on the base after you forked are never routed on, never shown to a
+reviewer, and never flagged as yours. (Locally, this means a reviewer sees your
+work in progress; in CI the head is already committed, so the same definition
+gives the same result.)
 
 ## The mode: gate vs. advisor
 

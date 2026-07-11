@@ -540,8 +540,8 @@ The prompt is the reviewer. A few habits keep recall high:
   advisor's should say "report as optional findings... do not block," so its
   output stays advisory even if the model is tempted to be firm.
 - **Let the agent explore.** Every reviewer gets a full checkout and is told how to
-  see the changeset (the diff against the base, plus untracked files). You do not
-  need to paste the diff into the prompt; point the reviewer at the property.
+  see the changeset (the diff against the merge base, plus untracked files). You do
+  not need to paste the diff into the prompt; point the reviewer at the property.
 - **You do not need to ask for completeness.** Bastion appends an instruction to
   every reviewer prompt telling the agent to report every distinct finding in one
   pass, not just the first. Write the prompt for the concern and phrase findings

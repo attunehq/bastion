@@ -121,7 +121,14 @@ pub async fn review(
     let branch = git::current_branch(&repo_root)?;
     let (_sources, repo_attestation, config) =
         Config::discover_merged_attested(&repo_root, user_dir, &includes)?;
-    let changed = git::changed_files(&repo_root, base)?;
+    // The changeset is defined against the merge base with `base`, never the
+    // base branch's tip: a tip that has moved on since this branch forked
+    // would put the base's own changes under review and route reviewers at
+    // them. A base with no common ancestor cannot define a changeset at all,
+    // so that fails the review rather than guessing.
+    let merge_base = git::merge_base(&repo_root, base)
+        .wrap_err_with(|| format!("resolving the merge base of HEAD and '{base}'"))?;
+    let changed = git::changed_files(&repo_root, &merge_base)?;
 
     let router = Router::compile(&config.reviewers)?;
     let triggered = router.matched(&changed);
@@ -243,7 +250,10 @@ pub async fn review(
     // re-derives every stamped digest after the reviewers finish (through the
     // probe), so a tree that changed mid-run cannot leave a stale digest behind
     // for a later run to carry from.
-    let (scope_digests, digest_probe) = plan_scope_digests(&repo_root, base, &matched, &changed);
+    let scope_digests = plan_scope_digests(&repo_root, &merge_base, &matched, &changed);
+    let digest_probe = Some(runner::DigestProbe {
+        merge_base: merge_base.clone(),
+    });
 
     // Carry prior passes forward ([`crate::carry`]): both locally and in CI, a
     // reviewer whose prior run on this branch passed and whose trigger-scoped
@@ -289,6 +299,7 @@ pub async fn review(
         repo_root,
         branch,
         base: base.to_string(),
+        merge_base,
         changed: changed_count,
         reviewers: reviewer_refs,
         context,
@@ -545,31 +556,19 @@ fn resolve_attestation<'a>(
     }
 }
 
-/// Compute the trigger-scoped digest for each reviewer about to run, plus the
-/// probe the runner needs to re-derive them after execution.
+/// Compute the trigger-scoped digest for each reviewer about to run.
 ///
 /// Best effort: a reviewer whose digest fails to compute is left out of the map
-/// (it executes fresh and cannot be carried from), and a run with no resolvable
-/// merge base gets no digests and no probe at all. Neither ever fails the review.
+/// (it executes fresh and cannot be carried from). Never fails the review.
 fn plan_scope_digests(
     repo_root: &Path,
-    base: &str,
+    merge_base: &str,
     matched: &[&crate::reviewer::Reviewer],
     changed: &[String],
-) -> (
-    std::collections::BTreeMap<String, String>,
-    Option<runner::DigestProbe>,
-) {
+) -> std::collections::BTreeMap<String, String> {
     let mut scope_digests = std::collections::BTreeMap::new();
-    let merge_base = match git::merge_base(repo_root, base) {
-        Ok(merge_base) => merge_base,
-        Err(err) => {
-            tracing::warn!(error = %err, "could not resolve a merge base; no scope digests this run");
-            return (scope_digests, None);
-        }
-    };
     for reviewer in matched {
-        match crate::carry::scope_digest(repo_root, base, &merge_base, reviewer, changed) {
+        match crate::carry::scope_digest(repo_root, merge_base, reviewer, changed) {
             Ok(digest) => {
                 scope_digests.insert(reviewer.name.clone(), digest);
             }
@@ -580,11 +579,7 @@ fn plan_scope_digests(
             ),
         }
     }
-    let probe = runner::DigestProbe {
-        base: base.to_string(),
-        merge_base,
-    };
-    (scope_digests, Some(probe))
+    scope_digests
 }
 
 /// Plan which prior passes carry forward this run ([`crate::carry`]).

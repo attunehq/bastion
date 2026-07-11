@@ -46,8 +46,14 @@ pub struct ReviewRequest<'a> {
     pub run: &'a RunId,
     /// The repository root the backend operates within.
     pub repo_root: &'a Path,
-    /// The base branch the changeset is computed against.
+    /// The base branch the changeset is computed against, for orienting prose
+    /// in the prompt; the diff itself is taken at `merge_base`.
     pub base: &'a str,
+    /// The resolved merge-base commit of HEAD and `base`: the comparison point
+    /// the changeset is diffed against. Handed to the agent pre-resolved so it
+    /// can never diff against the base branch's tip, which would put the
+    /// base's own changes under review (see [`changeset_preamble`]).
+    pub merge_base: &'a str,
     /// What the reviewer is told about the changeset beyond the diff: the author's
     /// stated intent, the surrounding discussion, and this reviewer's prior findings.
     /// Empty when no producer supplied any, in which case the prompt is unchanged.
@@ -217,23 +223,30 @@ async fn run_backend<R: CommandRunner>(
 /// to see it, regardless of backend.
 ///
 /// Bastion's notion of "the changeset" is whatever the working tree differs from
-/// `base` by (see [`crate::git::changed_files`]): tracked edits *and* new untracked
-/// files, committed or not. So the agent must be told to use `git diff {base}`
-/// (two-dot: working tree vs base) plus an untracked-file scan -- not
-/// `{base}...HEAD`, which shows only committed history and silently misses the
-/// uncommitted work an author is iterating on in the local loop. In CI the head is
-/// already committed and there are no untracked files, so the same instruction is
-/// correct there too.
-fn changeset_preamble(base: &str) -> String {
+/// the *merge base* by (see [`crate::git::changed_files`]): the work this branch
+/// introduces, tracked edits *and* new untracked files, committed or not. The
+/// agent gets the merge base pre-resolved and is steered off the two nearby
+/// forms that both misreview: `git diff {base}` (two-dot against the base tip)
+/// also shows everything `base` gained since the branch forked, so a reviewer
+/// using it blames the base's own changes on this changeset; and `{base}...HEAD`
+/// shows only committed history, silently missing the uncommitted work an author
+/// is iterating on in the local loop. In CI the head is already committed and
+/// there are no untracked files, so the same instruction is correct there too.
+fn changeset_preamble(base: &str, merge_base: &str) -> String {
     format!(
         "You are reviewing a changeset computed against the base branch `{base}`. \
          Bastion defines the changeset as everything in the current working tree that \
-         differs from `{base}`, which may include uncommitted edits and new, untracked \
-         files -- not only committed history. To see exactly what changed, run \
-         `git diff {base}` for changes to tracked files, and `git status --short` (or \
+         differs from the merge base with `{base}`, commit `{merge_base}`: the work \
+         this branch introduces, which may include uncommitted edits and new, \
+         untracked files, and never includes changes that landed on `{base}` itself. \
+         To see exactly what changed, run `git diff {merge_base}` for changes to \
+         tracked files, and `git status --short` (or \
          `git ls-files --others --exclude-standard`) to find untracked files, then read \
-         those files directly. Do not rely on `git diff {base}...HEAD`: it shows only \
-         committed work and will miss local changes that have not been committed yet."
+         those files directly. Do not run `git diff {base}`: if `{base}` has moved on \
+         since this branch forked, that diff mixes the base branch's own changes into \
+         the changeset, and those are not under review here. Do not rely on \
+         `git diff {base}...HEAD` either: it shows only committed work and will miss \
+         local changes that have not been committed yet."
     )
 }
 
@@ -287,7 +300,7 @@ pub(crate) fn context_segment(request: &ReviewRequest<'_>) -> String {
 /// fenced-YAML backends pass [`SCHEMA_INSTRUCTION`]), so it is the one parameter.
 pub(crate) fn review_prompt(request: &ReviewRequest<'_>, trailer: &str) -> String {
     let reviewer = request.reviewer;
-    let preamble = changeset_preamble(request.base);
+    let preamble = changeset_preamble(request.base, request.merge_base);
     let interpolated = interpolate(&reviewer.prompt, &reviewer.inputs);
     let context = context_segment(request);
     format!(
@@ -495,13 +508,16 @@ mod tests {
     }
 
     #[test]
-    fn changeset_preamble_steers_to_the_working_tree_diff() {
-        let preamble = changeset_preamble("origin/main");
-        // Names the base and uses the two-dot, working-tree form...
+    fn changeset_preamble_steers_to_the_merge_base_working_tree_diff() {
+        let preamble = changeset_preamble("origin/main", "abc1234");
+        // Names the base for orientation, but diffs at the resolved merge base...
         assert!(preamble.contains("base branch `origin/main`"));
-        assert!(preamble.contains("git diff origin/main"));
+        assert!(preamble.contains("git diff abc1234"));
         // ...covers untracked files Bastion also counts as changed...
         assert!(preamble.contains("untracked"));
+        // ...warns off the base-tip diff that would put the base's own changes
+        // under review...
+        assert!(preamble.contains("Do not run `git diff origin/main`"));
         // ...and explicitly warns off the committed-only three-dot form.
         assert!(preamble.contains("Do not rely on `git diff origin/main...HEAD`"));
     }
@@ -632,6 +648,7 @@ findings: []
             run: &run,
             repo_root: &root,
             base: "main",
+            merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
         };
 
@@ -656,6 +673,7 @@ findings: []
             run: &run,
             repo_root: &root,
             base: "main",
+            merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
         };
         let err = dispatch(&request, &SpawnGovernor::shared_default())

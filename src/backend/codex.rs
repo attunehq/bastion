@@ -800,6 +800,7 @@ mod tests {
             run,
             repo_root: root,
             base: "main",
+            merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
         }
     }
@@ -834,6 +835,7 @@ mod tests {
             run: &run,
             repo_root: &root,
             base: "main",
+            merge_base: "deadbeef",
             context: &context,
         };
         let prompt = build_prompt(&req);

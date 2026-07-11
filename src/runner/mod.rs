@@ -80,6 +80,8 @@ pub struct OwnedRequest {
     pub repo_root: PathBuf,
     /// The base branch.
     pub base: String,
+    /// The resolved merge-base commit the changeset is diffed against.
+    pub merge_base: String,
     /// The shared review context (intent, discussion, prior findings). Cloned per
     /// reviewer from the run's [`ExecContext`]; each reviewer's prompt scopes it to
     /// its own concern.
@@ -99,6 +101,7 @@ impl OwnedRequest {
                 run: &self.run,
                 repo_root: &self.repo_root,
                 base: &self.base,
+                merge_base: &self.merge_base,
                 context: &self.context,
             };
             backend::dispatch(&request, &self.governor).await
@@ -121,6 +124,9 @@ pub struct ExecContext {
     pub branch: String,
     /// The base branch.
     pub base: String,
+    /// The resolved merge-base commit of HEAD and `base`: the comparison point
+    /// every reviewer's diff (and every scope digest) is taken against.
+    pub merge_base: String,
     /// Number of changed files (for the persisted `run.started`).
     pub changed: u32,
     /// The reviewers in the run's plan (for the persisted `run.started`).
@@ -180,9 +186,9 @@ pub struct ExecContext {
     /// before execution can go stale while they run; when this probe is
     /// present, the runner re-derives each stamped digest post-execution and
     /// drops any that no longer matches, so a later run can never carry a
-    /// verdict whose scoped content changed mid-run. `None` (a caller with no
-    /// merge base, or a test that stamps digests directly) skips the check
-    /// and stamps the pre-run digests as given.
+    /// verdict whose scoped content changed mid-run. `None` (a test that
+    /// stamps digests directly) skips the check and stamps the pre-run
+    /// digests as given.
     pub digest_probe: Option<DigestProbe>,
     /// The `run.attestation-fallback` event, when the caller already rendered one
     /// (attestations were enabled but the note did not verify or replay).
@@ -204,11 +210,9 @@ pub struct ExecContext {
 /// [`ExecContext::digest_probe`]).
 #[derive(Debug, Clone)]
 pub struct DigestProbe {
-    /// The base branch the run reviewed against (the diff the prompt names).
-    /// The post-run check re-scans the changed-file set against this itself,
-    /// so a file created mid-run reaches the recomputed digest.
-    pub base: String,
-    /// The merge-base commit the run's diffs are taken against.
+    /// The merge-base commit the run's diffs are taken against. The post-run
+    /// check re-scans the changed-file set against this itself, so a file
+    /// created mid-run reaches the recomputed digest.
     pub merge_base: String,
 }
 
@@ -503,6 +507,7 @@ async fn run_fresh(
             run: ctx.run.clone(),
             repo_root: ctx.repo_root.clone(),
             base: ctx.base.clone(),
+            merge_base: ctx.merge_base.clone(),
             context: ctx.context.clone(),
             governor: governor.clone(),
         };
@@ -582,9 +587,8 @@ fn resolve_all(
 /// closed (gate) or is skipped (advisor), same as any reviewer that could not
 /// produce one.
 ///
-/// A `None` [`ExecContext::digest_probe`] (a caller with no merge base, or a
-/// test that stamps digests directly) skips the re-check and leaves the stamps
-/// as given.
+/// A `None` [`ExecContext::digest_probe`] (a test that stamps digests
+/// directly) skips the re-check and leaves the stamps as given.
 fn recheck_scope_digests(resolved: &mut [Resolved], ctx: &ExecContext) {
     let Some(probe) = &ctx.digest_probe else {
         return;
@@ -594,7 +598,7 @@ fn recheck_scope_digests(resolved: &mut [Resolved], ctx: &ExecContext) {
     // invisible to this check. A failed re-scan recomputes nothing, so every
     // stamped digest mismatches and the check degrades in the fail-safe
     // direction.
-    let changed_now = crate::git::changed_files(&ctx.repo_root, &probe.base)
+    let changed_now = crate::git::changed_files(&ctx.repo_root, &probe.merge_base)
         .map_err(|err| {
             tracing::warn!(error = %err, "could not re-scan changed files post-run");
             err
@@ -605,7 +609,6 @@ fn recheck_scope_digests(resolved: &mut [Resolved], ctx: &ExecContext) {
             let now = changed_now.as_ref().and_then(|changed| {
                 crate::carry::scope_digest(
                     &ctx.repo_root,
-                    &probe.base,
                     &probe.merge_base,
                     &item.reviewer,
                     changed,
