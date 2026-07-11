@@ -69,6 +69,7 @@ GitHub surface has a local twin:
 | Findings in the sticky PR comment and as check-run annotations | `findings` in `reviewer.resolved`   |
 | Tokens and cost in the check output                            | `usage` in `reviewer.resolved`      |
 | The aggregate `bastion` check and the sticky PR comment        | `run.completed` event               |
+| An outdated or mid-run moved-base warning in the sticky comment | `run.base-warning` event            |
 | Transcript in the uploaded run artifact                        | saved on disk, `bastion transcript` |
 
 The local stream additionally carries `run.started` and `reviewer.started` for an

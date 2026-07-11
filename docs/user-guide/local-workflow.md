@@ -147,6 +147,7 @@ happens. A run is a typed sequence of events:
 {"type":"run.started","run":"r-0f3a","branch":"feat/cart","base":"main","changed":12,"reviewers":[{"name":"file-responsibility","mode":"gate"},{"name":"tenant-isolation","mode":"gate"}]}
 {"type":"reviewer.started","run":"r-0f3a","reviewer":"tenant-isolation","mode":"gate","backend":"claude-code"}
 {"type":"reviewer.resolved","run":"r-0f3a","reviewer":"tenant-isolation","verdict":"block","summary":"A new query path reads rows without scoping by tenant id.","findings":[{"kind":"blocking","path":"src/server/db.rs","line_start":88,"line_end":91,"detail":"scope this query by tenant_id"}],"usage":{"tokens_in":18204,"tokens_out":1560,"cache_read":12000,"cost_usd":0.21},"duration_ms":38120,"has_transcript":true}
+{"type":"run.base-warning","run":"r-0f3a","reason":"upstream 'refs/remotes/origin/main' moved while the review was running; rebase your changes against the updated remote and review again"}
 {"type":"run.completed","run":"r-0f3a","verdict":"block","gates":{"total":2,"passed":1,"blocked":1},"duration_ms":41030,"tokens_in":20480,"tokens_out":1875,"cache_read":13100,"cost_usd":0.37}
 ```
 
@@ -160,6 +161,7 @@ The event types:
 | `run.completed` | The aggregate decision and the gate tally, plus the run's wall-clock `duration_ms` and the usage totals (`tokens_in`, `tokens_out`, `cache_read`, `cost_usd`) summed across reviewers. Carries `partial: true` (as does `run.started`) when `--reviewer` narrowed the run. |
 | `run.attested` | A signed local run was replayed; carries the replayed `reviewers`, the attesting `public_key`, and `attested_at`. |
 | `run.attestation-fallback` | An attestation was *offered but refused*; carries the `reason` (an unreadable or unverifiable note, an unregistered key, a stale binding, and so on). A dirty CI checkout is the one refusal that needs no note: it is checked before note lookup, so a dirty tree emits this event even when HEAD carries no note. Otherwise a commit that offered no note is not a refusal and emits no such event: it resolves through the ordinary carry-or-execute path silently. |
+| `run.base-warning` | The run proceeded with an outdated base because `--review-outdated` was set, or the fetched upstream moved during the review. Carries the run id and a `reason` that names the base or upstream and tells the user to rebase. It does not change the review verdict. |
 
 How an agent should consume it:
 
