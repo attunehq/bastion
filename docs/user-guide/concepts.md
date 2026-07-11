@@ -179,7 +179,7 @@ authenticates from auth baked into its image or from a credential written into i
 .bastion.yaml                 you author this
         |
         v
-   bastion review  --->  compute changeset (working tree vs base)
+   bastion review  --->  compute changeset (working tree vs merge base)
         |
         v
    route: select reviewers whose trigger globs match

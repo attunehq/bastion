@@ -152,8 +152,9 @@ The action then, in order:
    incremental carry (an unchanged reviewer reusing its prior pass instead of
    re-executing). Best effort: a first push restores nothing and every reviewer
    runs fresh.
-4. **Runs `bastion review`**, diffing against the PR's base and feeding the
-   reviewers the PR's description and discussion via `--repo`/`--pr`.
+4. **Runs `bastion review`**, diffing at the merge base with the PR's base
+   branch and feeding the reviewers the PR's description and discussion via
+   `--repo`/`--pr`.
 5. **Uploads the run as an artifact**, so the next push can restore it and so
    the full transcripts are kept.
 6. **Runs `bastion github report`**, posting the sticky comment and the

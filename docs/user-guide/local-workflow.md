@@ -27,8 +27,9 @@ again, until green.
 bastion review --base main
 ```
 
-`bastion review` computes the changeset (working tree vs. `--base`, including
-uncommitted and untracked files), selects the reviewers whose triggers match, and
+`bastion review` computes the changeset (working tree vs. the merge base with
+`--base`, including uncommitted and untracked files, and never including the
+base branch's own changes), selects the reviewers whose triggers match, and
 renders progress and verdicts. Matched reviewers run in parallel with per-reviewer
 timeouts, and a re-run is incremental (next section): a reviewer that already
 passed may carry its verdict forward instead of executing again, locally and in CI.
@@ -40,7 +41,10 @@ the ordinary way, carrying its prior pass if its scoped content is unchanged and
 otherwise executing fresh (see
 [Attestation](../developer-guide/attestation.md)).
 
-- `--base <branch>`: the branch to diff against. Defaults to `main`.
+- `--base <branch>`: the branch you are merging into. The changeset is diffed at
+  the merge base with it, not at its tip, so the base moving on does not change
+  what is under review. Defaults to `main`. The review fails if no merge base
+  resolves (an unrelated branch, or a shallow clone).
 - `--format <human|jsonl>`: output format. Defaults to `human`.
 - `--repo <owner/name>`: the GitHub repository to gather pull request context from. Defaults to `$GITHUB_REPOSITORY`.
 - `--pr <number>`: the pull request whose description and discussion the reviewers read as context. Requires a repository, from `--repo` or `$GITHUB_REPOSITORY`; passing `--pr` with no repository is an error.

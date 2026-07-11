@@ -320,8 +320,9 @@ The most common first-run snags and what they mean:
 - **No reviewers ran (a trivial pass).** Nothing in your changeset matched any
   reviewer's `trigger`. Confirm you actually changed a file the globs cover, and
   that `--base` points at the right branch.
-- **Everything looks unchanged.** Bastion diffs against `--base` (default `main`);
-  if your base branch has a different name, pass it explicitly.
+- **Everything looks unchanged.** Bastion diffs at the merge base with `--base`
+  (default `main`); if your base branch has a different name, pass it
+  explicitly.
 
 ---
 
