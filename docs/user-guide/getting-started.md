@@ -197,8 +197,10 @@ the working tree, including uncommitted and untracked files), then:
 bastion review --base main
 ```
 
-Bastion computes the files that differ from `main`, selects the reviewers whose
-triggers match, runs them in parallel, and renders progress and verdicts. (A
+Bastion computes the files your branch changed (the diff at the merge base with
+`main`, so changes that landed on `main` itself are never counted), selects the
+reviewers whose triggers match, runs them in parallel, and renders progress and
+verdicts. (A
 re-run of the same branch may carry an already-passed reviewer's verdict
 forward instead of executing it again; the exact conditions are in
 [the local workflow](./local-workflow.md#re-runs-are-incremental).) A blocked
@@ -318,8 +320,9 @@ The most common first-run snags and what they mean:
 - **No reviewers ran (a trivial pass).** Nothing in your changeset matched any
   reviewer's `trigger`. Confirm you actually changed a file the globs cover, and
   that `--base` points at the right branch.
-- **Everything looks unchanged.** Bastion diffs against `--base` (default `main`);
-  if your base branch has a different name, pass it explicitly.
+- **Everything looks unchanged.** Bastion diffs at the merge base with `--base`
+  (default `main`); if your base branch has a different name, pass it
+  explicitly.
 
 ---
 

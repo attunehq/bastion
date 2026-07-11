@@ -130,7 +130,10 @@ review against `origin/main` rather than a local `main` that can lag it;
 attestation binds to HEAD's committed tree, so attest after the final commit;
 and the seal secret is per-release while CI runs the latest published release,
 so keep the local binary current with `bastion update` or CI cannot verify the
-seal and falls back to a fresh run.
+seal and falls back to a fresh run. A rebase does not make the re-review
+expensive: the carry digest binds the changeset rather than the merge-base
+commit, so after syncing, reviewers whose trigger-scoped diff is unchanged
+carry their pass forward and only the affected ones re-execute.
 
 Targeted checks when relevant:
 

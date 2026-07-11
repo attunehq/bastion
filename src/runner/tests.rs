@@ -113,6 +113,7 @@ fn ctx(reviewers: &[&Reviewer]) -> ExecContext {
         repo_root: PathBuf::from("."),
         branch: "feat".into(),
         base: "main".into(),
+        merge_base: "deadbeef".into(),
         changed: u32::try_from(reviewers.len()).unwrap_or(0),
         reviewers: reviewers
             .iter()
@@ -681,10 +682,7 @@ async fn a_carried_gate_whose_digest_went_stale_mid_run_fails_closed() {
         "g2".into(),
         carried_entry("g2", Decision::Pass, "stale-plan-time-digest"),
     );
-    ctx.digest_probe = Some(DigestProbe {
-        base: "base".into(),
-        merge_base,
-    });
+    ctx.digest_probe = Some(DigestProbe { merge_base });
 
     let (decision, events, _layout) = run_scenario_with_ctx(
         &reviewers,
@@ -896,7 +894,7 @@ fn probe_repo() -> (tempfile::TempDir, String, Vec<String>) {
     git(&["branch", "base"]);
     std::fs::write(dir.join("a.rs"), "fn a() { /* edit */ }\n").unwrap();
     let merge_base = crate::git::merge_base(dir, "base").unwrap();
-    let changed = crate::git::changed_files(dir, "base").unwrap();
+    let changed = crate::git::changed_files(dir, &merge_base).unwrap();
     (tmp, merge_base, changed)
 }
 
@@ -904,16 +902,13 @@ fn probe_repo() -> (tempfile::TempDir, String, Vec<String>) {
 async fn the_digest_probe_keeps_a_digest_the_tree_still_matches() {
     let (tmp, merge_base, changed) = probe_repo();
     let g1 = reviewer("g1", Mode::Gate);
-    let real = crate::carry::scope_digest(tmp.path(), "base", &merge_base, &g1, &changed).unwrap();
+    let real = crate::carry::scope_digest(tmp.path(), &merge_base, &g1, &changed).unwrap();
 
     let reviewers = [&g1];
     let mut ctx = ctx(&reviewers);
     ctx.repo_root = tmp.path().to_path_buf();
     ctx.scope_digests.insert("g1".into(), real.clone());
-    ctx.digest_probe = Some(DigestProbe {
-        base: "base".into(),
-        merge_base,
-    });
+    ctx.digest_probe = Some(DigestProbe { merge_base });
 
     let (_decision, events, _layout) = run_scenario_with_ctx(
         &reviewers,
@@ -946,10 +941,7 @@ async fn the_digest_probe_drops_a_digest_the_tree_no_longer_matches() {
     ctx.repo_root = tmp.path().to_path_buf();
     ctx.scope_digests
         .insert("g1".into(), "stale-pre-run-digest".into());
-    ctx.digest_probe = Some(DigestProbe {
-        base: "base".into(),
-        merge_base,
-    });
+    ctx.digest_probe = Some(DigestProbe { merge_base });
 
     let (_decision, events, _layout) = run_scenario_with_ctx(
         &reviewers,

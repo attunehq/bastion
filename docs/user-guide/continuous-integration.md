@@ -121,7 +121,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0          # full history; reviewers diff against the base
+          fetch-depth: 0          # full history; the review fails without a resolvable merge base
           # The PR head, not the default merge commit: attestation replay binds
           # to the head tree the author attested, which a merge commit never matches.
           ref: ${{ github.event.pull_request.head.sha }}
@@ -152,8 +152,9 @@ The action then, in order:
    incremental carry (an unchanged reviewer reusing its prior pass instead of
    re-executing). Best effort: a first push restores nothing and every reviewer
    runs fresh.
-4. **Runs `bastion review`**, diffing against the PR's base and feeding the
-   reviewers the PR's description and discussion via `--repo`/`--pr`.
+4. **Runs `bastion review`**, diffing at the merge base with the PR's base
+   branch and feeding the reviewers the PR's description and discussion via
+   `--repo`/`--pr`.
 5. **Uploads the run as an artifact**, so the next push can restore it and so
    the full transcripts are kept.
 6. **Runs `bastion github report`**, posting the sticky comment and the
@@ -243,7 +244,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0          # full history; reviewers diff against the base
+          fetch-depth: 0          # full history; the review fails without a resolvable merge base
           # The PR head, not the default merge commit: attestation replay binds
           # to the head tree the author attested, which a merge commit never matches.
           ref: ${{ github.event.pull_request.head.sha }}

@@ -124,6 +124,13 @@ touched (which always includes the ones that blocked, since you just changed the
 code they flagged) execute fresh. So the loop above is already the cheap loop;
 let it work.
 
+The carry keys to your changeset (the trigger-scoped diff against the merge
+base), not to the base branch's position. The base moving under you, or a rebase
+over it, re-runs a reviewer only when it actually changes your scoped diff (a
+conflict resolution, upstream edits inside a hunk's context lines); a rebase
+over unrelated upstream changes carries every pass through. Do not treat a
+rebase as a reason to expect, or budget for, a full re-review.
+
 - Pass `--fresh` to re-execute everything (say, after changing something a
   reviewer's trigger does not cover but you believe it should judge).
 - Pass `--reviewer <name>` (repeatable; alias `--only`) to run a hand-picked
@@ -164,9 +171,11 @@ attest; a rebase or merge moves HEAD, and the note binds to the reviewed HEAD, s
 syncing after the review invalidates the run you meant to attest.
 
 If the base branch moves again before CI runs and the PR reports an attestation
-fallback naming the base, repeat the sequence: sync, re-run `bastion review`
-(unchanged reviewers carry forward, so the re-run is cheap), re-attest, and push
-the note again.
+fallback naming the base, repeat the sequence: sync, re-run `bastion review`,
+re-attest, and push the note again. Expect the re-run to be cheap: a rebase
+moves the merge base but not your changeset, so every reviewer whose
+trigger-scoped diff comes out unchanged carries its pass forward instead of
+re-executing, and the attest signs the carried run like any other.
 
 ### Signing and pushing the note
 

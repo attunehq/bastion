@@ -531,6 +531,7 @@ mod tests {
             run: &run,
             repo_root: &root,
             base: "main",
+            merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
         };
         backend.review(&request).await
@@ -555,6 +556,7 @@ mod tests {
             run: &run,
             repo_root: &root,
             base: "main",
+            merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
         };
         backend.review(&request).await.expect("verdict parses");
@@ -736,6 +738,7 @@ mod tests {
             run: &run,
             repo_root: &root,
             base: "main",
+            merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
         };
 
@@ -834,6 +837,7 @@ mod tests {
             run: &run,
             repo_root: &root,
             base: "main",
+            merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
         };
         let err = backend.review(&request).await.unwrap_err();
@@ -896,14 +900,17 @@ mod tests {
             run: &run,
             repo_root: &root,
             base: "main",
+            merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
         };
         let prompt = build_prompt(&request);
         // The shared changeset preamble leads, naming the base and steering the
-        // agent to the working-tree diff rather than the committed-only form.
+        // agent to the merge-base working-tree diff rather than the base-tip or
+        // committed-only forms.
         assert!(prompt.starts_with("You are reviewing a changeset"));
         assert!(prompt.contains("base branch `main`"));
-        assert!(prompt.contains("git diff main"));
+        assert!(prompt.contains("git diff deadbeef"));
+        assert!(prompt.contains("Do not run `git diff main`"));
         assert!(prompt.contains("Do not rely on `git diff main...HEAD`"));
         // The reviewer's own instruction and the schema instruction follow.
         assert!(prompt.contains("Review it."));
@@ -945,6 +952,7 @@ mod tests {
             run: &run,
             repo_root: &root,
             base: "main",
+            merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
         };
         backend.review(&request).await.expect("runs");
@@ -1039,6 +1047,7 @@ mod tests {
             run: &run,
             repo_root: &root,
             base: "main",
+            merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
         };
 

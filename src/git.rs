@@ -90,19 +90,24 @@ pub fn current_branch(cwd: &Path) -> Result<String> {
     run_git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"])
 }
 
-/// The set of files changed in the working tree relative to `base`.
+/// The set of files changed in the working tree relative to `merge_base`.
 ///
-/// This is the union of tracked changes against `base` and untracked,
-/// non-ignored files, i.e. everything a PR from `base` would introduce,
+/// This is the union of tracked changes against `merge_base` and untracked,
+/// non-ignored files, i.e. everything this branch's changeset introduces,
 /// including edits not yet committed. Paths are repository-relative and sorted.
+///
+/// Callers pass the *merge base* with the base branch ([`merge_base`]), never
+/// the base branch's tip: a diff against a tip that has moved on since the
+/// branch forked also reports the base's own changes, which would route
+/// reviewers at (and put under review) work this changeset never touched.
 ///
 /// # Errors
 ///
-/// Returns an error if `git` fails (e.g. `base` does not resolve).
-pub fn changed_files(cwd: &Path, base: &str) -> Result<Vec<String>> {
+/// Returns an error if `git` fails (e.g. `merge_base` does not resolve).
+pub fn changed_files(cwd: &Path, merge_base: &str) -> Result<Vec<String>> {
     let mut files = BTreeSet::new();
 
-    let tracked = run_git(cwd, &["diff", "--name-only", base])?;
+    let tracked = run_git(cwd, &["diff", "--name-only", merge_base])?;
     files.extend(
         tracked
             .lines()
@@ -431,6 +436,7 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
         std::fs::write(dir.join("b.txt"), "new\n").unwrap();
 
+        // With no divergence, `main` is its own merge base.
         let changed = changed_files(dir, "main").expect("diff against main");
         assert!(changed.contains(&"a.txt".to_string()), "got {changed:?}");
         assert!(changed.contains(&"b.txt".to_string()), "got {changed:?}");
@@ -439,6 +445,42 @@ mod tests {
         assert_eq!(
             repo_root(dir).unwrap().canonicalize().unwrap(),
             dir.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn changed_files_against_the_merge_base_excludes_the_bases_own_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        git(dir, &["init"]);
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        std::fs::write(dir.join("docs.md"), "guide\n").unwrap();
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-m", "base"]);
+
+        // Fork a feature branch that edits one file...
+        git(dir, &["checkout", "-b", "feat"]);
+        std::fs::write(dir.join("a.txt"), "one\nedited\n").unwrap();
+        git(dir, &["commit", "-am", "feat change"]);
+
+        // ...then advance main behind its back with an unrelated change.
+        git(dir, &["checkout", "main"]);
+        std::fs::write(dir.join("docs.md"), "guide, upstream\n").unwrap();
+        git(dir, &["commit", "-am", "upstream change"]);
+        git(dir, &["checkout", "feat"]);
+
+        // Diffed against the merge base, the changeset is exactly what the
+        // branch introduced. Diffed against main's tip, the base's own change
+        // would bleed in, which is the misreview this contract exists to stop.
+        let fork_point = merge_base(dir, "main").unwrap();
+        let against_merge_base = changed_files(dir, &fork_point).unwrap();
+        assert_eq!(against_merge_base, vec!["a.txt".to_string()]);
+
+        let against_tip = changed_files(dir, "main").unwrap();
+        assert!(
+            against_tip.contains(&"docs.md".to_string()),
+            "the tip diff shows base-side noise, which is why callers must \
+             never pass it: {against_tip:?}"
         );
     }
 

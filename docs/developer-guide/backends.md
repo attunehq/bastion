@@ -166,11 +166,15 @@ These shared helpers keep the backends consistent so a reviewer behaves the same
 regardless of which agent runs it:
 
 - **`changeset_preamble`**: the instruction prepended to every prompt telling the
-  agent how to see its changeset. It steers to `git diff {base}` (the working-tree
-  form: working tree vs. base) plus an untracked-file scan, and explicitly warns *off*
-  `{base}...HEAD`, which shows only committed history and would miss the uncommitted
-  work an author iterates on locally. In CI the head is committed and there are no
-  untracked files, so the same instruction is correct there too.
+  agent how to see its changeset. It hands the agent the pre-resolved merge-base
+  commit and steers to `git diff {merge_base}` (working tree vs. merge base) plus
+  an untracked-file scan, and explicitly warns *off* both nearby forms:
+  `git diff {base}` (against the base tip) also shows everything the base gained
+  since the branch forked, so a reviewer using it blames the base's own changes on
+  the changeset under review; `{base}...HEAD` shows only committed history and
+  would miss the uncommitted work an author iterates on locally. In CI the head is
+  committed and there are no untracked files, so the same instruction is correct
+  there too.
 - **`EXHAUSTIVE_FINDINGS_INSTRUCTION`**: a fixed instruction appended to every
   reviewer prompt (after the reviewer's own text, before the schema instruction)
   telling the agent to enumerate *every* qualifying finding in one pass rather than

@@ -7,8 +7,9 @@
 #
 #   1. Check out the PR head with full history: actions/checkout with
 #      `fetch-depth: 0` and `ref` set to the pull request's head SHA. Full
-#      history resolves the base for the changeset diff; the head commit, not
-#      the synthetic merge commit, is what attestation replay binds to.
+#      history resolves the merge base the changeset is diffed at (the review
+#      fails without one); the head commit, not the synthetic merge commit, is
+#      what attestation replay binds to.
 #   2. Install and authenticate the backend CLI the repository's reviewers pin
 #      (claude, codex, or pi), exactly as a contributor would locally. The
 #      action never touches backend credentials.
