@@ -44,7 +44,13 @@ otherwise executing fresh (see
 - `--base <branch>`: the branch you are merging into. The changeset is diffed at
   the merge base with it, not at its tip, so the base moving on does not change
   what is under review. Defaults to `main`. The review fails if no merge base
-  resolves (an unrelated branch, or a shallow clone).
+  resolves (an unrelated branch, or a shallow clone). When the base is a local
+  branch whose remote-tracking ref would give HEAD a different merge base (a
+  local `main` that lags `origin/main`, say), the review warns on stderr that
+  the changeset may include upstream commits and suggests reviewing against
+  `--base` with the tracking ref, or fetching and bringing the local branch up
+  to date with it; the check reads only refs already on disk, never fetches,
+  and the review proceeds unchanged.
 - `--format <human|jsonl>`: output format. Defaults to `human`.
 - `--repo <owner/name>`: the GitHub repository to gather pull request context from. Defaults to `$GITHUB_REPOSITORY`.
 - `--pr <number>`: the pull request whose description and discussion the reviewers read as context. Requires a repository, from `--repo` or `$GITHUB_REPOSITORY`; passing `--pr` with no repository is an error.

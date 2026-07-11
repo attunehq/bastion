@@ -128,6 +128,11 @@ pub async fn review(
     // so that fails the review rather than guessing.
     let merge_base = git::merge_base(&repo_root, base)
         .wrap_err_with(|| format!("resolving the merge base of HEAD and '{base}'"))?;
+    if let Some(warning) = stale_base_warning(&repo_root, base, &merge_base) {
+        // Fallible on purpose: a closed stderr must not panic the gate out of
+        // an otherwise valid review.
+        let _ = writeln!(io::stderr(), "{warning}");
+    }
     let changed = git::changed_files(&repo_root, &merge_base)?;
 
     let router = Router::compile(&config.reviewers)?;
@@ -334,6 +339,36 @@ pub async fn review(
     }
 
     Ok(aggregate)
+}
+
+/// The stderr warning for a `--base` that lags its remote-tracking ref, or
+/// `None` when the check does not apply or the base is in sync.
+///
+/// A local `main` that lags `origin/main` resolves a merge base older than the
+/// branch's true fork point, so the changeset silently includes the upstream
+/// commits between the stale tip and the fork point, and the reviewers review
+/// (and can flag) work that is not this branch's own. That is the same
+/// misreview class the merge-base contract stops on the base-tip side, entered
+/// from the stale-local side instead. The check is cheap: when
+/// merge-base(HEAD, base) and merge-base(HEAD, upstream-of-base) disagree, the
+/// two refs put different changesets under review, and the upstream one is the
+/// fork point CI will re-derive.
+///
+/// Advisory only: the review proceeds unchanged, nothing fetches, and there is
+/// no override flag. An explicit commit, tag, or remote ref as the base, a
+/// branch with no upstream, or any git failure here skips the check silently.
+fn stale_base_warning(repo_root: &Path, base: &str, merge_base: &str) -> Option<String> {
+    let upstream = git::upstream_of_local_branch(repo_root, base)?;
+    let upstream_merge_base = git::merge_base(repo_root, &upstream).ok()?;
+    if upstream_merge_base == merge_base {
+        return None;
+    }
+    Some(format!(
+        "bastion review: '{base}' and its upstream '{upstream}' give HEAD different merge \
+         bases, so this changeset may include upstream commits that are not this branch's \
+         work; review against '--base {upstream}', or fetch and bring '{base}' up to date \
+         first"
+    ))
 }
 
 /// Narrow the triggered set to an explicit `--reviewer` selection.
@@ -1007,6 +1042,92 @@ mod tests {
             message.contains("triggered reviewers: a"),
             "the fix should be one glance away, got: {message}"
         );
+    }
+
+    /// A clone whose local `main` lags the `origin/main` it tracks, with HEAD
+    /// on a feature branch forked from the fetched `origin/main`: the exact
+    /// shape where `--base main` resolves a merge base older than the true
+    /// fork point. Returns the temp root and the clone's path; the origin
+    /// repository lives under the same root at `origin/`.
+    fn clone_with_lagging_main() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        let origin = root.join("origin");
+        std::fs::create_dir(&origin).unwrap();
+        git(&origin, &["init"]);
+        std::fs::write(origin.join("a.txt"), "one\n").unwrap();
+        git(&origin, &["add", "a.txt"]);
+        git(&origin, &["commit", "-m", "base"]);
+
+        // A file-path clone sets up `main` tracking `origin/main` with no
+        // network involved.
+        git(root, &["clone", "origin", "clone"]);
+        let clone = root.join("clone");
+
+        // Advance the origin's main behind the clone's back, then fetch: the
+        // clone's origin/main moves, its local main does not.
+        std::fs::write(origin.join("a.txt"), "one\nupstream\n").unwrap();
+        git(&origin, &["commit", "-am", "upstream change"]);
+        git(&clone, &["fetch", "origin"]);
+
+        // Fork the feature branch from the *fetched* tip, the way a branch cut
+        // from an up-to-date checkout (or rebased onto origin/main) sits.
+        git(&clone, &["checkout", "-b", "feat", "origin/main"]);
+        std::fs::write(clone.join("b.txt"), "feature\n").unwrap();
+        git(&clone, &["add", "b.txt"]);
+        git(&clone, &["commit", "-m", "feature work"]);
+
+        (tmp, clone)
+    }
+
+    #[test]
+    fn stale_base_warning_fires_when_the_local_base_lags_its_upstream() {
+        let (_tmp, clone) = clone_with_lagging_main();
+
+        let merge_base = git::merge_base(&clone, "main").unwrap();
+        let warning =
+            stale_base_warning(&clone, "main", &merge_base).expect("a lagging local base warns");
+        assert!(warning.contains("'main'"), "got: {warning}");
+        assert!(warning.contains("'origin/main'"), "got: {warning}");
+        assert!(
+            warning.contains("--base origin/main"),
+            "the fix should be one glance away, got: {warning}"
+        );
+    }
+
+    #[test]
+    fn stale_base_warning_is_silent_when_the_local_base_matches_its_upstream() {
+        let (_tmp, clone) = clone_with_lagging_main();
+        // Bring the local main up to date; the two merge bases now agree.
+        git(&clone, &["branch", "-f", "main", "origin/main"]);
+
+        let merge_base = git::merge_base(&clone, "main").unwrap();
+        assert_eq!(stale_base_warning(&clone, "main", &merge_base), None);
+    }
+
+    #[test]
+    fn stale_base_warning_skips_a_base_without_an_upstream() {
+        let tmp = repo_with_a_note_and_resolvable_base();
+        let dir = tmp.path();
+
+        let merge_base = git::merge_base(dir, "base").unwrap();
+        assert_eq!(stale_base_warning(dir, "base", &merge_base), None);
+    }
+
+    #[test]
+    fn stale_base_warning_skips_commit_and_remote_ref_bases() {
+        let (_tmp, clone) = clone_with_lagging_main();
+
+        // An explicit commit as the base: not a local branch, no upstream to
+        // compare against, even though the repository is in the lagging shape.
+        let commit = git::merge_base(&clone, "main").unwrap();
+        assert_eq!(stale_base_warning(&clone, &commit, &commit), None);
+
+        // The remote-tracking ref itself as the base is already the right
+        // fork point; there is nothing to warn toward.
+        let merge_base = git::merge_base(&clone, "origin/main").unwrap();
+        assert_eq!(stale_base_warning(&clone, "origin/main", &merge_base), None);
     }
 
     /// A minimal repository whose HEAD carries a note under `NOTES_REF`, for
