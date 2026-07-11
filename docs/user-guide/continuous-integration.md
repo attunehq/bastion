@@ -121,7 +121,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0          # full history; reviewers diff against the base
+          fetch-depth: 0          # full history; the review fails without a resolvable merge base
           # The PR head, not the default merge commit: attestation replay binds
           # to the head tree the author attested, which a merge commit never matches.
           ref: ${{ github.event.pull_request.head.sha }}
@@ -243,7 +243,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0          # full history; reviewers diff against the base
+          fetch-depth: 0          # full history; the review fails without a resolvable merge base
           # The PR head, not the default merge commit: attestation replay binds
           # to the head tree the author attested, which a merge commit never matches.
           ref: ${{ github.event.pull_request.head.sha }}

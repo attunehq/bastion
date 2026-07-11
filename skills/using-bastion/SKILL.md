@@ -124,6 +124,13 @@ touched (which always includes the ones that blocked, since you just changed the
 code they flagged) execute fresh. So the loop above is already the cheap loop;
 let it work.
 
+The carry keys to your changeset (the trigger-scoped diff against the merge
+base), not to the base branch's position. The base moving under you, or a rebase
+over it, re-runs a reviewer only when it actually changes your scoped diff (a
+conflict resolution, upstream edits inside a hunk's context lines); a rebase
+over unrelated upstream changes carries every pass through. Do not treat a
+rebase as a reason to expect, or budget for, a full re-review.
+
 - Pass `--fresh` to re-execute everything (say, after changing something a
   reviewer's trigger does not cover but you believe it should judge).
 - Pass `--reviewer <name>` (repeatable; alias `--only`) to run a hand-picked
