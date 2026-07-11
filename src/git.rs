@@ -247,6 +247,43 @@ pub fn merge_base(cwd: &Path, base: &str) -> Result<String> {
     run_git(cwd, &["merge-base", base, "HEAD"])
 }
 
+/// The remote-tracking ref a local branch is configured to follow (for example
+/// `origin/main` for `main`), or `None` when `branch` is not a local branch or
+/// has no upstream.
+///
+/// Non-fatal by design, like [`run_git_config_signingkey`]: a base with no
+/// upstream, or a commit, tag, or remote-tracking ref given as the base, is an
+/// ordinary case rather than an error, so this reports `None` on any failure
+/// instead of propagating a `Result`. `bastion review` uses it to notice a
+/// local base branch that lags the remote it tracks, reading only refs already
+/// on disk: this never fetches.
+#[must_use]
+pub fn upstream_of_local_branch(cwd: &Path, branch: &str) -> Option<String> {
+    // Only a local branch can lag the remote ref it tracks; anything else
+    // (a commit, a tag, `origin/main` itself) has no upstream of its own,
+    // and `@{upstream}` on it would be an error anyway.
+    run_git(
+        cwd,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+    .ok()?;
+    run_git(
+        cwd,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            &format!("{branch}@{{upstream}}"),
+        ],
+    )
+    .ok()
+    .filter(|upstream| !upstream.is_empty())
+}
+
 /// The git tree hash `rev` points at: `git rev-parse <rev>^{tree}`.
 ///
 /// A tree hash names content, not history, so two commits with identical file
