@@ -84,25 +84,29 @@ pub fn verify_signature(
     allowed_signers
         .flush()
         .wrap_err("flushing the allowed_signers file")?;
+    // Windows OpenSSH cannot reopen a NamedTempFile while its handle is open.
+    // TempPath keeps deletion-on-drop ownership after closing that handle.
+    let allowed_signers = allowed_signers.into_temp_path();
 
     let mut sig_file =
         tempfile::NamedTempFile::new().wrap_err("creating a temporary signature file")?;
     std::io::Write::write_all(&mut sig_file, signature.as_bytes())
         .wrap_err("writing the signature file")?;
     sig_file.flush().wrap_err("flushing the signature file")?;
+    let sig_file = sig_file.into_temp_path();
 
     let output = Command::new("ssh-keygen")
         .args([
             "-Y",
             "verify",
             "-f",
-            &allowed_signers.path().to_string_lossy(),
+            &allowed_signers.to_string_lossy(),
             "-I",
             principal,
             "-n",
             SIG_NAMESPACE,
             "-s",
-            &sig_file.path().to_string_lossy(),
+            &sig_file.to_string_lossy(),
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -594,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn sign_and_verify_round_trip() {
+    fn verify_signature_round_trips_with_ephemeral_files() {
         if !ssh_keygen_available() {
             eprintln!("skipping: ssh-keygen not available");
             return;
