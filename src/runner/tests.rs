@@ -92,7 +92,7 @@ impl Drop for SeamEnvGuard {
 fn reviewer(name: &str, mode: Mode) -> Reviewer {
     Reviewer {
         name: name.into(),
-        trigger: vec!["**".into()],
+        trigger: crate::reviewer::Trigger::Paths(vec!["**".into()]),
         mode,
         backend: rev::Backend::ClaudeCode,
         model: None,
@@ -105,6 +105,103 @@ fn reviewer(name: &str, mode: Mode) -> Reviewer {
         attestation: None,
         prompt: "p".into(),
     }
+}
+
+fn agent_reviewer(name: &str, paths: &[&str]) -> Reviewer {
+    let mut reviewer = reviewer(name, Mode::Gate);
+    reviewer.trigger = rev::Trigger::Agent(rev::AgentTrigger {
+        kind: rev::AgentTriggerKind::Agent,
+        prompt: "Run only when the change affects this concern.".into(),
+        backend: rev::Backend::Codex,
+        model: Some(serde_yaml_ng::from_str("gpt-5.6-luna").unwrap()),
+        effort: Some(serde_yaml_ng::from_str("high").unwrap()),
+        timeout: None,
+        paths: paths.iter().map(|path| (*path).to_string()).collect(),
+    });
+    reviewer
+}
+
+#[test]
+fn persisting_a_skip_removes_artifacts_from_an_earlier_run_at_the_same_head() {
+    let tmp = tempfile::tempdir().unwrap();
+    let layout = Layout::with_root(tmp.path().to_path_buf());
+    let run = RunId("r-same-head".into());
+    let reviewer = agent_reviewer("semantic", &[]);
+    let reviewed = Resolved {
+        reviewer: reviewer.clone(),
+        decision: Decision::Pass,
+        summary: "The full review passed.".into(),
+        findings: vec![],
+        usage: None,
+        transcript: Some("full review transcript".into()),
+        duration: Duration::from_secs(1),
+        replayed: false,
+        carried: false,
+        scope_digest: None,
+        skipped: false,
+        trigger: None,
+    };
+    persist_reviewer(&layout, &run, &reviewed).unwrap();
+    assert!(layout.verdict(&run, "semantic").exists());
+    assert!(layout.transcript(&run, "semantic").exists());
+
+    let skipped = Resolved {
+        decision: Decision::Pass,
+        summary: "The concern does not apply.".into(),
+        transcript: None,
+        skipped: true,
+        trigger: Some(TriggerResolution {
+            backend: rev::Backend::Codex,
+            decision: TriggerDecision::Skip,
+            reason: "The concern does not apply.".into(),
+            usage: Some(Usage {
+                tokens_in: 40,
+                tokens_out: 5,
+                cache_read: 10,
+                cost_usd: Money::from_cents(1),
+            }),
+            duration_ms: 10,
+        }),
+        ..reviewed
+    };
+    persist_reviewer(&layout, &run, &skipped).unwrap();
+
+    assert!(!layout.verdict(&run, "semantic").exists());
+    assert!(!layout.transcript(&run, "semantic").exists());
+    assert!(layout.meta(&run, "semantic").exists());
+    let meta: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(layout.meta(&run, "semantic")).unwrap()).unwrap();
+    assert_eq!(meta["backend"], "codex");
+    assert_eq!(meta["usage"]["tokens_in"], 40);
+}
+
+#[tokio::test]
+async fn an_any_trigger_records_the_concrete_backend_that_ran() {
+    let mut gate = agent_reviewer("semantic", &[]);
+    let Trigger::Agent(agent) = &mut gate.trigger else {
+        panic!("agent_reviewer must build an agent trigger");
+    };
+    agent.backend = rev::Backend::Any;
+    let reviewers = [&gate];
+    let (_decision, events, _layout) = run_scenario(
+        &reviewers,
+        responses(vec![(
+            "semantic-trigger",
+            Response::Outcome(pass("skip: the concern does not apply")),
+        )]),
+    )
+    .await;
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RunEvent::ReviewerSkipped {
+            trigger: TriggerResolution {
+                backend: rev::Backend::ClaudeCode,
+                ..
+            },
+            ..
+        }
+    )));
 }
 
 fn ctx(reviewers: &[&Reviewer]) -> ExecContext {
@@ -129,6 +226,7 @@ fn ctx(reviewers: &[&Reviewer]) -> ExecContext {
         attestation: None,
         digest_probe: None,
         partial: false,
+        force: false,
         carried: Default::default(),
         scope_digests: Default::default(),
         attestation_fallback: None,
@@ -215,7 +313,7 @@ async fn run_scenario_with_ctx(
         &ctx,
         &layout,
         &mut |e| events.push(e.clone()),
-        &exec,
+        std::sync::Arc::new(exec),
     )
     .await
     .expect("execute persists");
@@ -231,6 +329,132 @@ enum Response {
 
 fn responses(pairs: Vec<(&str, Response)>) -> std::collections::HashMap<String, Response> {
     pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
+}
+
+#[tokio::test]
+async fn an_agent_trigger_can_skip_without_fabricating_a_review_verdict() {
+    let gate = agent_reviewer("semantic", &[]);
+    let reviewers = [&gate];
+    let (decision, events, layout) = run_scenario(
+        &reviewers,
+        responses(vec![(
+            "semantic-trigger",
+            Response::Outcome(pass("skip: no persistence boundary changed")),
+        )]),
+    )
+    .await;
+
+    assert_eq!(decision, Decision::Pass);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RunEvent::ReviewerSkipped { reviewer, trigger, .. }
+            if reviewer == "semantic"
+                && trigger.decision == TriggerDecision::Skip
+                && trigger.reason == "no persistence boundary changed"
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        RunEvent::ReviewerResolved { reviewer, .. } if reviewer == "semantic"
+    )));
+    let completed = events.iter().find_map(|event| match event {
+        RunEvent::RunCompleted {
+            gates, tokens_in, ..
+        } => Some((*gates, *tokens_in)),
+        _ => None,
+    });
+    let (gates, tokens_in) = completed.expect("run completed");
+    assert_eq!(
+        (gates.total, gates.passed, gates.blocked, gates.skipped),
+        (1, 0, 0, 1)
+    );
+    assert_eq!(tokens_in, 100, "trigger usage counts toward the run");
+    assert!(!layout.verdict(&RunId("r-exec".into()), "semantic").exists());
+    assert!(
+        layout
+            .transcript(&RunId("r-exec".into()), "semantic")
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn an_agent_trigger_run_decision_executes_the_full_reviewer() {
+    let gate = agent_reviewer("semantic", &[]);
+    let reviewers = [&gate];
+    let (decision, events, layout) = run_scenario(
+        &reviewers,
+        responses(vec![
+            (
+                "semantic-trigger",
+                Response::Outcome(pass("run: persistence code changed")),
+            ),
+            ("semantic", Response::Outcome(pass("reviewed"))),
+        ]),
+    )
+    .await;
+
+    assert_eq!(decision, Decision::Pass);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RunEvent::ReviewerResolved {
+            reviewer,
+            trigger: Some(trigger),
+            ..
+        } if reviewer == "semantic" && trigger.decision == TriggerDecision::Run
+    )));
+    let tokens_in = events.iter().find_map(|event| match event {
+        RunEvent::RunCompleted { tokens_in, .. } => Some(*tokens_in),
+        _ => None,
+    });
+    assert_eq!(tokens_in, Some(200));
+    let transcript =
+        std::fs::read_to_string(layout.transcript(&RunId("r-exec".into()), "semantic")).unwrap();
+    assert!(transcript.contains("== agent trigger =="));
+    assert!(transcript.contains("== reviewer =="));
+}
+
+#[tokio::test]
+async fn a_malformed_agent_trigger_decision_runs_the_full_reviewer() {
+    let gate = agent_reviewer("semantic", &[]);
+    let reviewers = [&gate];
+    let (decision, events, _) = run_scenario(
+        &reviewers,
+        responses(vec![
+            ("semantic-trigger", Response::Outcome(pass("maybe"))),
+            ("semantic", Response::Outcome(pass("reviewed"))),
+        ]),
+    )
+    .await;
+
+    assert_eq!(decision, Decision::Pass);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RunEvent::ReviewerResolved {
+            trigger: Some(trigger),
+            ..
+        } if trigger.decision == TriggerDecision::Run
+            && trigger.reason.contains("malformed")
+    )));
+}
+
+#[tokio::test]
+async fn an_explicit_selection_bypasses_the_agent_trigger() {
+    let gate = agent_reviewer("semantic", &[]);
+    let reviewers = [&gate];
+    let mut context = ctx(&reviewers);
+    context.force = true;
+    let (decision, events, _) = run_scenario_with_ctx(
+        &reviewers,
+        context,
+        responses(vec![("semantic", Response::Outcome(pass("forced")))]),
+    )
+    .await;
+
+    assert_eq!(decision, Decision::Pass);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, RunEvent::ReviewerResolved { trigger: None, .. }))
+    );
 }
 
 #[tokio::test]
@@ -564,6 +788,48 @@ async fn a_run_with_seal_bindings_produces_a_verifiable_seal_on_disk() {
 }
 
 #[tokio::test]
+async fn an_agent_skip_is_a_sealed_terminal_outcome() {
+    let _seam_lock = SEAM_ENV_LOCK.lock().await;
+    let _seam_guard = SeamEnvGuard::cleared();
+    let gate = agent_reviewer("semantic", &[]);
+    let reviewers = [&gate];
+    let mut context = ctx(&reviewers);
+    context.seal = Some(seal_bindings(&["semantic"]));
+
+    let (_, _, layout) = run_scenario_with_ctx(
+        &reviewers,
+        context,
+        responses(vec![(
+            "semantic-trigger",
+            Response::Outcome(pass("skip: no relevant boundary changed")),
+        )]),
+    )
+    .await;
+
+    let run = RunId("r-exec".into());
+    let seal = crate::store::read_seal(&layout, &run)
+        .unwrap()
+        .expect("semantic skip is sealed");
+    let events = crate::store::read_run(&layout, &run).unwrap();
+    let terminal: Vec<serde_json::Value> = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                RunEvent::ReviewerSkipped { reviewer, .. } if reviewer == "semantic"
+            )
+        })
+        .map(|event| serde_json::to_value(event).unwrap())
+        .collect();
+    assert_eq!(seal.reviewers, ["semantic"]);
+    assert!(crate::seal::verify(
+        crate::seal::embedded_secret(),
+        &seal,
+        &terminal,
+    ));
+}
+
+#[tokio::test]
 async fn perturbing_a_persisted_resolved_event_breaks_seal_verification() {
     let _seam_lock = SEAM_ENV_LOCK.lock().await;
     let _seam_guard = SeamEnvGuard::cleared();
@@ -663,6 +929,7 @@ fn carried_entry(name: &str, verdict: Decision, digest: &str) -> crate::carry::C
             replayed: false,
             carried: false,
             scope_digest: Some(digest.into()),
+            trigger: None,
         },
     }
 }
@@ -1217,7 +1484,7 @@ async fn a_spawn_storm_trips_the_breaker_and_aborts_the_run() {
         &ctx,
         &layout,
         &mut |e| events.push(e.clone()),
-        &exec,
+        std::sync::Arc::new(exec),
     )
     .await;
 
@@ -1260,6 +1527,7 @@ fn attested_event(name: &str, verdict: Decision, summary: &str) -> RunEvent {
     RunEvent::ReviewerResolved {
         carried: false,
         scope_digest: None,
+        trigger: None,
         run: RunId("r-attested-elsewhere".into()),
         reviewer: name.into(),
         verdict,
@@ -1282,6 +1550,28 @@ fn attested_event(name: &str, verdict: Decision, summary: &str) -> RunEvent {
             cost_usd: Money::from_cents(2),
         }),
         duration_ms: 12_345,
+        has_transcript: true,
+        replayed: false,
+    }
+}
+
+fn attested_skip(name: &str, reason: &str) -> RunEvent {
+    RunEvent::ReviewerSkipped {
+        run: RunId("r-attested-elsewhere".into()),
+        reviewer: name.into(),
+        mode: Mode::Gate,
+        trigger: TriggerResolution {
+            backend: rev::Backend::Codex,
+            decision: TriggerDecision::Skip,
+            reason: reason.into(),
+            usage: Some(Usage {
+                tokens_in: 50,
+                tokens_out: 5,
+                cache_read: 0,
+                cost_usd: Money::from_cents(2),
+            }),
+            duration_ms: 12_345,
+        },
         has_transcript: true,
         replayed: false,
     }
@@ -1368,6 +1658,53 @@ async fn zero_fresh_reviewers_with_a_full_replay_produces_a_complete_persisted_r
     assert!(layout.verdict(&run, "g1").exists());
     assert!(layout.meta(&run, "g1").exists());
     assert!(!layout.transcript(&run, "g1").exists());
+}
+
+#[tokio::test]
+async fn an_attested_agent_skip_replays_as_a_skip() {
+    let g1 = agent_reviewer("g1", &[]);
+    let mut ctx = ctx(&[&g1]);
+    ctx.replayed.insert(
+        "g1".to_string(),
+        ReplayedReviewer {
+            reviewer: g1,
+            event: attested_skip("g1", "The concern does not apply."),
+        },
+    );
+
+    let (decision, events, layout) = run_scenario_with_ctx(&[], ctx, responses(vec![])).await;
+
+    assert_eq!(decision, Decision::Pass);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RunEvent::ReviewerSkipped {
+            reviewer,
+            replayed: true,
+            trigger: TriggerResolution {
+                decision: TriggerDecision::Skip,
+                ..
+            },
+            ..
+        } if reviewer == "g1"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RunEvent::RunCompleted {
+            gates: Gates {
+                total: 1,
+                passed: 0,
+                blocked: 0,
+                skipped: 1,
+            },
+            tokens_in: 50,
+            tokens_out: 5,
+            ..
+        }
+    )));
+    assert!(
+        !layout.verdict(&RunId("r-exec".into()), "g1").exists(),
+        "replay must not invent a verdict artifact for a semantic skip"
+    );
 }
 
 #[tokio::test]
@@ -1484,6 +1821,7 @@ fn inconsistent_pass_event(name: &str) -> RunEvent {
     RunEvent::ReviewerResolved {
         carried: false,
         scope_digest: None,
+        trigger: None,
         run: RunId("r-attested-elsewhere".into()),
         reviewer: name.into(),
         verdict: Decision::Pass,

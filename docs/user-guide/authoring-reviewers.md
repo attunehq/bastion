@@ -256,9 +256,9 @@ A unique identifier. It is also the reviewer's check-run name in CI
 
 ### `trigger`
 
-A list of path globs matched against the changed files. The reviewer runs if any
-changed file matches any glob. Globs use the usual `**` (any depth) and `*` (one
-segment) syntax:
+A path trigger is a list of globs matched against the changed files. The reviewer
+runs if any changed file matches any glob. Globs use the usual `**` (any depth)
+and `*` (one segment) syntax:
 
 ```yaml
 trigger: [src/**/*.rs]                       # all Rust under src, any depth
@@ -267,8 +267,56 @@ trigger: [src/**/*.rs, docs/**/*.md, ".bastion.yaml"]   # multiple kinds
 ```
 
 Quote a glob if YAML would otherwise mis-parse it (a bare leading `*`, for
-instance). Scope triggers tightly: a narrow trigger is what keeps an irrelevant
-reviewer from waking on every change.
+instance).
+
+When paths cannot express the concern without waking an expensive reviewer on
+most changes, use an agent trigger:
+
+```yaml
+reviewers:
+  - name: single-responsibility
+    trigger:
+      kind: agent
+      prompt: >
+        Run when the changeset creates or materially expands a responsibility
+        boundary in production code. Skip tests, docs, and mechanical edits.
+      backend: codex
+      model: gpt-5.6-luna
+      effort: high
+      timeout: 45s
+      paths: [src/**/*.rs]
+    mode: gate
+    prompt: |
+      Review each changed production file for single responsibility.
+      ...
+```
+
+`paths` is an optional cheap prefilter. With it, both conditions must hold: a
+changed path matches and the trigger agent decides `run`. Without it, Bastion
+asks the trigger agent on every non-empty changeset. The trigger agent receives
+the actual changeset but not the author's description or PR discussion, so a
+claim about relevance cannot suppress review. It runs with no capabilities,
+environment, or container even when the full reviewer has them.
+
+The trigger's `prompt` is inline text. The trigger agent returns `run` or `skip`
+with a reason. A timeout, backend error, malformed response, or uncertain answer
+becomes `run`, then the full reviewer applies its normal gate or advisor policy. An explicit
+`--reviewer <name>` also bypasses the agent trigger because naming a reviewer is
+a request to run it. A skip is recorded as `reviewer.skipped`; it is not a pass
+verdict. Its tokens count toward the run, and a full run seals and attests the
+skip like any other terminal reviewer outcome.
+
+`timeout` bounds only the routing call and defaults to 2 minutes. A trigger that
+reaches the limit resolves to `run`; the full reviewer then uses its own top-level
+`timeout` (15 minutes by default).
+
+Agent triggers inherit `model` and `effort` from registry-wide defaults when
+they omit those fields. `trigger.backend` defaults to `any`, which currently
+resolves to Claude Code, and is independent of the full reviewer's backend. A
+trigger model requires its own pinned `backend`; the full reviewer's backend does
+not implicitly select the trigger backend. Keep the routing prompt narrower and
+cheaper than the reviewer prompt, since every candidate pays for the routing call
+before Bastion can save the full review.
 
 ### `mode`
 
@@ -378,9 +426,9 @@ reviewer is never replayed from a signed local run in CI (even when the
 repository sets `attestations: true`), and a re-run never carries its prior pass
 forward, locally or in CI (see
 [the local workflow](./local-workflow.md#re-runs-are-incremental)). Absent
-means both apply: CI may replay this reviewer's verdict from an attested run,
-and a re-run may carry its unchanged pass. Use `never` for a gate your
-team wants executed unconditionally regardless of any prior run. See
+means both apply: CI may replay this reviewer's terminal verdict or skip outcome
+from an attested run, and a re-run may carry its unchanged pass. Use `never` for
+a gate your team wants executed unconditionally regardless of any prior run. See
 [Attesting a run so CI can replay it](./continuous-integration.md#attesting-a-run-so-ci-can-replay-it).
 
 ```yaml

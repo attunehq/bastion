@@ -33,12 +33,12 @@ use color_eyre::eyre::{Context, Result, eyre};
 use tokio::task::JoinSet;
 
 use crate::backend::governor::SpawnGovernor;
-use crate::backend::{self, ReviewOutcome, ReviewRequest};
+use crate::backend::{self, ReviewOutcome, ReviewPurpose, ReviewRequest};
 use crate::context::ReviewContext;
-use crate::event::{Gates, ReviewerRef, RunEvent, RunId};
+use crate::event::{Gates, ReviewerRef, RunEvent, RunId, TriggerDecision, TriggerResolution};
 use crate::limits::SpawnLimits;
 use crate::paths::Layout;
-use crate::reviewer::{Mode, Reviewer};
+use crate::reviewer::{AgentTrigger, Capabilities, Mode, Reviewer, Trigger};
 use crate::seal::SealBindings;
 use crate::verdict::{Decision, Money, Usage, Verdict};
 
@@ -86,6 +86,8 @@ pub struct OwnedRequest {
     /// reviewer from the run's [`ExecContext`]; each reviewer's prompt scopes it to
     /// its own concern.
     pub context: ReviewContext,
+    /// Whether this agent performs the full review or only routes it.
+    pub purpose: ReviewPurpose,
     /// The run's shared spawn governor, so every agent launch this request makes
     /// (including a backend reprompt) counts against the run-wide caps. Cloned from
     /// the one governor [`execute_with`] builds, so all reviewers share it.
@@ -103,6 +105,7 @@ impl OwnedRequest {
                 base: &self.base,
                 merge_base: &self.merge_base,
                 context: &self.context,
+                purpose: self.purpose,
             };
             backend::dispatch(&request, &self.governor).await
         })
@@ -168,6 +171,8 @@ pub struct ExecContext {
     /// the reviewers that ran, so it must not become attestable as a verdict on
     /// the full triggered set.
     pub partial: bool,
+    /// Whether an explicit reviewer selection should bypass semantic routing.
+    pub force: bool,
     /// Reviewers carrying their verdict forward from the branch's previous run
     /// because their trigger-scoped diff is unchanged ([`crate::carry`]), keyed
     /// by name. Like `replayed`, these fold into the tally and the persisted
@@ -225,12 +230,12 @@ pub struct ReplayedReviewer {
     /// (not just its name) so persistence (backend, mode, trigger) has the same
     /// fidelity a freshly-executed reviewer's row does.
     pub reviewer: Reviewer,
-    /// The bundle's `reviewer.resolved` event for this reviewer, exactly as
+    /// The bundle's terminal event for this reviewer, exactly as
     /// attested. Already parsed and checked by
-    /// [`crate::attest::replay::plan`] (a well-formed `reviewer.resolved`
-    /// event bound to its own reviewer name), so the runner re-derives
-    /// verdict, summary, findings, usage, and duration from it with no
-    /// further JSON parsing or boundary revalidation; `has_transcript` is
+    /// [`crate::attest::replay::plan`] (a well-formed `reviewer.resolved` or
+    /// `reviewer.skipped` event bound to its own reviewer name), so the runner
+    /// re-derives the outcome from it with no further JSON parsing or boundary
+    /// revalidation; `has_transcript` is
     /// always overridden to `false` (see [`ExecContext::replayed`]'s doc
     /// comment) since there is no local transcript in the CI store.
     pub event: RunEvent,
@@ -271,6 +276,10 @@ struct Resolved {
     /// The scope digest to stamp on this reviewer's `reviewer.resolved` event,
     /// when one was computed.
     scope_digest: Option<String>,
+    /// Whether the full reviewer was omitted by its agent trigger.
+    skipped: bool,
+    /// The semantic routing decision, when the reviewer has an agent trigger.
+    trigger: Option<TriggerResolution>,
 }
 
 impl Resolved {
@@ -303,8 +312,8 @@ pub async fn execute(
     layout: &Layout,
     emit: &mut dyn FnMut(&RunEvent),
 ) -> Result<Decision> {
-    let exec = |req: OwnedRequest| req.dispatch();
-    execute_with(matched, ctx, layout, emit, &exec).await
+    let exec: Arc<ReviewFn> = Arc::new(|req: OwnedRequest| req.dispatch());
+    execute_with(matched, ctx, layout, emit, exec).await
 }
 
 /// [`execute`] with an injectable backend factory, for tests.
@@ -323,7 +332,7 @@ pub async fn execute_with(
     ctx: &ExecContext,
     layout: &Layout,
     emit: &mut dyn FnMut(&RunEvent),
-    exec: &ReviewFn,
+    exec: Arc<ReviewFn>,
 ) -> Result<Decision> {
     let run_started = Instant::now();
 
@@ -337,7 +346,7 @@ pub async fn execute_with(
     // collect it in registry order, then resolve fresh + replayed + carried rows
     // and re-check each stamped scope digest against the post-run tree.
     let started_events = emit_started_events(ctx, matched, emit);
-    let results = run_fresh(matched, ctx, exec, &governor).await;
+    let results = run_fresh(matched, ctx, &exec, &governor).await;
     let mut resolved = resolve_all(matched, ctx, results);
     recheck_scope_digests(&mut resolved, ctx);
 
@@ -354,18 +363,35 @@ pub async fn execute_with(
     for item in &resolved {
         persist_reviewer(layout, &ctx.run, item)
             .wrap_err_with(|| format!("persisting reviewer '{}'", item.reviewer.name))?;
-        let event = RunEvent::ReviewerResolved {
-            run: ctx.run.clone(),
-            reviewer: item.reviewer.name.clone(),
-            verdict: item.decision,
-            summary: item.summary.clone(),
-            findings: item.findings.clone(),
-            usage: item.usage,
-            duration_ms: duration_ms(item.duration),
-            has_transcript: item.transcript.is_some(),
-            replayed: item.replayed,
-            carried: item.carried,
-            scope_digest: item.scope_digest.clone(),
+        let event = if item.skipped {
+            RunEvent::ReviewerSkipped {
+                run: ctx.run.clone(),
+                reviewer: item.reviewer.name.clone(),
+                mode: item.reviewer.mode,
+                trigger: item.trigger.clone().ok_or_else(|| {
+                    eyre!(
+                        "skipped reviewer '{}' has no trigger resolution",
+                        item.reviewer.name
+                    )
+                })?,
+                has_transcript: item.transcript.is_some(),
+                replayed: item.replayed,
+            }
+        } else {
+            RunEvent::ReviewerResolved {
+                run: ctx.run.clone(),
+                reviewer: item.reviewer.name.clone(),
+                verdict: item.decision,
+                summary: item.summary.clone(),
+                findings: item.findings.clone(),
+                usage: item.usage,
+                duration_ms: duration_ms(item.duration),
+                has_transcript: item.transcript.is_some(),
+                replayed: item.replayed,
+                carried: item.carried,
+                scope_digest: item.scope_digest.clone(),
+                trigger: item.trigger.clone(),
+            }
         };
         emit(&event);
         events.push(event);
@@ -497,7 +523,7 @@ fn emit_started_events(
 async fn run_fresh(
     matched: &[&Reviewer],
     ctx: &ExecContext,
-    exec: &ReviewFn,
+    exec: &Arc<ReviewFn>,
     governor: &Arc<SpawnGovernor>,
 ) -> Vec<Option<ReviewTaskResult>> {
     let mut set: JoinSet<(usize, ReviewTaskResult)> = JoinSet::new();
@@ -509,24 +535,20 @@ async fn run_fresh(
             base: ctx.base.clone(),
             merge_base: ctx.merge_base.clone(),
             context: ctx.context.clone(),
+            purpose: ReviewPurpose::Review,
             governor: governor.clone(),
         };
-        let timeout = reviewer.timeout.unwrap_or(DEFAULT_TIMEOUT);
-        let future = exec(request);
+        let force = ctx.force;
+        let exec = exec.clone();
         set.spawn(async move {
             let started = Instant::now();
-            let outcome = match tokio::time::timeout(timeout, future).await {
-                Ok(result) => match result {
-                    Ok(outcome) => TaskOutcome::Ok(outcome),
-                    Err(err) => TaskOutcome::Failed(format!("{err:#}")),
-                },
-                Err(_elapsed) => TaskOutcome::TimedOut,
-            };
+            let (outcome, trigger) = run_one(request, exec, force).await;
             (
                 index,
                 ReviewTaskResult {
                     outcome,
                     duration: started.elapsed(),
+                    trigger,
                 },
             )
         });
@@ -646,6 +668,13 @@ fn recheck_scope_digests(resolved: &mut [Resolved], ctx: &ExecContext) {
 struct ReviewTaskResult {
     outcome: TaskOutcome,
     duration: Duration,
+    trigger: Option<TriggerRun>,
+}
+
+/// The recorded routing call plus its local transcript.
+struct TriggerRun {
+    resolution: TriggerResolution,
+    transcript: Option<String>,
 }
 
 /// What a single reviewer task produced.
@@ -656,6 +685,164 @@ enum TaskOutcome {
     Failed(String),
     /// The reviewer exceeded its timeout.
     TimedOut,
+    /// The agent trigger decided the full reviewer does not apply.
+    Skipped,
+}
+
+/// Execute an optional agent trigger, then the full reviewer when required.
+async fn run_one(
+    request: OwnedRequest,
+    exec: Arc<ReviewFn>,
+    force: bool,
+) -> (TaskOutcome, Option<TriggerRun>) {
+    let trigger = if force {
+        None
+    } else {
+        match request.reviewer.trigger.agent() {
+            Some(agent) => {
+                let trigger_request = OwnedRequest {
+                    reviewer: trigger_reviewer(&request.reviewer, agent),
+                    run: request.run.clone(),
+                    repo_root: request.repo_root.clone(),
+                    base: request.base.clone(),
+                    merge_base: request.merge_base.clone(),
+                    // Routing is based on the changeset itself. Author-supplied
+                    // intent and discussion cannot justify a semantic skip.
+                    context: ReviewContext::default(),
+                    purpose: ReviewPurpose::Routing,
+                    governor: request.governor.clone(),
+                };
+                let timeout = agent.timeout.unwrap_or(DEFAULT_TRIGGER_TIMEOUT);
+                let started = Instant::now();
+                let result = tokio::time::timeout(timeout, exec(trigger_request)).await;
+                let run = resolve_trigger_result(
+                    result,
+                    started.elapsed(),
+                    timeout,
+                    backend::concrete_backend(agent.backend),
+                );
+                if run.resolution.decision == TriggerDecision::Skip {
+                    return (TaskOutcome::Skipped, Some(run));
+                }
+                Some(run)
+            }
+            None => None,
+        }
+    };
+
+    let timeout = request.reviewer.timeout.unwrap_or(DEFAULT_TIMEOUT);
+    let outcome = match tokio::time::timeout(timeout, exec(request)).await {
+        Ok(Ok(outcome)) => TaskOutcome::Ok(outcome),
+        Ok(Err(err)) => TaskOutcome::Failed(format!("{err:#}")),
+        Err(_elapsed) => TaskOutcome::TimedOut,
+    };
+    (outcome, trigger)
+}
+
+/// Agent triggers are intentionally short. A failure or timeout resolves to
+/// `run`, so this limit can only spend more reviewer tokens, never suppress a
+/// required review.
+const DEFAULT_TRIGGER_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+
+/// Build the least-privilege reviewer profile used to ask the routing question.
+fn trigger_reviewer(reviewer: &Reviewer, agent: &AgentTrigger) -> Reviewer {
+    Reviewer {
+        name: format!("{}-trigger", reviewer.name),
+        trigger: Trigger::Paths(vec!["**".to_string()]),
+        mode: Mode::Gate,
+        backend: agent.backend,
+        model: agent.model.clone(),
+        effort: agent.effort.clone(),
+        timeout: agent.timeout,
+        runner: None,
+        env: Default::default(),
+        capabilities: Capabilities::default(),
+        inputs: Default::default(),
+        attestation: None,
+        prompt: format!(
+            "Decide whether the full reviewer '{}' applies to the actual changeset.\n\n\
+             Routing instruction:\n{}\n\n\
+             Inspect the changeset before deciding. Return a passing Bastion verdict with no \
+             findings. The summary must be exactly `run: <reason>` when the full reviewer \
+             should execute, or `skip: <reason>` only when it clearly does not apply. If \
+             uncertain, choose `run`.",
+            reviewer.name, agent.prompt
+        ),
+    }
+}
+
+/// Parse the routing answer. Any execution or contract failure forces the full
+/// reviewer to run, preserving recall at the cost of extra work.
+fn resolve_trigger_result(
+    result: std::result::Result<Result<ReviewOutcome>, tokio::time::error::Elapsed>,
+    duration: Duration,
+    timeout: Duration,
+    backend: crate::reviewer::Backend,
+) -> TriggerRun {
+    match result {
+        Ok(Ok(outcome)) => {
+            let decision = parse_trigger_summary(&outcome.verdict);
+            let (decision, reason) = decision.unwrap_or_else(|| {
+                (
+                    TriggerDecision::Run,
+                    "the trigger agent returned a malformed decision; running the full reviewer"
+                        .to_string(),
+                )
+            });
+            TriggerRun {
+                resolution: TriggerResolution {
+                    backend,
+                    decision,
+                    reason,
+                    usage: outcome.usage,
+                    duration_ms: duration_ms(duration),
+                },
+                transcript: outcome.transcript,
+            }
+        }
+        Ok(Err(err)) => TriggerRun {
+            resolution: TriggerResolution {
+                backend,
+                decision: TriggerDecision::Run,
+                reason: format!("the trigger agent failed ({err:#}); running the full reviewer"),
+                usage: None,
+                duration_ms: duration_ms(duration),
+            },
+            transcript: None,
+        },
+        Err(_) => TriggerRun {
+            resolution: TriggerResolution {
+                backend,
+                decision: TriggerDecision::Run,
+                reason: format!(
+                    "the trigger agent timed out after {}s; running the full reviewer",
+                    timeout.as_secs()
+                ),
+                usage: None,
+                duration_ms: duration_ms(duration),
+            },
+            transcript: None,
+        },
+    }
+}
+
+/// Extract the strict `run: reason` or `skip: reason` contract from the normal
+/// structured backend envelope.
+fn parse_trigger_summary(verdict: &Verdict) -> Option<(TriggerDecision, String)> {
+    if verdict.decision != Decision::Pass || !verdict.findings.is_empty() {
+        return None;
+    }
+    let (raw, reason) = verdict.summary.split_once(':')?;
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return None;
+    }
+    let decision = match raw.trim() {
+        "run" => TriggerDecision::Run,
+        "skip" => TriggerDecision::Skip,
+        _ => return None,
+    };
+    Some((decision, reason.to_string()))
 }
 
 /// Apply fail-closed (gate) / fail-open (advisor) policy to one reviewer's raw
@@ -678,39 +865,79 @@ fn resolve(
         Some(ReviewTaskResult {
             outcome: TaskOutcome::Ok(outcome),
             duration,
+            trigger,
         }) => {
             let verdict = outcome.verdict;
             // An advisor never blocks: clamp its decision to pass and record any
             // blocking finding as optional, so the row still surfaces the advice
             // while satisfying the universal pass-carries-no-blocking invariant.
             let (decision, findings) = clamp_advisor(is_gate, verdict.decision, verdict.findings);
+            let transcript = combine_transcripts(
+                trigger.as_ref().and_then(|run| run.transcript.as_deref()),
+                outcome.transcript.as_deref(),
+            );
             Resolved {
                 reviewer: reviewer.clone(),
                 decision,
                 summary: verdict.summary,
                 findings,
                 usage: outcome.usage,
-                transcript: outcome.transcript,
+                transcript,
                 duration,
                 replayed: false,
                 carried: false,
                 scope_digest,
+                skipped: false,
+                trigger: trigger.map(|run| run.resolution),
             }
         }
         Some(ReviewTaskResult {
             outcome: TaskOutcome::Failed(reason),
             duration,
-        }) => fail(reviewer, is_gate, &reason, duration),
+            trigger,
+        }) => with_trigger(fail(reviewer, is_gate, &reason, duration), trigger),
         Some(ReviewTaskResult {
             outcome: TaskOutcome::TimedOut,
             duration,
+            trigger,
+        }) => with_trigger(
+            fail(
+                reviewer,
+                is_gate,
+                &format!(
+                    "timed out after {}s",
+                    reviewer.timeout.unwrap_or(DEFAULT_TIMEOUT).as_secs()
+                ),
+                duration,
+            ),
+            trigger,
+        ),
+        Some(ReviewTaskResult {
+            outcome: TaskOutcome::Skipped,
+            duration,
+            trigger: Some(trigger),
+        }) => Resolved {
+            reviewer: reviewer.clone(),
+            decision: Decision::Pass,
+            summary: trigger.resolution.reason.clone(),
+            findings: Vec::new(),
+            usage: None,
+            transcript: trigger.transcript,
+            duration,
+            replayed: false,
+            carried: false,
+            scope_digest: None,
+            skipped: true,
+            trigger: Some(trigger.resolution),
+        },
+        Some(ReviewTaskResult {
+            outcome: TaskOutcome::Skipped,
+            duration,
+            trigger: None,
         }) => fail(
             reviewer,
             is_gate,
-            &format!(
-                "timed out after {}s",
-                reviewer.timeout.unwrap_or(DEFAULT_TIMEOUT).as_secs()
-            ),
+            "the reviewer was skipped without a trigger decision",
             duration,
         ),
         None => fail(
@@ -719,6 +946,32 @@ fn resolve(
             "the reviewer task crashed",
             Duration::ZERO,
         ),
+    }
+}
+
+/// Preserve a fail-closed full-review outcome while attaching the routing call
+/// that led to it.
+fn with_trigger(mut resolved: Resolved, trigger: Option<TriggerRun>) -> Resolved {
+    if let Some(trigger) = trigger {
+        resolved.transcript = combine_transcripts(
+            trigger.transcript.as_deref(),
+            resolved.transcript.as_deref(),
+        );
+        resolved.trigger = Some(trigger.resolution);
+    }
+    resolved
+}
+
+/// Keep the two agent sessions inspectable through the existing transcript
+/// command without adding a second artifact namespace.
+fn combine_transcripts(trigger: Option<&str>, review: Option<&str>) -> Option<String> {
+    match (trigger, review) {
+        (Some(trigger), Some(review)) => Some(format!(
+            "== agent trigger ==\n{trigger}\n\n== reviewer ==\n{review}"
+        )),
+        (Some(trigger), None) => Some(trigger.to_string()),
+        (None, Some(review)) => Some(review.to_string()),
+        (None, None) => None,
     }
 }
 
@@ -791,6 +1044,8 @@ fn fail(reviewer: &Reviewer, is_gate: bool, reason: &str, duration: Duration) ->
         replayed: false,
         carried: false,
         scope_digest: None,
+        skipped: false,
+        trigger: None,
     }
 }
 
@@ -799,12 +1054,15 @@ fn tally(resolved: &[Resolved]) -> Gates {
     let mut total = 0u32;
     let mut passed = 0u32;
     let mut blocked = 0u32;
+    let mut skipped = 0u32;
     for item in resolved {
         if !item.counts_as_gate() {
             continue;
         }
         total += 1;
-        if item.decision.is_block() {
+        if item.skipped {
+            skipped += 1;
+        } else if item.decision.is_block() {
             blocked += 1;
         } else {
             passed += 1;
@@ -814,6 +1072,7 @@ fn tally(resolved: &[Resolved]) -> Gates {
         total,
         passed,
         blocked,
+        skipped,
     }
 }
 
@@ -823,6 +1082,11 @@ fn total_usage(resolved: &[Resolved]) -> Usage {
     resolved
         .iter()
         .filter_map(|item| item.usage)
+        .chain(
+            resolved
+                .iter()
+                .filter_map(|item| item.trigger.as_ref().and_then(|trigger| trigger.usage)),
+        )
         .fold(Usage::default(), |acc, u| Usage {
             tokens_in: acc.tokens_in.saturating_add(u.tokens_in),
             tokens_out: acc.tokens_out.saturating_add(u.tokens_out),

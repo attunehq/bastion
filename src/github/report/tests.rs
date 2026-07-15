@@ -5,7 +5,7 @@ use super::*;
 // submodule and are exercised only here, so import them for the test build
 // rather than re-globbing them into the non-test lib.
 use super::post::*;
-use crate::event::{ReviewerRef, RunId};
+use crate::event::{ReviewerRef, RunId, TriggerDecision, TriggerResolution};
 use crate::github::client::test_support::RecordingClient;
 use crate::github::client::{ApiResponse, Method};
 
@@ -63,6 +63,7 @@ fn sample_events() -> Vec<RunEvent> {
         RunEvent::ReviewerResolved {
             carried: false,
             scope_digest: None,
+            trigger: None,
             run: run.clone(),
             reviewer: "tenant-isolation".into(),
             verdict: Decision::Block,
@@ -96,6 +97,7 @@ fn sample_events() -> Vec<RunEvent> {
         RunEvent::ReviewerResolved {
             carried: false,
             scope_digest: None,
+            trigger: None,
             run: run.clone(),
             reviewer: "file-responsibility".into(),
             verdict: Decision::Pass,
@@ -109,6 +111,7 @@ fn sample_events() -> Vec<RunEvent> {
         RunEvent::ReviewerResolved {
             carried: false,
             scope_digest: None,
+            trigger: None,
             run: run.clone(),
             reviewer: "style".into(),
             verdict: Decision::Pass,
@@ -133,6 +136,7 @@ fn sample_events() -> Vec<RunEvent> {
                 total: 2,
                 passed: 1,
                 blocked: 1,
+                skipped: 0,
             },
             duration_ms: 40_000,
             tokens_in: 1820,
@@ -191,6 +195,7 @@ fn status_line_omits_tokens_when_none_were_reported() {
                 total: 0,
                 passed: 0,
                 blocked: 0,
+                skipped: 0,
             },
             duration_ms: 0,
             tokens_in: 0,
@@ -222,6 +227,7 @@ fn comment_handles_zero_reviewers() {
                 total: 0,
                 passed: 0,
                 blocked: 0,
+                skipped: 0,
             },
             duration_ms: 0,
             tokens_in: 0,
@@ -262,6 +268,7 @@ fn comment_footer_nudges_to_a_dedicated_app_when_asked() {
                 total: 0,
                 passed: 0,
                 blocked: 0,
+                skipped: 0,
             },
             duration_ms: 0,
             tokens_in: 0,
@@ -316,6 +323,7 @@ fn comment_folds_in_a_skills_warning_on_a_zero_reviewer_run() {
                 total: 0,
                 passed: 0,
                 blocked: 0,
+                skipped: 0,
             },
             duration_ms: 0,
             tokens_in: 0,
@@ -574,6 +582,77 @@ fn check_runs_map_gate_and_advisor_conclusions() {
 }
 
 #[test]
+fn agent_trigger_skip_is_visible_without_becoming_a_pass() {
+    let run = RunId("r-skip".into());
+    let events = vec![
+        RunEvent::RunStarted {
+            partial: false,
+            run: run.clone(),
+            branch: "feat".into(),
+            base: "main".into(),
+            changed: 1,
+            reviewers: vec![ReviewerRef {
+                name: "single-responsibility".into(),
+                mode: Mode::Gate,
+            }],
+        },
+        RunEvent::ReviewerStarted {
+            run: run.clone(),
+            reviewer: "single-responsibility".into(),
+            mode: Mode::Gate,
+            backend: Backend::ClaudeCode,
+        },
+        RunEvent::ReviewerSkipped {
+            run: run.clone(),
+            reviewer: "single-responsibility".into(),
+            mode: Mode::Gate,
+            trigger: TriggerResolution {
+                backend: Backend::Codex,
+                decision: TriggerDecision::Skip,
+                reason: "Only generated metadata changed.".into(),
+                usage: None,
+                duration_ms: 750,
+            },
+            has_transcript: true,
+            replayed: false,
+        },
+        RunEvent::RunCompleted {
+            partial: false,
+            run,
+            verdict: Decision::Pass,
+            gates: Gates {
+                total: 1,
+                passed: 0,
+                blocked: 0,
+                skipped: 1,
+            },
+            duration_ms: 800,
+            tokens_in: 0,
+            tokens_out: 0,
+            cache_read: 0,
+            cost_usd: Money::default(),
+        },
+    ];
+
+    let digest = digest(&events);
+    let comment = comment_body(&digest, false, None);
+    assert!(comment.contains("0 of 1 gate(s) passed; 1 skipped"));
+    assert!(comment.contains("| `single-responsibility` | gate | skipped |"));
+
+    let checks = check_runs(&ctx(), &digest);
+    let reviewer = checks
+        .iter()
+        .find(|check| check.name == "bastion / single-responsibility")
+        .unwrap();
+    assert_eq!(reviewer.conclusion, Conclusion::Success);
+    assert!(reviewer.title.starts_with("Skipped:"));
+    assert!(reviewer.summary.contains("- Agent: codex"));
+    let aggregate = checks.iter().find(|check| check.name == "bastion").unwrap();
+    assert_eq!(aggregate.conclusion, Conclusion::Success);
+    assert_eq!(aggregate.title, "0/1 gates passed, 1 skipped");
+}
+
+#[test]
 fn aggregate_reads_incomplete_run_as_failure() {
     // A stream with no run.completed has no recorded verdict, so the aggregate
     // cannot read as a pass: an incomplete run concludes failure.
@@ -632,6 +711,7 @@ fn gate_resolved(name: &str, verdict: Decision, findings: Vec<Finding>) -> RunEv
     RunEvent::ReviewerResolved {
         carried: false,
         scope_digest: None,
+        trigger: None,
         run: RunId("r-rec".into()),
         reviewer: name.into(),
         verdict,
@@ -656,6 +736,7 @@ fn clean_pass_with_gates_concludes_success() {
                 total: 1,
                 passed: 1,
                 blocked: 0,
+                skipped: 0,
             },
         ),
     );
@@ -695,6 +776,7 @@ fn recorded_block_concludes_failure() {
                 total: 1,
                 passed: 0,
                 blocked: 1,
+                skipped: 0,
             },
         ),
     );
@@ -739,6 +821,7 @@ fn self_contradictory_gate_pass_fails_closed() {
                 total: 1,
                 passed: 1,
                 blocked: 0,
+                skipped: 0,
             },
         ),
     );
@@ -780,6 +863,7 @@ fn trivial_pass_with_a_plan_but_no_reviewers_concludes_success() {
                 total: 0,
                 passed: 0,
                 blocked: 0,
+                skipped: 0,
             },
             duration_ms: 1000,
             tokens_in: 0,
@@ -821,6 +905,7 @@ fn advisor_with_a_blocking_finding_does_not_block() {
         RunEvent::ReviewerResolved {
             carried: false,
             scope_digest: None,
+            trigger: None,
             run: RunId("r-rec".into()),
             reviewer: "a1".into(),
             verdict: Decision::Pass,
@@ -839,6 +924,7 @@ fn advisor_with_a_blocking_finding_does_not_block() {
                 total: 0,
                 passed: 0,
                 blocked: 0,
+                skipped: 0,
             },
             duration_ms: 1000,
             tokens_in: 0,
@@ -908,6 +994,7 @@ fn oversized_check_summary_is_capped_with_a_pointer() {
                 total: 1,
                 passed: 0,
                 blocked: 1,
+                skipped: 0,
             },
         ),
     );
@@ -952,6 +1039,7 @@ fn annotations_cap_at_the_limit_and_the_summary_notes_the_overflow() {
 
     let row = ReviewerRow {
         carried: false,
+        skipped: false,
         name: "style".into(),
         mode: Mode::Advisor,
         backend: Some(Backend::Codex),
@@ -972,6 +1060,7 @@ fn annotations_cap_at_the_limit_and_the_summary_notes_the_overflow() {
 fn reviewer_summary_tokens_line_includes_cache_only_when_nonzero() {
     let row_with = |cache_read: u64| ReviewerRow {
         carried: false,
+        skipped: false,
         name: "r".into(),
         mode: Mode::Gate,
         backend: Some(Backend::ClaudeCode),

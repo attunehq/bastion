@@ -10,7 +10,7 @@ order: 6
 > billing.
 
 The local loop gets you to green before you open a PR. CI is the authoritative
-confirmation: it executes, replays, or carries the reviewers from the repository's
+confirmation: it executes, skips, replays, or carries the reviewers from the repository's
 `.bastion.yaml` (replay draws from a verified attestation, when the registry sets
 `attestations: true`; carry reuses an unchanged reviewer's pass from the branch's
 previous CI run) and reports one merge gate. Because routing and aggregation are
@@ -29,22 +29,24 @@ chapter covers the GitHub adapter, the one forge Bastion targets.
 ## How a run maps to GitHub
 
 On each pull-request event (`opened`, `synchronize`, `reopened`) the workflow runs
-`bastion review`, which computes the changed files, routes to the matching
-reviewers, then executes them in parallel with timeouts, replays those covered by a
-verified attestation (a replayed reviewer is reconstructed from the bundle, with no
-backend dispatch or timeout), or carries an unchanged reviewer's pass forward from the
-branch's previous CI run (no dispatch either; the GitHub Action persists the run
-store across runs by default), and persists the run. A second step, `bastion github
-report`, reads that run and posts it. A verdict reaches two GitHub surfaces:
+`bastion review`, which computes the changed files, routes reviewer candidates, and
+resolves them in parallel. A candidate may execute with a timeout, record an
+agent-trigger skip, replay from a verified attestation with no backend dispatch, or
+carry an unchanged pass from the branch's previous CI run. The GitHub Action
+persists the run store across runs by default. A second step, `bastion github
+report`, reads the persisted run and posts each terminal outcome to two GitHub
+surfaces:
 
 - **Findings are posted to the PR.** `bastion github report` renders every finding
   (blocking and optional) into a single sticky PR comment, and attaches each located
   finding to its reviewer's check run as an annotation on the finding's `path` and
   line range. The sticky comment is the surface an implementing agent reads; it
   carries everything it needs to act.
-- **Each verdict becomes a check run** named after the reviewer
+- **Each terminal outcome becomes a check run** named after the reviewer
   (`bastion / tenant-isolation`). A blocking gate reports `failure`; a passing gate
-  reports `success`; an advisor reports `success` with its findings attached.
+  reports `success`; an advisor reports `success` with its findings attached. An
+  agent-trigger skip reports `success` with a `Skipped` title and its routing reason,
+  without claiming that the reviewer passed.
 
 `bastion github report` also folds a skills-freshness advisory into the sticky comment
 when the checked-out repo's bundled skills (`.claude/skills` and `.agents/skills`) are
@@ -65,9 +67,9 @@ GitHub surface has a local twin:
 
 | GitHub                                                         | Local                               |
 | -------------------------------------------------------------- | ----------------------------------- |
-| A per-reviewer check run reaching its conclusion               | `reviewer.resolved` event           |
+| A per-reviewer check run reaching its conclusion               | `reviewer.resolved` or `reviewer.skipped` event |
 | Findings in the sticky PR comment and as check-run annotations | `findings` in `reviewer.resolved`   |
-| Tokens and cost in the check output                            | `usage` in `reviewer.resolved`      |
+| Tokens and cost in the check output                            | `usage` in `reviewer.resolved`; `trigger.usage` for trigger calls and skips |
 | The aggregate `bastion` check and the sticky PR comment        | `run.completed` event               |
 | Transcript in the uploaded run artifact                        | saved on disk, `bastion transcript` |
 
@@ -86,9 +88,9 @@ reviewers, so there is no fixed list of names to require.
 The fix is a single always-present check, **`bastion`**, and it is the only one
 branch protection requires. It runs even when zero reviewers match (a trivial pass)
 so it is always there to require. Internally it reflects the aggregate: `success`
-only when every triggered gate passed, `failure` if any gate blocked, errored, or
-timed out (fail-closed). The per-reviewer checks stay informational; `bastion` is
-the gate.
+when every applicable gate passed, including runs where an agent trigger recorded
+a semantic skip; `failure` if any gate blocked, errored, or timed out (fail-closed).
+The per-reviewer checks stay informational; `bastion` is the gate.
 
 ## The workflow
 

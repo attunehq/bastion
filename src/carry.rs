@@ -6,16 +6,17 @@
 //! the whole triggered set even though most of it judged content the fix never
 //! touched. This module keys each reviewer's verdict to a *scope digest*: a hash
 //! of the reviewer's own effective definition plus the diff of exactly the
-//! changed files its trigger matched. On the next run of the same branch, a
+//! changed files its verdict judged. A path trigger judges its matched slice;
+//! an agent trigger sees the full changeset after its path prefilter admits the
+//! candidate, so its digest covers every changed file. On the next run of the same branch, a
 //! reviewer whose digest is unchanged and whose prior verdict was a pass is
 //! *carried* instead of executed; a reviewer whose scoped content changed (the
 //! one that blocked, plus anything the fix touched) runs fresh.
 //!
-//! The soundness boundary is the trigger, deliberately: Bastion's design routes
-//! a reviewer by its trigger globs, so those globs are already the declaration
-//! of what the reviewer's concern depends on. A reviewer whose judgment spans
-//! files outside its trigger should widen its trigger; that is the same
-//! contract routing itself enforces.
+//! The soundness boundary is the trigger. A path trigger's globs declare the
+//! content its reviewer depends on. Agent-trigger paths are only a cheap
+//! admission prefilter: the routing agent receives the full changeset, so carry
+//! must bind that full changeset too.
 //!
 //! Carry runs on both surfaces, local and CI: a re-review reuses its own prior
 //! run's work instead of paying to re-execute a reviewer whose scoped content did
@@ -97,7 +98,8 @@ struct DigestInput<'a> {
     /// config loading), so any edit to the reviewer (prompt, backend, model,
     /// trigger, capabilities) invalidates its carried verdicts.
     reviewer: &'a Reviewer,
-    /// The changed files the reviewer's trigger matched, sorted.
+    /// The sorted changed files the verdict judged: the path-matched slice for
+    /// a path trigger, or the full changeset for an agent trigger.
     files: &'a [&'a str],
     /// `git diff <merge-base> -- <files>` over the working tree: the tracked
     /// slice of the changeset this reviewer's verdict judged, and the diff the
@@ -161,17 +163,18 @@ fn untracked_descriptor(repo_root: &Path, path: &str) -> std::io::Result<String>
 
 /// Compute the scope digest for one triggered reviewer: a lowercase-hex
 /// SHA-256 over the reviewer's effective definition, the diff of the changed
-/// files its trigger matched (working tree against `merge_base`; untracked
-/// matched files encoded by kind, mode, and content), and the
-/// `merge_base..HEAD` commit messages that touched those files.
+/// files its verdict judged (working tree against `merge_base`; untracked files
+/// encoded by kind, mode, and content), and the `merge_base..HEAD` commit
+/// messages that touched those files. Path triggers judge their matched slice;
+/// agent triggers judge the full changeset after their prefilter admits them.
 ///
 /// `merge_base` is the comparison point only, never a digest input: the digest
 /// binds the changeset a verdict judged, not the commit it happened to be
 /// diffed at (see the module docs on base movement and rebases).
 ///
 /// `changed` is the full changed-file set the run routed on
-/// ([`git::changed_files`]); the trigger scoping happens here so the digest and
-/// routing can never disagree about which files a reviewer's globs cover.
+/// ([`git::changed_files`]); the trigger scoping happens here so path-trigger
+/// digests and routing agree while agent-trigger digests retain the full input.
 ///
 /// # Errors
 ///
@@ -185,7 +188,7 @@ pub fn scope_digest(
     changed: &[String],
 ) -> Result<String> {
     let mut builder = GlobSetBuilder::new();
-    for pattern in &reviewer.trigger {
+    for pattern in reviewer.trigger.paths() {
         builder.add(Glob::new(pattern).wrap_err_with(|| {
             format!(
                 "reviewer '{}' has an invalid trigger glob: {pattern}",
@@ -197,10 +200,14 @@ pub fn scope_digest(
         .build()
         .wrap_err_with(|| format!("building trigger matcher for reviewer '{}'", reviewer.name))?;
 
+    // Agent-trigger paths only decide whether the routing call is worth making.
+    // Once admitted, that call sees the full changeset, so a carried verdict must
+    // be invalidated by any changed file, including one outside the prefilter.
+    let scope_all = reviewer.trigger.agent().is_some();
     let mut files: Vec<&str> = changed
         .iter()
         .map(String::as_str)
-        .filter(|path| globs.is_match(path))
+        .filter(|path| scope_all || globs.is_match(path))
         .collect();
     files.sort_unstable();
 
@@ -318,7 +325,7 @@ pub fn plan(
 }
 
 /// The prior run's seal-covered reviewer names, when the seal exists, records
-/// no test seam, and verifies over the run's own persisted resolved events.
+/// no test seam, and verifies over the run's own persisted terminal events.
 /// `None` when any of that fails, which disqualifies carry for every
 /// repository reviewer.
 fn verified_seal_reviewers(
@@ -335,7 +342,10 @@ fn verified_seal_reviewers(
     let mut sealed: Vec<(&str, &RunEvent)> = events
         .iter()
         .filter_map(|event| match event {
-            RunEvent::ReviewerResolved { reviewer, .. } if names.contains(reviewer.as_str()) => {
+            RunEvent::ReviewerResolved { reviewer, .. }
+            | RunEvent::ReviewerSkipped { reviewer, .. }
+                if names.contains(reviewer.as_str()) =>
+            {
                 Some((reviewer.as_str(), event))
             }
             _ => None,
@@ -377,13 +387,17 @@ fn resolved_pass_with_digest<'a>(
 mod tests {
     use super::*;
     use crate::event::{Gates, ReviewerRef, RunId};
-    use crate::reviewer::{Capabilities, Mode};
+    use crate::reviewer::{AgentTrigger, AgentTriggerKind, Capabilities, Mode, Trigger};
     use crate::verdict::Money;
 
     fn reviewer(name: &str, triggers: &[&str]) -> Reviewer {
         Reviewer {
             name: name.into(),
-            trigger: triggers.iter().map(|s| (*s).to_string()).collect(),
+            trigger: triggers
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect::<Vec<_>>()
+                .into(),
             mode: Mode::Gate,
             backend: crate::reviewer::Backend::ClaudeCode,
             model: None,
@@ -396,6 +410,20 @@ mod tests {
             attestation: None,
             prompt: "p".into(),
         }
+    }
+
+    fn agent_reviewer(name: &str, paths: &[&str]) -> Reviewer {
+        let mut reviewer = reviewer(name, &[]);
+        reviewer.trigger = Trigger::Agent(AgentTrigger {
+            kind: AgentTriggerKind::Agent,
+            prompt: "decide whether the concern applies".into(),
+            backend: crate::reviewer::Backend::Codex,
+            model: None,
+            effort: None,
+            timeout: None,
+            paths: paths.iter().map(|path| (*path).to_string()).collect(),
+        });
+        reviewer
     }
 
     /// Run `git` with a deterministic identity in `dir`.
@@ -462,6 +490,25 @@ mod tests {
     }
 
     #[test]
+    fn agent_trigger_digest_covers_files_outside_its_path_prefilter() {
+        let tmp = repo();
+        let dir = tmp.path();
+        std::fs::write(dir.join("src/a.rs"), "fn a() { /* edit */ }\n").unwrap();
+        std::fs::write(dir.join("docs/guide.md"), "guide, edited\n").unwrap();
+        let merge_base = git::merge_base(dir, "base").unwrap();
+        let changed = git::changed_files(dir, &merge_base).unwrap();
+        let semantic = agent_reviewer("semantic", &["src/**"]);
+        let first = scope_digest(dir, &merge_base, &semantic, &changed).unwrap();
+
+        // The src prefilter still admits this candidate, but the routing agent
+        // sees docs too. Changing only docs must invalidate the carried pass.
+        std::fs::write(dir.join("docs/guide.md"), "guide, changed again\n").unwrap();
+        let changed = git::changed_files(dir, &merge_base).unwrap();
+        let second = scope_digest(dir, &merge_base, &semantic, &changed).unwrap();
+        assert_ne!(first, second);
+    }
+
+    #[test]
     fn digest_covers_untracked_matched_files() {
         let tmp = repo();
         let dir = tmp.path();
@@ -519,6 +566,7 @@ mod tests {
             replayed: false,
             carried: false,
             scope_digest: Some(digest.into()),
+            trigger: None,
         };
         let events = vec![
             RunEvent::RunStarted {
@@ -540,6 +588,7 @@ mod tests {
                     total: 1,
                     passed: 1,
                     blocked: 0,
+                    skipped: 0,
                 },
                 duration_ms: 5,
                 tokens_in: 0,
@@ -884,6 +933,7 @@ mod tests {
             replayed: false,
             carried: false,
             scope_digest: Some("digest-1".into()),
+            trigger: None,
         };
         let events = vec![
             RunEvent::RunStarted {
@@ -905,6 +955,7 @@ mod tests {
                     total: 1,
                     passed: 0,
                     blocked: 1,
+                    skipped: 0,
                 },
                 duration_ms: 5,
                 tokens_in: 0,

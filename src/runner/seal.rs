@@ -28,6 +28,7 @@ pub(super) fn seal_run(layout: &Layout, ctx: &ExecContext, stream: &[RunEvent]) 
         .iter()
         .filter_map(|event| match event {
             RunEvent::ReviewerResolved { reviewer, .. }
+            | RunEvent::ReviewerSkipped { reviewer, .. }
                 if bindings.repo_reviewers.contains(reviewer.as_str()) =>
             {
                 Some((reviewer.as_str(), event))
@@ -49,7 +50,7 @@ pub(super) fn seal_run(layout: &Layout, ctx: &ExecContext, stream: &[RunEvent]) 
     {
         Ok(values) => values,
         Err(err) => {
-            tracing::warn!(error = %err, "failed to serialize resolved events for sealing; run will be unsealed");
+            tracing::warn!(error = %err, "failed to serialize terminal reviewer events for sealing; run will be unsealed");
             return;
         }
     };

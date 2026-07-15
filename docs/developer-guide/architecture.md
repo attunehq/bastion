@@ -22,7 +22,7 @@ through it.
 | [`src/commands/`](../../src/commands/) | One module per subcommand (`review`, `validate`, `read_back`, `codeowners`, `attest`, `update`, `github_report`, `skills`); `mod.rs` re-exports the CLI surface `cli.rs` calls. |
 | [`src/reviewer.rs`](../../src/reviewer.rs) | The declarative reviewer schema (`Reviewer`, `Mode`, `Backend`, `Capabilities`, `RunnerSpec`, `AttestationPolicy`). |
 | [`src/config.rs`](../../src/config.rs) | Registry loading, discovery, and merge. Walks up for a repository `.bastion.yaml` or `.bastion.yml` (with a deprecated `bastion/reviewers.yaml` fallback that warns) and, via `discover_merged`, layers in a user-level registry from the platform config dir (`user_config_dir`, override `BASTION_CONFIG_DIR`). The merge is a set keyed by name: an identical reviewer in both files is deduplicated, and a same-name-different-config collision keeps both with the repo side scoped to `REPO_SCOPE_PREFIX` (`repo:`). Validates name uniqueness and run-store path-component uniqueness over the merged set. |
-| [`src/routing.rs`](../../src/routing.rs) | Compiling trigger globs and matching them against changed files. |
+| [`src/routing.rs`](../../src/routing.rs) | Compiling path triggers and agent-trigger prefilters, then selecting candidates from the changed files. |
 | [`src/verdict.rs`](../../src/verdict.rs) | The structured verdict (`Decision`, `Verdict`, `Finding`, `Usage`, and `Money`, which carries cents but serializes as dollars). |
 | [`src/context.rs`](../../src/context.rs) | The transport-neutral review context (`ReviewContext`): the author's stated intent, the surrounding discussion (`ContextComment` with a generic `Standing`), and a reviewer's prior findings (`PriorFinding`, keyed by a content-derived `FindingId`). A producer fills it; the backends consume it through `render_for`. Everything in it is untrusted input. |
 | [`src/event.rs`](../../src/event.rs) | The run-event schema streamed as JSONL and persisted to `run.jsonl`. |
@@ -31,7 +31,7 @@ through it.
 | [`src/store.rs`](../../src/store.rs) | Run-history persistence: writing/reading `run.jsonl`, listing and pruning runs, and resolving a branch's most recent run once per review (`latest_run_on_branch`), from which the review context takes its prior findings (`findings_from_events`) and carry planning takes the run to reuse. |
 | [`src/render.rs`](../../src/render.rs) | Human and JSONL output (`Format`). |
 | [`src/text.rs`](../../src/text.rs) | Shared text helpers (`truncate`), used by `render.rs` and the GitHub reporter. |
-| [`src/runner/`](../../src/runner/) | The parallel, timeout-bounded runner: fans matched reviewers out over a `JoinSet`, fails closed on error/timeout, streams events, folds in replayed and carried verdicts, persists each run, and seals an eligible (full, never partial) run on a best-effort basis at persist time. It also builds one per-run [`SpawnGovernor`](../../src/backend/governor.rs) from the effective [`SpawnLimits`](../../src/limits.rs) and aborts a run (persisted, never sealed) whose fan-out trips a cap. `mod.rs` is the orchestration core; `verdicts.rs`, `seal.rs`, and `persist.rs` split out verdict folding, run sealing, and persistence. |
+| [`src/runner/`](../../src/runner/) | The parallel, timeout-bounded runner: resolves agent triggers and full reviewers through one governed backend path, fails closed on review errors, streams terminal verdict or skip events, folds in replayed and carried outcomes, persists each run, and seals an eligible full run. It also builds one per-run [`SpawnGovernor`](../../src/backend/governor.rs) from the effective [`SpawnLimits`](../../src/limits.rs) and aborts a run whose fan-out trips a cap. `mod.rs` is the orchestration core; `verdicts.rs`, `seal.rs`, and `persist.rs` split out outcome folding, run sealing, and persistence. |
 | [`src/limits.rs`](../../src/limits.rs) | The per-run spend caps (`SpawnLimits`): the concurrency, total-launch, and consecutive-dead-launch ceilings that bound one review's agent fan-out. Parsed from the root registry's optional `limits:` block (conservative defaults otherwise), enforced by the spawn governor. Not part of the attestation hash: a cap is an operational safety net, not review policy. |
 | [`src/carry.rs`](../../src/carry.rs) | Incremental re-review: computes each triggered reviewer's trigger-scoped diff digest (`scope_digest`) and plans which prior passes carry forward on a re-run of the same branch (`plan`). Both local and CI runs; a repository reviewer carries only from a prior run whose seal verifies. See [the local surface](./local-surface.md#incremental-re-review). |
 | [`src/seal.rs`](../../src/seal.rs) | The run seal: an HMAC-SHA256 over a canonical digest of the committed HEAD tree, the merge-base tree, the `base..HEAD` patch-id, the effective reviewer config, whether a test seam was active, whether the working tree was dirty (sampled before reviewers ran and again at seal time, dirty if either sample was), and the resolved reviewer events, keyed by a secret embedded in the binary at build time. Sealed by the runner, verified by `bastion attest` and CI; a run sealed dirty cannot be attested. See [Attestation](./attestation.md). |
@@ -86,9 +86,10 @@ Following one review top to bottom touches most of the crate:
 3. **Compute the changeset** (`git.rs`). Bastion asks git for the files that differ
    from `--base` (tracked edits *and* untracked files, committed or not) plus the
    current branch and repo root.
-4. **Route** (`routing.rs`). Each reviewer's trigger globs are compiled and matched
-   against the changed files; the matched reviewers are the ones in scope for this
-   run (each will execute, replay, or carry). An
+4. **Route candidates** (`routing.rs`). Path triggers and optional agent-trigger
+   prefilters are compiled and matched against the changed files. An agent trigger
+   with no paths is a candidate for every non-empty changeset. The resulting
+   candidates will execute, replay, carry, or resolve to a semantic skip. An
    explicit `--reviewer` selection then narrows that set (an unknown or untriggered
    name errors here), and a selection that excludes a triggered reviewer marks the
    run partial: persisted and rendered as such, and never sealed.
@@ -118,12 +119,11 @@ Following one review top to bottom touches most of the crate:
     to `NotAttested`, records no event, and says nothing about attestation. A
     purely local review skips this step entirely. See [Attestation](./attestation.md).
 5b. **Plan carry** (`carry.rs`, both surfaces). Every reviewer about to run
-    gets, best effort, a trigger-scoped diff digest (a digest that fails to
-    compute leaves that reviewer executing fresh and uncarryable): its own
-    effective definition, the diff of the changed files its trigger matched
-    against the merge base (untracked matched files encoded by kind,
-    executable bit, and content), and the scoped commit messages that touched
-    those files. The digest deliberately binds the changeset and not the
+    gets, best effort, a scope digest (a digest that fails to compute leaves
+    that reviewer executing fresh and uncarryable): its own effective
+    definition, the path-matched diff for a path trigger or the full changeset
+    for an agent trigger, and the commit messages that touched the same files.
+    Untracked files are encoded by kind, executable bit, and content. The digest deliberately binds the changeset and not the
     merge-base commit id, so a rebase that reproduces the identical scoped
     diff keeps the verdict carryable; see the module docs in
     [`src/carry.rs`](../../src/carry.rs). The runner re-derives each digest after the reviewers finish (re-scanning
@@ -144,26 +144,31 @@ Following one review top to bottom touches most of the crate:
     stay complementary (replay reuses the author's signed local run, carry reuses
     CI's own prior run). See
     [the local surface](./local-surface.md#incremental-re-review).
-6. **Run** (`runner/`). `execute` builds one per-run `SpawnGovernor` from the
+6. **Resolve triggers and run** (`runner/`). `execute` builds one per-run `SpawnGovernor` from the
    effective `SpawnLimits` (`src/backend/governor.rs`, `src/limits.rs`), then spawns
-   every matched reviewer that is neither replaying nor carrying onto a `JoinSet`,
-   bounds each by its `timeout` (default 15m), and emits `reviewer.started` up front
-   (including for replayed and carried reviewers, so the plan reads the same either
-   way). Each spawned task calls `backend::dispatch`
+   every candidate that is neither replaying nor carrying onto a `JoinSet`,
+   and emits `reviewer.started` up front, including for replayed and carried
+   candidates so the plan reads the same either way. An agent-triggered candidate
+   first runs its least-privilege routing profile without author intent. A valid `skip`
+   becomes `reviewer.skipped`; every trigger failure becomes `run`, then the full
+   reviewer is bounded by its `timeout` (default 15m). Each agent launch uses the
+   same governor, so trigger calls count toward run-wide limits and usage. Each
+   spawned task calls `backend::dispatch`
    (`backend/mod.rs`), which resolves the reviewer's `ExecutionPlan` (failing closed
    on an unprovisioned capability tier), selects the concrete backend, wraps its
    subprocess seam in the shared governor, and runs the
    agent either natively or inside a container for a reviewer with a `runner` block
    and `capabilities.network: true` (`backend/container/`; see
    [Containers](./containers.md)). A replayed or carried reviewer skips dispatch
-   entirely and is never handed to the `JoinSet`: its verdict is folded in from
-   the attested bundle's event (replay) or the prior run's persisted
-   `reviewer.resolved` event (carry) instead.
-7. **Resolve & aggregate** (`runner/`). Each result has fail-closed/fail-open
+   entirely and is never handed to the `JoinSet`: its outcome is folded in from
+   the attested bundle's terminal event (replay) or the prior run's persisted
+   `reviewer.resolved` event (carry).
+7. **Resolve & aggregate** (`runner/`). Each full-review result has fail-closed/fail-open
    policy applied: a gate that blocks, errors, or times out resolves to `block`
    (with a synthetic blocking finding); an advisor that fails is dropped. A replayed
    verdict carries the same policy as if it had executed, so a replayed block still
-   blocks. The aggregate is `block` if any gate blocked, else `pass`.
+   blocks. A semantic skip increments the gate tally's `skipped` count and contributes
+   no pass. The aggregate is `block` if any gate blocked, else `pass`.
 8. **Emit & persist** (`render.rs`, `store.rs`, `seal.rs`). Events stream out as
    human text or JSONL as they happen; the full event stream, plus per-reviewer
    transcript, verdict, and metadata, is written under the run's directory, and
@@ -171,7 +176,8 @@ Following one review top to bottom touches most of the crate:
    basis: a canonical digest of the committed HEAD tree, the merge-base tree,
    the `base..HEAD` patch-id, the effective config hash, whether the working
    tree was dirty (sampled before reviewers ran and again at seal time, dirty
-   if either sample was), and the sorted `reviewer.resolved` events, MAC'd with the
+   if either sample was), and the sorted terminal `reviewer.resolved` or
+   `reviewer.skipped` events, MAC'd with the
    binary's embedded secret and written to `runs/<id>/seal.json`. The zero-match
    fast path persists without a seal, and sealing skips a run whose bindings
    cannot be derived or that resolved no repository-reviewer event. Sealing

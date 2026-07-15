@@ -503,7 +503,7 @@ mod tests {
     fn reviewer() -> Reviewer {
         Reviewer {
             name: "demo".into(),
-            trigger: vec!["**".into()],
+            trigger: vec!["**".into()].into(),
             mode: Mode::Gate,
             backend: reviewer::Backend::ClaudeCode,
             model: None,
@@ -533,6 +533,7 @@ mod tests {
             base: "main",
             merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
+            purpose: crate::backend::ReviewPurpose::Review,
         };
         backend.review(&request).await
     }
@@ -558,6 +559,7 @@ mod tests {
             base: "main",
             merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
+            purpose: crate::backend::ReviewPurpose::Review,
         };
         backend.review(&request).await.expect("verdict parses");
         backend.runner.nth_args(0)
@@ -740,6 +742,7 @@ mod tests {
             base: "main",
             merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
+            purpose: crate::backend::ReviewPurpose::Review,
         };
 
         let outcome = backend.review(&request).await.expect("reprompt succeeds");
@@ -839,6 +842,7 @@ mod tests {
             base: "main",
             merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
+            purpose: crate::backend::ReviewPurpose::Review,
         };
         let err = backend.review(&request).await.unwrap_err();
         assert!(err.to_string().contains("execution error"));
@@ -902,6 +906,7 @@ mod tests {
             base: "main",
             merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
+            purpose: crate::backend::ReviewPurpose::Review,
         };
         let prompt = build_prompt(&request);
         // The shared changeset preamble leads, naming the base and steering the
@@ -954,6 +959,7 @@ mod tests {
             base: "main",
             merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
+            purpose: crate::backend::ReviewPurpose::Review,
         };
         backend.review(&request).await.expect("runs");
 
@@ -1049,6 +1055,7 @@ mod tests {
             base: "main",
             merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
+            purpose: crate::backend::ReviewPurpose::Review,
         };
 
         let outcome = backend

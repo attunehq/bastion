@@ -69,6 +69,17 @@ defaults:
   model: gpt-5.6-terra
   effort: high
 
+# A broad concern can replace its path list with a semantic trigger. `paths` is
+# an optional cheap prefilter; any trigger failure runs the full reviewer.
+#
+# trigger:
+#   kind: agent
+#   prompt: Run only when this changeset affects the concern.
+#   backend: codex
+#   model: gpt-5.6-luna
+#   effort: high
+#   paths: [src/**/*.rs]
+
 reviewers:
   # The gate on Bastion's core safety invariant, and the one reviewer whose
   # misses ship real bugs (a dirty-worktree attestation hole, a seal-time TOCTOU,

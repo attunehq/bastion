@@ -22,7 +22,7 @@ const KIND: &str = "bastion-attestation";
 /// The bundle schema version this binary produces and accepts. Bumped only on a
 /// breaking bundle-shape change; [`Bundle::from_json`] refuses any other value
 /// rather than guessing at a migration.
-const SCHEMA: u32 = 1;
+const SCHEMA: u32 = 2;
 
 /// A signed record of what a local run reviewed and concluded.
 ///
@@ -56,10 +56,9 @@ pub struct Bundle {
     /// (never trusted from the note alone) both here, before signing, and
     /// again by CI, with each side's own embedded secret.
     pub seal: Seal,
-    /// Each sealed reviewer's `reviewer.resolved` event, keyed by reviewer
-    /// name, so a replaying CI run has the full verdict and findings without
-    /// re-reading the author's local run store (which it does not have
-    /// access to).
+    /// Each sealed reviewer's terminal event, keyed by reviewer name. This is
+    /// either a full `reviewer.resolved` verdict or a `reviewer.skipped` agent
+    /// trigger decision.
     pub events: BTreeMap<String, serde_json::Value>,
 }
 

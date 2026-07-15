@@ -233,6 +233,90 @@ pub struct PromptFile {
     pub file: PathBuf,
 }
 
+/// How Bastion decides whether a reviewer belongs in a changeset's plan.
+///
+/// The sequence form is the existing path-only trigger. The tagged `agent`
+/// form first applies its optional path prefilter, then asks a small agent to
+/// decide whether the full reviewer is relevant to the actual changeset.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Trigger {
+    /// Run whenever any changed path matches one of these globs.
+    Paths(Vec<String>),
+    /// Use an agent decision after an optional path prefilter.
+    Agent(AgentTrigger),
+}
+
+impl Trigger {
+    /// The cheap path prefilter, when this trigger has one.
+    #[must_use]
+    pub fn paths(&self) -> &[String] {
+        match self {
+            Self::Paths(paths) => paths,
+            Self::Agent(agent) => &agent.paths,
+        }
+    }
+
+    /// The agent profile when semantic routing is enabled.
+    #[must_use]
+    pub fn agent(&self) -> Option<&AgentTrigger> {
+        match self {
+            Self::Paths(_) => None,
+            Self::Agent(agent) => Some(agent),
+        }
+    }
+}
+
+impl From<Vec<String>> for Trigger {
+    fn from(paths: Vec<String>) -> Self {
+        Self::Paths(paths)
+    }
+}
+
+/// The execution profile for one semantic routing decision.
+///
+/// This is deliberately smaller than a reviewer profile. A trigger can select
+/// a backend, model, effort, and timeout, but it cannot opt into capabilities,
+/// environment variables, or a container. Its job is only to inspect the
+/// changeset and decide whether the full reviewer applies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentTrigger {
+    /// Tagged-union discriminator. Deserialization only accepts `agent`.
+    pub kind: AgentTriggerKind,
+    /// The routing instruction. Bastion adds the response contract and the
+    /// requirement to inspect the actual changeset.
+    pub prompt: String,
+    /// The harness used for the routing decision.
+    #[serde(default)]
+    pub backend: Backend,
+    /// The backend-specific model identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelId>,
+    /// The backend-specific reasoning effort.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Effort>,
+    /// A wall-clock timeout for the routing decision.
+    #[serde(
+        default,
+        with = "humantime_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub timeout: Option<Duration>,
+    /// Optional cheap prefilter. The agent runs only when one of these globs
+    /// matches; an empty list considers every non-empty changeset.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+}
+
+/// The only supported tagged trigger kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentTriggerKind {
+    /// A model decides whether the reviewer applies.
+    Agent,
+}
+
 /// A single reviewer definition, as parsed from the registry file.
 ///
 /// Trigger globs are kept as raw strings here; they are compiled into a matcher
@@ -248,8 +332,8 @@ pub struct PromptFile {
 pub struct Reviewer<P = String> {
     /// Unique reviewer name; also the check-run name in CI.
     pub name: String,
-    /// Path globs over the changed files that trigger this reviewer.
-    pub trigger: Vec<String>,
+    /// The path-only or agent-assisted rule that triggers this reviewer.
+    pub trigger: Trigger,
     /// Whether this reviewer gates or advises.
     pub mode: Mode,
     /// The harness to run on.
@@ -387,12 +471,40 @@ prompt: Check single responsibility.
 ";
         let reviewer: Reviewer = serde_yaml_ng::from_str(yaml).expect("valid reviewer");
         assert_eq!(reviewer.name, "file-responsibility");
-        assert_eq!(reviewer.trigger, ["src/**/*.ts"]);
+        assert_eq!(reviewer.trigger.paths(), ["src/**/*.ts"]);
         assert_eq!(reviewer.mode, Mode::Gate);
         assert_eq!(reviewer.backend, Backend::Any);
         assert!(reviewer.timeout.is_none());
         assert!(!reviewer.is_containerized());
         assert!(reviewer.capabilities.is_least_privilege());
+    }
+
+    #[test]
+    fn parses_an_agent_trigger_with_an_optional_path_prefilter() {
+        let yaml = r"
+name: single-responsibility
+trigger:
+  kind: agent
+  prompt: Run only when the change can create a new responsibility boundary.
+  backend: codex
+  model: gpt-5.6-luna
+  effort: high
+  timeout: 45s
+  paths: [src/**/*.rs]
+mode: gate
+prompt: Check single responsibility.
+";
+        let reviewer: Reviewer = serde_yaml_ng::from_str(yaml).expect("valid reviewer");
+        let agent = reviewer.trigger.agent().expect("agent trigger");
+        assert_eq!(agent.kind, AgentTriggerKind::Agent);
+        assert_eq!(agent.backend, Backend::Codex);
+        assert_eq!(
+            agent.model.as_ref().map(ModelId::as_str),
+            Some("gpt-5.6-luna")
+        );
+        assert_eq!(agent.effort.as_ref().map(Effort::as_str), Some("high"));
+        assert_eq!(agent.timeout, Some(Duration::from_secs(45)));
+        assert_eq!(agent.paths, ["src/**/*.rs"]);
     }
 
     #[test]

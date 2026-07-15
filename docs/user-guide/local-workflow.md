@@ -10,8 +10,8 @@ order: 5
 > and inspecting what was saved.
 
 The local CLI applies the same reviewers and decisions CI enforces: CI executes them
-fresh, replays an attested local run, or carries an unchanged reviewer forward from
-the branch's previous CI run. So a green local loop usually means a PR that CI
+fresh, records an agent-trigger skip, replays an attested local outcome, or carries
+an unchanged reviewer forward from the branch's previous CI run. So a green local loop usually means a PR that CI
 confirms. Two things can make a local run differ: CI feeds reviewers the PR's
 description and discussion that a default local run lacks, and a local run also merges
 in any personal reviewers from your user-level registry, which CI never sees (see
@@ -29,16 +29,17 @@ bastion review --base main
 
 `bastion review` computes the changeset (working tree vs. the merge base with
 `--base`, including uncommitted and untracked files, and never including the
-base branch's own changes), selects the reviewers whose triggers match, and
-renders progress and verdicts. Matched reviewers run in parallel with per-reviewer
-timeouts, and a re-run is incremental (next section): a reviewer that already
-passed may carry its verdict forward instead of executing again, locally and in CI.
+base branch's own changes), selects reviewer candidates, and renders progress plus
+each terminal verdict or agent-trigger skip. Candidates resolve in parallel with
+per-reviewer timeouts, and a re-run is incremental (next section): a reviewer that
+already passed may carry its verdict forward instead of executing again, locally
+and in CI.
 A CI review (`--repo`/`--pr`)
 against a repository with `attestations: true` first checks for a verified
-attestation covering the run: a reviewer the attestation covers replays its recorded
-verdict, with no backend dispatch and no timeout; every other reviewer then resolves
-the ordinary way, carrying its prior pass if its scoped content is unchanged and
-otherwise executing fresh (see
+attestation covering the run: a reviewer the attestation covers replays its
+recorded terminal verdict or skip outcome, with no backend dispatch and no timeout;
+every other reviewer then resolves the ordinary way, carrying its prior pass if
+its scoped content is unchanged and otherwise executing fresh (see
 [Attestation](../developer-guide/attestation.md)).
 
 - `--base <branch>`: the branch you are merging into. The changeset is diffed at
@@ -66,12 +67,12 @@ passed. So on a re-run of the same branch, a reviewer whose previous verdict was
 pass, and whose *scope digest* is unchanged since that run, is *carried*: its
 prior verdict counts in the gate tally, the stream marks it `"carried": true`, and
 no agent runs and no tokens are spent on it. The digest covers everything the
-verdict was keyed to: the reviewer's own definition, the diff of the changed
-files its `trigger` matched against the merge base, the commit messages that
-touched those files, and the content of untracked matched files. So an edit to
-a triggered file, a reworded commit that touched one, or an edited reviewer
-re-runs the reviewer; the ones that blocked always re-run, since your fix
-touched the files they flagged. Blocks are never carried.
+verdict was keyed to: the reviewer's own definition, the path-matched diff for
+a path trigger or the entire changeset for an agent trigger, the commit
+messages that touched the same files, and the content of untracked files in
+that scope. So an edit to scoped content, a reworded commit that touched it, or
+an edited reviewer re-runs the reviewer; the ones that blocked always re-run,
+since your fix touched the files they flagged. Blocks are never carried.
 
 What deliberately does *not* re-run a reviewer: the base branch moving, or a
 rebase over it, when your scoped diff comes out identical. The digest binds the
@@ -80,10 +81,11 @@ rebase over unrelated upstream changes carries every pass straight through,
 while one that changes the diff (a conflict resolution, upstream edits close
 enough to shift a hunk's context) re-runs the affected reviewers. What the base
 changed was reviewed by its own changesets when it merged; your reviewers judge
-only what your branch changes. The boundary is the reviewer's `trigger`: it
-already declares which files the concern depends on, and carry keys the verdict
-to exactly that. A reviewer with `attestation: never` in the registry is never
-carried, and `--fresh` re-runs everything.
+only what your branch changes. A path trigger bounds the concern and its carry
+digest to the matched files. Agent-trigger `paths` only prefilter whether routing
+starts, so an admitted agent-trigger reviewer keys carry to the full changeset.
+A reviewer with `attestation: never` in the registry is never carried, and
+`--fresh` re-runs everything.
 
 One extra condition applies to the repository's own reviewers (not personal
 user-level ones): they carry only from a prior run the binary sealed and can still
@@ -126,7 +128,7 @@ The exit code *is* the gate, so a loop can branch on it:
 
 | Aggregate verdict | Exit code |
 | --- | --- |
-| `pass` (all gates passed) | `0` |
+| `pass` (every applicable gate passed; other gates may be semantically skipped) | `0` |
 | `block` (a gate blocked, errored, or timed out) | non-zero |
 
 ```sh
@@ -152,20 +154,23 @@ With `--format jsonl`, Bastion emits one JSON object per line, as each thing
 happens. A run is a typed sequence of events:
 
 ```jsonl
-{"type":"run.started","run":"r-0f3a","branch":"feat/cart","base":"main","changed":12,"reviewers":[{"name":"file-responsibility","mode":"gate"},{"name":"tenant-isolation","mode":"gate"}]}
+{"type":"run.started","run":"r-0f3a","branch":"feat/cart","base":"main","changed":12,"reviewers":[{"name":"file-responsibility","mode":"gate"},{"name":"tenant-isolation","mode":"gate"},{"name":"single-responsibility","mode":"gate"}]}
 {"type":"reviewer.started","run":"r-0f3a","reviewer":"tenant-isolation","mode":"gate","backend":"claude-code"}
 {"type":"reviewer.resolved","run":"r-0f3a","reviewer":"tenant-isolation","verdict":"block","summary":"A new query path reads rows without scoping by tenant id.","findings":[{"kind":"blocking","path":"src/server/db.rs","line_start":88,"line_end":91,"detail":"scope this query by tenant_id"}],"usage":{"tokens_in":18204,"tokens_out":1560,"cache_read":12000,"cost_usd":0.21},"duration_ms":38120,"has_transcript":true}
-{"type":"run.completed","run":"r-0f3a","verdict":"block","gates":{"total":2,"passed":1,"blocked":1},"duration_ms":41030,"tokens_in":20480,"tokens_out":1875,"cache_read":13100,"cost_usd":0.37}
+{"type":"reviewer.started","run":"r-0f3a","reviewer":"single-responsibility","mode":"gate","backend":"codex"}
+{"type":"reviewer.skipped","run":"r-0f3a","reviewer":"single-responsibility","mode":"gate","trigger":{"backend":"codex","decision":"skip","reason":"No responsibility boundary changed.","duration_ms":842},"has_transcript":true}
+{"type":"run.completed","run":"r-0f3a","verdict":"block","gates":{"total":3,"passed":1,"blocked":1,"skipped":1},"duration_ms":41030,"tokens_in":20480,"tokens_out":1875,"cache_read":13100,"cost_usd":0.37}
 ```
 
 The event types:
 
 | Event | Meaning |
 | --- | --- |
-| `run.started` | The run began; lists the reviewers in the plan: each executes, replays from a verified attestation, or carries from the branch's previous run (locally or in CI). Under `--reviewer` the list holds only the selected reviewers, and the event carries `partial: true` when that selection excludes at least one triggered reviewer. |
-| `reviewer.started` | One reviewer began: dispatched to its backend, reconstructed from a verified attestation bundle, or carried from the branch's previous run; the latter two dispatch no backend. |
-| `reviewer.resolved` | One reviewer finished; carries its `verdict`, `summary`, `findings`, `usage`, and a `has_transcript` flag. Carries `replayed: true` when the verdict came from a verified attestation, and `carried: true` when it was carried forward from the branch's previous run (local or CI) instead of a fresh execution. A reviewer that produced a real verdict this run (a fresh execution or a carried pass) is also stamped with `scope_digest`, a hash of everything the verdict was keyed to (the reviewer's definition plus its trigger-scoped diffs, commit messages, and untracked content); a later run carries a prior pass only when its own digest is identical. The field is present only when Bastion could compute the digest and it still described the reviewed tree at run end, so it is absent when the reviewer produced no verdict (a crash, a timeout, or malformed output), when the digest could not be computed (an unreadable untracked file, for one), or when the scoped content changed while the run was in flight; in each case a later run cannot carry this verdict, and a replayed reviewer likewise carries none of its own. |
-| `run.completed` | The aggregate decision and the gate tally, plus the run's wall-clock `duration_ms` and the usage totals (`tokens_in`, `tokens_out`, `cache_read`, `cost_usd`) summed across reviewers. Carries `partial: true` (as does `run.started`) when `--reviewer` narrowed the run. |
+| `run.started` | The run began; lists the reviewer candidates in the plan. Each executes, semantically skips, replays from a verified attestation, or carries from the branch's previous run. Under `--reviewer` the list holds only the selected reviewers, and the event carries `partial: true` when that selection excludes a candidate. |
+| `reviewer.started` | One reviewer candidate began resolving: dispatched to its trigger or reviewer backend, reconstructed from a verified attestation bundle, or carried from the branch's previous run. |
+| `reviewer.resolved` | One reviewer finished; carries its `verdict`, `summary`, `findings`, `usage`, and a `has_transcript` flag. An agent-triggered reviewer that ran also carries its preceding `trigger` decision and usage. Carries `replayed: true` when the terminal outcome came from a verified attestation, and `carried: true` when the verdict was carried forward from the branch's previous run instead of a fresh execution. A reviewer that produced a real verdict this run is also stamped with `scope_digest`, a hash of everything the verdict was keyed to; a later run carries a prior pass only when its own digest is identical. |
+| `reviewer.skipped` | An agent trigger decided that its full reviewer did not apply. Carries the trigger backend, decision, reason, usage, duration, and transcript availability without recording a pass verdict. It can also carry `replayed: true` when CI restored the terminal outcome from an attestation. |
+| `run.completed` | The aggregate decision and gate tally, including `gates.skipped`, plus the run's wall-clock `duration_ms` and usage totals summed across trigger and full-reviewer calls. Carries `partial: true` (as does `run.started`) when `--reviewer` narrowed the run. |
 | `run.attested` | A signed local run was replayed; carries the replayed `reviewers`, the attesting `public_key`, and `attested_at`. |
 | `run.attestation-fallback` | An attestation was *offered but refused*; carries the `reason` (an unreadable or unverifiable note, an unregistered key, a stale binding, and so on). A dirty CI checkout is the one refusal that needs no note: it is checked before note lookup, so a dirty tree emits this event even when HEAD carries no note. Otherwise a commit that offered no note is not a refusal and emits no such event: it resolves through the ordinary carry-or-execute path silently. |
 
@@ -173,9 +178,9 @@ How an agent should consume it:
 
 - **Only need the outcome?** Ignore everything until `run.completed` and read its
   `verdict`.
-- **Want to react as you go?** Read each `reviewer.resolved` as it lands and act on
-  its `findings`: a `path`, a `line_start`/`line_end`, and a `detail` telling you
-  what to change. The findings are everything you need to fix the code.
+- **Want to react as you go?** Read each terminal reviewer event as it lands. Act
+  on `reviewer.resolved` findings; record `reviewer.skipped` as an intentional
+  omission, not a pass that needs fixing.
 
 ### For agents: the consumption contract
 
@@ -186,10 +191,12 @@ If you are an agent driving the loop, this is the whole contract:
 3. Act on every `reviewer.resolved` with `verdict: "block"` using its `findings`
    (`path` + `line_start`/`line_end` + `detail`). Do not open transcripts; the
    findings already say what to change.
-4. The aggregate decision is `run.completed.verdict`. The process also exits
+4. Treat `reviewer.skipped` as a recorded routing outcome. It has no verdict or
+   findings, so never count it as a pass.
+5. The aggregate decision is `run.completed.verdict`. The process also exits
    non-zero on `block`, so you can branch on the exit code alone if you only need
    pass/fail.
-5. Fix what blocked and re-run. Loop until `run.completed.verdict` is `pass` (exit
+6. Fix what blocked and re-run. Loop until `run.completed.verdict` is `pass` (exit
    zero), then open your PR.
 
 This contract is exactly what `bastion skills install` checks into your repo as the
@@ -224,8 +231,10 @@ that has not adopted Bastion would be beside the point.
 Cost fields (`cost_usd`) serialize as dollars (`0.21`) even though Bastion tracks
 exact cents internally, so you never see floating-point cent drift in the stream.
 Token fields (`tokens_in`, `tokens_out`, `cache_read`) are plain integer counts;
-on `run.completed` they are the totals summed across every reviewer that reported
-usage, the same way `cost_usd` is. `cache_read` is the input tokens served from the
+on `run.completed` they are the totals summed across every agent call that reported
+usage, including trigger calls that skipped the full reviewer. A resolved reviewer's
+usage is top-level on `reviewer.resolved`; trigger usage is nested under `trigger`
+on either terminal reviewer event. `cache_read` is the input tokens served from the
 provider's prompt cache (cache hits); each backend names it differently natively
 (Claude's `cache_read_input_tokens`, Codex's `cached_input_tokens`, Pi's
 `cacheRead`) and Bastion normalizes them to one field. It is 0 when a backend
@@ -238,13 +247,16 @@ to an agent that just wants to know what to fix; streaming thousands of lines on
 every run would bury the findings and burn the agent's own context.
 
 - **Streamed:** the decisions and the things you act on immediately: the reviewer
-  set, start and resolve events, verdicts, summaries, findings, per-reviewer usage.
+  set, start and terminal events, verdicts or skip reasons, summaries, findings,
+  and per-reviewer usage.
 - **Saved, not streamed:** the verbose detail: full session transcripts, raw
-  verdict payloads, per-reviewer metadata. Written to disk, read on demand.
+  verdict payloads when a review ran, and per-reviewer metadata. Written to disk,
+  read on demand.
 
-That is why `reviewer.resolved` carries `has_transcript: true` rather than the
-transcript itself: when a decision surprises you, the transcript is one command
-away (next section).
+That is why both `reviewer.resolved` and `reviewer.skipped` carry the boolean
+`has_transcript` rather than the transcript itself. When it is `true` and a decision
+surprises you, the transcript is one command away (next section); a replayed outcome
+may have no local transcript and carry `false`.
 
 ## Inspecting saved runs
 
@@ -255,14 +267,15 @@ run id; `runs` and `clean` operate over all saved runs.
 
 ```sh
 bastion runs                         # list recent runs: id, verdict, branch, reviewer count
-bastion show [<run>]                 # re-print a run's summaries, verdicts, findings
+bastion show [<run>]                 # re-print terminal verdicts, skips, and findings
 bastion transcript [<run>] <reviewer>   # the full agent session for one reviewer
 bastion clean [--keep N | --older-than <dur>]   # prune saved runs
 ```
 
 - **`runs`** is the index: what ran recently and how each landed.
-- **`show`** re-emits a past run's verdicts and findings, the same content as the
-  stream's resolve and complete events, on demand. Accepts `--format human|jsonl`.
+- **`show`** re-emits a past run's terminal outcomes and aggregate: verdicts with
+  findings, or semantic skip reasons with no findings. It accepts
+  `--format human|jsonl`.
 - **`transcript`** prints the saved session for one reviewer. This is the explicit,
   opt-in way to see what was kept off the stream; reach for it when a verdict is
   surprising and you want to know why. It is raw text (a transcript is already a
@@ -292,7 +305,7 @@ variable, handy for scratch runs you do not want in your real history. The layou
       reviewers/
         tenant-isolation/
           transcript.jsonl       # the full agent session
-          verdict.json           # the raw structured verdict
+          verdict.json           # the raw structured verdict; absent on a semantic skip
           meta.json              # backend, timing, usage, matched trigger
     latest                       # a plain file holding the most recent run id
 ```
@@ -382,9 +395,10 @@ refuses to sign if it has, so the note can never claim the reviewers saw
 something they did not. It signs with your SSH key (`git config
 user.signingkey`, or `--key <path>` to name one explicitly), prompting for a
 hardware token or keychain if your key requires it, and prints the exact push
-command. The signed bundle carries the repository reviewers' actual verdicts
-and findings, not just a pass/fail flag, so a repository reviewer that blocked
-locally still blocks in CI when its verdict replays. Your personal user-level
+command. The signed bundle carries each repository reviewer's terminal outcome:
+either its verdict and findings or its agent-trigger skip reason and usage. A
+repository reviewer that blocked locally still blocks in CI when its verdict
+replays, and a skip replays as a skip rather than a pass. Your personal user-level
 reviewers are excluded from the bundle (they never gate anyone else's PR), so
 a run blocked only by a personal reviewer still attests, and CI sees only the
 repository reviewers' results.
@@ -413,7 +427,8 @@ and context. The two surfaces run the repository's reviewers and aggregation, an
 adds the PR's description and discussion that a default local run does not, so a
 reviewer that weighs that context can decide differently. A purely local run can also
 include your personal user-level reviewers; their `run.started` and
-`reviewer.resolved` events are local-only and never become checks or comments (see
+terminal `reviewer.resolved` or `reviewer.skipped` events are local-only and never
+become checks or comments (see
 [Authoring reviewers](./authoring-reviewers.md#user-level-reviewers)).
 
 ---

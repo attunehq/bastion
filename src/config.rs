@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
 use crate::limits::SpawnLimits;
-use crate::reviewer::{Backend, Effort, ModelId, PromptSource, Reviewer};
+use crate::reviewer::{Backend, Effort, ModelId, PromptSource, Reviewer, Trigger};
 
 /// The canonical registry file name at the repository root.
 pub const REGISTRY_FILE: &str = ".bastion.yaml";
@@ -628,6 +628,20 @@ impl Config {
                     reviewer.name
                 );
             }
+            if let Some(agent) = reviewer.trigger.agent() {
+                if agent.prompt.trim().is_empty() {
+                    bail!(
+                        "reviewer '{}' has an empty agent trigger prompt; write the routing instruction under `trigger.prompt`",
+                        reviewer.name
+                    );
+                }
+                if agent.model.is_some() && agent.backend == Backend::Any {
+                    bail!(
+                        "reviewer '{}' sets an agent trigger model but leaves trigger.backend: any; a model id is backend-specific, so pin trigger.backend",
+                        reviewer.name
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -692,6 +706,14 @@ impl Loader {
             }
             if reviewer.effort.is_none() {
                 reviewer.effort = defaults.effort.clone();
+            }
+            if let Trigger::Agent(agent) = &mut reviewer.trigger {
+                if agent.model.is_none() {
+                    agent.model = defaults.model.clone();
+                }
+                if agent.effort.is_none() {
+                    agent.effort = defaults.effort.clone();
+                }
             }
             if let Some(first) = self.origins.get(&reviewer.name) {
                 if first == label {
@@ -1027,6 +1049,41 @@ reviewers:
 ";
         let err = Config::from_yaml(yaml, Path::new(".")).unwrap_err();
         assert!(err.to_string().contains("backend: any"));
+    }
+
+    #[test]
+    fn an_agent_trigger_model_requires_a_pinned_trigger_backend() {
+        let yaml = r"
+reviewers:
+  - name: semantic
+    trigger:
+      kind: agent
+      prompt: Run when this change affects persistence.
+      model: gpt-5.6-luna
+    mode: gate
+    prompt: Review persistence boundaries.
+";
+        let err = Config::from_yaml(yaml, Path::new(".")).unwrap_err();
+        assert!(
+            err.to_string().contains("trigger.backend: any"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn an_agent_trigger_prompt_must_be_non_empty() {
+        let yaml = r#"
+reviewers:
+  - name: semantic
+    trigger:
+      kind: agent
+      prompt: "   "
+      backend: codex
+    mode: gate
+    prompt: Review persistence boundaries.
+"#;
+        let err = Config::from_yaml(yaml, Path::new(".")).unwrap_err();
+        assert!(err.to_string().contains("empty agent trigger prompt"));
     }
 
     #[test]
@@ -1705,7 +1762,7 @@ reviewers:
         for reviewer in &config.reviewers {
             assert!(!reviewer.name.is_empty(), "reviewer name must be non-empty");
             assert!(
-                !reviewer.trigger.is_empty(),
+                !reviewer.trigger.paths().is_empty(),
                 "reviewer '{}' must declare at least one trigger glob",
                 reviewer.name
             );

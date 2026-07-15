@@ -135,7 +135,13 @@ reviewers:
 
   # A cross-cutting concern is just another single-concern reviewer.
   - name: api-compatibility
-    trigger: ["src/server/**", "src/client/**"]
+    trigger:
+      kind: agent
+      prompt: Run when the changeset changes an API contract or its consumers.
+      backend: codex
+      model: gpt-5.6-luna
+      effort: high
+      paths: ["src/server/**", "src/client/**"]
     mode: gate
     backend: any
     prompt: |
@@ -167,8 +173,22 @@ reviewers:
       If it fails, block the PR and explain; otherwise, approve it.
 ```
 
+`trigger` is a sum type. A sequence is the path-only form. The tagged `agent`
+form uses optional `paths` as an AND prefilter, then runs its own backend profile
+over the actual changeset. With no paths it considers every non-empty changeset.
+The routing prompt is inline text. Registry defaults fill an omitted trigger
+model and effort, while the trigger backend remains independent from the full
+reviewer's backend.
+
+Agent routing preserves coverage when it cannot decide. `skip` requires a valid,
+unambiguous response; an error, timeout, malformed response, or uncertainty
+becomes `run`. The trigger receives no author intent or PR discussion and runs
+without reviewer capabilities, environment variables, or a container. An
+explicit reviewer selection bypasses it. A skip emits `reviewer.skipped` instead
+of a pass verdict, and its usage is included in `run.completed`.
+
 > **Implementation status.** This schema is the design target. In this
-> build, `name`, `trigger`, `mode`, `backend`, `model`, `effort`, the registry
+> build, `name`, both `trigger` forms, `mode`, `backend`, `model`, `effort`, the registry
 > `defaults` block, `include`, `prompt` (inline or `{file: <path>}`), `timeout`,
 > `env`, `inputs`, and `runner` (containers) are honored: a reviewer with a `runner` block
 > and `capabilities.network: true` runs its backend inside the built or named image

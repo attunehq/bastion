@@ -52,7 +52,7 @@ pub(crate) fn args_of(spec: &CommandSpec) -> Vec<String> {
 pub(crate) fn reviewer() -> Reviewer {
     Reviewer {
         name: "demo".into(),
-        trigger: vec!["**".into()],
+        trigger: vec!["**".into()].into(),
         mode: Mode::Gate,
         backend: Backend::ClaudeCode,
         model: None,

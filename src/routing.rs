@@ -1,17 +1,18 @@
-//! Trigger routing: selecting the reviewers whose globs match a changeset.
+//! Trigger routing: selecting reviewers whose cheap path prefilter matches.
 //!
 //! Routing is shared between the local and CI surfaces: the prompt scopes a
-//! reviewer's *attention*, but its `trigger` globs scope *whether it runs at
-//! all*. A reviewer runs when any changed file matches any of its trigger globs.
+//! reviewer's *attention*. Path triggers decide whether it runs at all. Agent
+//! triggers use their optional paths only as a cheap prefilter; the runner makes
+//! the semantic decision over the actual changeset.
 //!
-//! Triggers are stored as raw strings on [`Reviewer`]; here they are compiled
+//! Trigger paths are stored as strings on [`Reviewer`]; here they are compiled
 //! once into a [`Router`] (parse-don't-validate), so a malformed glob is an error
 //! at compile time rather than a silent non-match at routing time.
 
 use color_eyre::eyre::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
-use crate::reviewer::Reviewer;
+use crate::reviewer::{Reviewer, Trigger};
 
 /// A compiled routing table over a set of reviewers.
 pub struct Router<'a> {
@@ -34,7 +35,7 @@ impl<'a> Router<'a> {
         let mut entries = Vec::with_capacity(reviewers.len());
         for reviewer in reviewers {
             let mut builder = GlobSetBuilder::new();
-            for pattern in &reviewer.trigger {
+            for pattern in reviewer.trigger.paths() {
                 let glob = Glob::new(pattern).wrap_err_with(|| {
                     format!(
                         "reviewer '{}' has an invalid trigger glob: {pattern}",
@@ -53,16 +54,21 @@ impl<'a> Router<'a> {
 
     /// Return the reviewers triggered by `changed`, in registry order.
     ///
-    /// A reviewer is triggered when at least one changed path matches at least
-    /// one of its trigger globs.
+    /// A path trigger is a candidate when one of its globs matches. An agent
+    /// trigger with paths uses the same rule; without paths, it is a candidate
+    /// for every non-empty changeset.
     #[must_use]
     pub fn matched<S: AsRef<str>>(&self, changed: &[S]) -> Vec<&'a Reviewer> {
         self.entries
             .iter()
             .filter(|entry| {
-                changed
-                    .iter()
-                    .any(|path| entry.globs.is_match(path.as_ref()))
+                !changed.is_empty()
+                    && (matches!(
+                        &entry.reviewer.trigger,
+                        Trigger::Agent(agent) if agent.paths.is_empty()
+                    ) || changed
+                        .iter()
+                        .any(|path| entry.globs.is_match(path.as_ref())))
             })
             .map(|entry| entry.reviewer)
             .collect()
@@ -75,12 +81,12 @@ mod tests {
 
     use super::*;
     use crate::config::{Config, REGISTRY_FILE};
-    use crate::reviewer::Mode;
+    use crate::reviewer::{Mode, Trigger};
 
     fn reviewer(name: &str, triggers: &[&str]) -> Reviewer {
         Reviewer {
             name: name.into(),
-            trigger: triggers.iter().map(|s| (*s).to_string()).collect(),
+            trigger: Trigger::Paths(triggers.iter().map(|s| (*s).to_string()).collect()),
             mode: Mode::Gate,
             backend: crate::reviewer::Backend::Any,
             model: None,
@@ -129,6 +135,50 @@ mod tests {
             .err()
             .expect("invalid glob should fail");
         assert!(err.to_string().contains("bad"));
+    }
+
+    #[test]
+    fn an_empty_path_trigger_matches_nothing() {
+        let reviewers = [reviewer("empty", &[])];
+        let router = Router::compile(&reviewers).expect("compiles");
+        assert!(router.matched::<&str>(&[]).is_empty());
+        assert!(router.matched(&["src/lib.rs"]).is_empty());
+    }
+
+    #[test]
+    fn agent_trigger_without_paths_is_a_candidate_for_any_non_empty_changeset() {
+        let mut semantic = reviewer("semantic", &[]);
+        semantic.trigger = Trigger::Agent(crate::reviewer::AgentTrigger {
+            kind: crate::reviewer::AgentTriggerKind::Agent,
+            prompt: "decide".into(),
+            backend: crate::reviewer::Backend::Codex,
+            model: None,
+            effort: None,
+            timeout: None,
+            paths: vec![],
+        });
+        let reviewers = [semantic];
+        let router = Router::compile(&reviewers).expect("compiles");
+        assert!(router.matched::<&str>(&[]).is_empty());
+        assert_eq!(router.matched(&["README.md"]).len(), 1);
+    }
+
+    #[test]
+    fn agent_trigger_paths_are_a_cheap_and_prefilter() {
+        let mut semantic = reviewer("semantic", &[]);
+        semantic.trigger = Trigger::Agent(crate::reviewer::AgentTrigger {
+            kind: crate::reviewer::AgentTriggerKind::Agent,
+            prompt: "decide".into(),
+            backend: crate::reviewer::Backend::Codex,
+            model: None,
+            effort: None,
+            timeout: None,
+            paths: vec!["src/**/*.rs".into()],
+        });
+        let reviewers = [semantic];
+        let router = Router::compile(&reviewers).expect("compiles");
+        assert!(router.matched(&["docs/guide.md"]).is_empty());
+        assert_eq!(router.matched(&["src/lib.rs"]).len(), 1);
     }
 
     fn shipped_registry() -> Config {

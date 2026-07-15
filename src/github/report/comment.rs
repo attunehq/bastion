@@ -111,10 +111,24 @@ pub(super) fn status_line(digest: &RunDigest) -> String {
                 .to_string()
         }
         AggregateOutcome::PassedNoGates => "**Passed.** No gates were triggered.".to_string(),
+        AggregateOutcome::Passed {
+            passed,
+            total,
+            skipped,
+        } if skipped > 0 => {
+            format!("**Passed.** {passed} of {total} gate(s) passed; {skipped} skipped.")
+        }
         AggregateOutcome::Passed { total, .. } => {
             format!("**Passed.** All {total} gate(s) passed.")
         }
-        AggregateOutcome::Blocked { passed, total } => {
+        AggregateOutcome::Blocked {
+            passed,
+            total,
+            skipped,
+        } if skipped > 0 => {
+            format!("**Blocked.** {passed} of {total} gate(s) passed; {skipped} skipped.")
+        }
+        AggregateOutcome::Blocked { passed, total, .. } => {
             format!("**Blocked.** {passed} of {total} gate(s) passed.")
         }
         AggregateOutcome::Incomplete => "**Incomplete.** The run did not finish.".to_string(),

@@ -72,16 +72,17 @@ path; each step links to its details:
 ## The one-paragraph version
 
 You declare **reviewers** (focused agent prompts, one concern each) in
-`.bastion.yaml`. Each reviewer has a **trigger** (file globs) and a
-**mode** (`gate` blocks the merge, `advisor` only comments). `bastion review`
-finds the reviewers whose triggers match your working-tree changes; each
-executes in parallel, replays from a verified attestation (CI), or carries its
-unchanged pass forward from the branch's previous run (local or CI), and their
-verdicts aggregate into one decision: all gates must pass.
+`.bastion.yaml`. Each reviewer has a **trigger** (path globs or an agent prompt)
+and a **mode** (`gate` blocks the merge, `advisor` only comments). `bastion review`
+finds the reviewer candidates for your working-tree changes. Each candidate
+executes in parallel, records an agent-trigger skip, replays from a verified
+attestation (CI), or carries its unchanged pass forward from the branch's previous
+run (local or CI). Their terminal outcomes aggregate into one decision: every
+applicable gate must pass, while a semantic skip counts separately from a pass.
 A local run can also merge in personal reviewers from a user-level `.bastion.yaml`,
 so you can run a reviewer locally even where a repo has not adopted Bastion. An
 authoring agent loops `bastion review` until it is green, then opens a PR where CI
-executes, replays, or carries the repository's reviewers (the user-level ones are local-only).
+executes, skips, replays, or carries the repository's reviewers (the user-level ones are local-only).
 CI usually confirms the result, and can differ when it adds the PR's description and
 discussion to the reviewers' context. Humans stay in the loop by owning the reviewer
 registry, not by reading every diff.

@@ -107,9 +107,10 @@ Govern with these limits in mind; they are deliberate, not gaps to be closed:
   they review. The bar is *reasonable reduction proportionate to effort*: a speed
   bump and good defaults, like lint and CI and human review before it.
   [Attestation](../developer-guide/attestation.md) (`bastion attest`) fits the same
-  bar. `bastion attest` signs a local run's verdicts with the author's SSH key,
-  and CI verifies that signature against the author's GitHub-registered signing
-  keys before replaying anything, so trust is rooted in the forge account, the
+  bar. `bastion attest` signs a local run's terminal reviewer events with the
+  author's SSH key, including both verdicts and agent-trigger skips. CI verifies
+  that signature against the author's GitHub-registered signing keys before
+  replaying anything, so trust is rooted in the forge account, the
   same account repository permissions already trust with merge access. That
   distinguishes an author's enrolled key from one a coding agent minted on the
   spot. It does not defend against a malicious author who deliberately forges a

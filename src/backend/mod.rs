@@ -34,6 +34,15 @@ use self::container::{ContainerEngine, ContainerRunner, ExecutionPlan, credentia
 use self::governor::{GovernedRunner, SpawnGovernor};
 use self::pi::PiBackend;
 
+/// Why an agent call is being made, which controls review-only prompt material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewPurpose {
+    /// Perform the full concern review and enumerate every finding.
+    Review,
+    /// Decide whether the full reviewer applies to the changeset.
+    Routing,
+}
+
 /// Everything a backend is handed to run one reviewer.
 ///
 /// The runner gives every reviewer a full checkout at the changeset head plus the
@@ -58,6 +67,8 @@ pub struct ReviewRequest<'a> {
     /// stated intent, the surrounding discussion, and this reviewer's prior findings.
     /// Empty when no producer supplied any, in which case the prompt is unchanged.
     pub context: &'a ReviewContext,
+    /// Whether this call reviews the concern or only routes it.
+    pub purpose: ReviewPurpose,
 }
 
 /// What a backend returns for one reviewer.
@@ -189,10 +200,8 @@ async fn run_backend<R: CommandRunner>(
     runner: R,
     program: Program,
 ) -> Result<ReviewOutcome> {
-    match request.reviewer.backend {
-        // `Any` lets Bastion choose; default to Claude Code until routing by
-        // availability/subscription exists.
-        reviewer::Backend::Any | reviewer::Backend::ClaudeCode => match program {
+    match concrete_backend(request.reviewer.backend) {
+        reviewer::Backend::ClaudeCode => match program {
             Program::HostDefault => ClaudeCodeBackend::new(runner).review(request).await,
             Program::InContainer => {
                 ClaudeCodeBackend::with_program(runner, claude_code::DEFAULT_PROGRAM)
@@ -216,6 +225,19 @@ async fn run_backend<R: CommandRunner>(
                     .await
             }
         },
+        reviewer::Backend::Any => unreachable!("concrete_backend resolves any"),
+    }
+}
+
+/// Resolve a configured backend selector to the backend Bastion actually runs.
+///
+/// Keeping this separate from process dispatch lets terminal events and reports
+/// name the concrete agent even when the registry delegates selection to Bastion.
+#[must_use]
+pub(crate) const fn concrete_backend(backend: reviewer::Backend) -> reviewer::Backend {
+    match backend {
+        reviewer::Backend::Any => reviewer::Backend::ClaudeCode,
+        concrete => concrete,
     }
 }
 
@@ -292,20 +314,23 @@ pub(crate) fn context_segment(request: &ReviewRequest<'_>) -> String {
 
 /// Assemble the full review prompt for `request`, ending with `trailer`.
 ///
-/// Every backend hands the agent the same four-part body: the shared changeset
-/// preamble (how to see the diff against the base branch), the interpolated review
-/// instruction, the untrusted review-context block (when a producer supplied any),
-/// and the shared exhaustive-findings instruction. Only the trailing structured-output
-/// instruction differs by backend (Claude Code pins its native JSON schema; the
-/// fenced-YAML backends pass [`SCHEMA_INSTRUCTION`]), so it is the one parameter.
+/// Full reviews include the shared exhaustive-findings instruction. Routing calls
+/// omit it because they answer one applicability question rather than inspect the
+/// changeset for defects. The trailing structured-output instruction still differs
+/// by backend, so it remains a parameter.
 pub(crate) fn review_prompt(request: &ReviewRequest<'_>, trailer: &str) -> String {
     let reviewer = request.reviewer;
     let preamble = changeset_preamble(request.base, request.merge_base);
     let interpolated = interpolate(&reviewer.prompt, &reviewer.inputs);
     let context = context_segment(request);
-    format!(
-        "{preamble}\n\n{interpolated}\n\n{context}{EXHAUSTIVE_FINDINGS_INSTRUCTION}\n\n{trailer}"
-    )
+    match request.purpose {
+        ReviewPurpose::Review => format!(
+            "{preamble}\n\n{interpolated}\n\n{context}{EXHAUSTIVE_FINDINGS_INSTRUCTION}\n\n{trailer}"
+        ),
+        ReviewPurpose::Routing => {
+            format!("{preamble}\n\n{interpolated}\n\n{context}{trailer}")
+        }
+    }
 }
 
 /// Replace `${key}` occurrences in `template` with values from `inputs`.
@@ -535,12 +560,53 @@ mod tests {
     }
 
     #[test]
+    fn routing_prompt_omits_review_only_exhaustive_instruction() {
+        let reviewer = reviewer(reviewer::Backend::Codex);
+        let run = RunId("r-routing".into());
+        let root = PathBuf::from(".");
+        let review = ReviewRequest {
+            reviewer: &reviewer,
+            run: &run,
+            repo_root: &root,
+            base: "origin/main",
+            merge_base: "abc1234",
+            context: ReviewContext::empty(),
+            purpose: ReviewPurpose::Review,
+        };
+        let routing = ReviewRequest {
+            purpose: ReviewPurpose::Routing,
+            ..review
+        };
+
+        let full_prompt = review_prompt(&review, "structured output");
+        let routing_prompt = review_prompt(&routing, "structured output");
+
+        assert!(full_prompt.contains("Do not stop after the"));
+        assert!(!routing_prompt.contains("Do not stop after the"));
+        assert!(routing_prompt.contains("structured output"));
+        assert!(routing_prompt.contains(&reviewer.prompt));
+        assert!(routing_prompt.contains("git diff abc1234"));
+    }
+
+    #[test]
     fn money_from_dollars_rounds_and_clamps() {
         assert_eq!(money_from_dollars(0.21).cents(), 21);
         assert_eq!(money_from_dollars(0.215).cents(), 22);
         assert_eq!(money_from_dollars(-1.0).cents(), 0);
         assert_eq!(money_from_dollars(f64::NAN).cents(), 0);
         assert_eq!(money_from_dollars(f64::INFINITY).cents(), 0);
+    }
+
+    #[test]
+    fn any_resolves_to_the_backend_dispatch_uses() {
+        assert_eq!(
+            concrete_backend(reviewer::Backend::Any),
+            reviewer::Backend::ClaudeCode
+        );
+        assert_eq!(
+            concrete_backend(reviewer::Backend::Codex),
+            reviewer::Backend::Codex
+        );
     }
 
     // -- Shared fenced-YAML verdict extraction (used by the Codex and Pi backends) --
@@ -623,7 +689,7 @@ findings: []
     fn reviewer(backend: reviewer::Backend) -> Reviewer {
         Reviewer {
             name: "demo".into(),
-            trigger: vec!["**".into()],
+            trigger: vec!["**".into()].into(),
             mode: Mode::Gate,
             backend,
             model: None,
@@ -650,6 +716,7 @@ findings: []
             base: "main",
             merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
+            purpose: ReviewPurpose::Review,
         };
 
         let outcome = MockBackend.review(&request).await.expect("mock runs");
@@ -675,6 +742,7 @@ findings: []
             base: "main",
             merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
+            purpose: ReviewPurpose::Review,
         };
         let err = dispatch(&request, &SpawnGovernor::shared_default())
             .await

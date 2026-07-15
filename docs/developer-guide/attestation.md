@@ -95,11 +95,11 @@ runs, so only committed content reaches CI as an attestation.
   behavior) invalidates old bundles automatically. The bundle still carries the
   version string in plain text so a mismatch reports as "attested by vX, CI
   runs vY" rather than a bare verification failure.
-- **The run itself.** Per-reviewer verdicts and findings, carried as the sealed
-  reviewers' `reviewer.resolved` events. The bundle does not carry the rest of
-  the run's event stream; CI reconstructs it around the replayed events, so the
-  sticky comment and check runs replayed from an attestation carry the same
-  detail as a fresh run.
+- **The run itself.** Each sealed reviewer's terminal outcome: a
+  `reviewer.resolved` verdict with findings, or a `reviewer.skipped` agent
+  trigger decision with its backend, reason, and usage. Bundle schema 2 carries either
+  event under the reviewer name. CI reconstructs the rest of the stream around
+  those events, so replay does not turn a semantic skip into a pass verdict.
 
 ## The run seal
 
@@ -112,7 +112,7 @@ compiled binary embeds a random per-build secret instead, so a dev build can
 seal runs only for itself. When an eligible run finishes, the runner computes
 a canonical digest over the committed HEAD tree, the merge-base tree, the
 `base..HEAD` patch-id, the effective reviewer-config hash, and the repository
-reviewers' `reviewer.resolved` events, seals it with a MAC keyed by the
+reviewers' terminal `reviewer.resolved` or `reviewer.skipped` events, seals it with a MAC keyed by the
 embedded secret, and persists the seal with the run (`run.started`,
 `reviewer.started`, `run.completed`, and the audit events are not sealed). A
 keyed MAC rather than an asymmetric
@@ -256,7 +256,7 @@ the author's own signed one.
    the same working session.
 3. It resolves the signing key (`--key`, else `git config user.signingkey`,
    else a refusal naming both options), builds the bundle (the seal, the
-   sealed reviewers' `reviewer.resolved` events, the version, and the signer's
+   sealed reviewers' terminal events, the version, and the signer's
    public key), signs it with the author's SSH key (prompting for presence if
    the key demands it), writes the note on HEAD, and prints the resolved
    public key and the push command for the notes ref
@@ -318,8 +318,8 @@ mechanism as the skills-drift warning) so a rejected attestation reads as the
 notable event it is. A commit that simply carries no note is *not* on this list:
 it offered nothing to refuse, so it is silent (see above), and only a refusal
 draws the warning. Replay itself is recorded as a single `run.attested` event
-covering every replayed reviewer, and each replayed reviewer's own
-`reviewer.resolved` event carries `replayed: true`.
+covering every replayed reviewer, and each replayed terminal event carries
+`replayed: true`.
 
 ### The adopter's two workflow requirements
 

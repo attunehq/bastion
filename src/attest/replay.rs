@@ -14,7 +14,7 @@ use std::path::Path;
 
 use color_eyre::eyre::{Context, Result};
 
-use crate::event::RunEvent;
+use crate::event::{RunEvent, TriggerDecision};
 use crate::git;
 
 use super::bundle::{Bundle, split_envelope};
@@ -28,13 +28,13 @@ use super::sign::verify_signature;
 pub struct ReplayPlan {
     /// The verified bundle this plan replays from.
     pub bundle: Bundle,
-    /// The parsed, checked `reviewer.resolved` event for each reviewer that
+    /// The parsed, checked terminal event for each reviewer that
     /// will be replayed, keyed by reviewer name. A subset of `bundle.events`:
     /// only the names that are both routed by CI's own diff and not opted out
     /// via [`AttestationPolicy::Never`](crate::reviewer::AttestationPolicy::Never).
     ///
     /// Typed as [`RunEvent`], not [`serde_json::Value`]: `plan` already parsed
-    /// each event and confirmed it is a `reviewer.resolved` event bound to its
+    /// each event and confirmed it is a terminal reviewer event bound to its
     /// own map key (see the key-to-event binding check below), so a consumer
     /// (`crate::runner::resolve_replayed`) receives the already-validated type
     /// and has no unchecked JSON left to reparse.
@@ -249,7 +249,7 @@ pub fn plan(
     // its map keys, so a signed-but-malformed bundle could file reviewer A's
     // sealed event under reviewer B's key and so skip executing B entirely. Bind
     // key to value here: require the event under `name` to actually be that
-    // reviewer's own `reviewer.resolved` event before trusting it to replay. This
+    // reviewer's own terminal event before trusting it to replay. This
     // is also where the event is parsed into its typed [`RunEvent`] form once and
     // for all: `ReplayPlan::replay` carries that type onward, so nothing
     // downstream re-parses or re-validates this JSON.
@@ -266,20 +266,14 @@ pub fn plan(
             executed_fresh.push((*name).to_string());
             continue;
         };
-        match serde_json::from_value::<RunEvent>(event.clone()) {
-            Ok(ref parsed @ RunEvent::ReviewerResolved { ref reviewer, .. })
-                if reviewer == name =>
-            {
-                replay.insert((*name).to_string(), parsed.clone());
-            }
-            _ => {
-                return fallback(format!(
-                    "the attestation bundle carries a malformed or mismatched event under \
-                     reviewer '{name}' (its key does not match the event's own reviewer \
-                     field, or the event is not a reviewer.resolved event)"
-                ));
-            }
-        }
+        let Some(parsed) = replayable_terminal_event(event, name, reviewer) else {
+            return fallback(format!(
+                "the attestation bundle carries a malformed or mismatched event under \
+                 reviewer '{name}' (its key does not match the event's own reviewer \
+                 field, or the event is not a valid terminal reviewer outcome)"
+            ));
+        };
+        replay.insert((*name).to_string(), parsed);
     }
 
     AttestationOutcome::Replay(Box::new(ReplayPlan {
@@ -287,6 +281,37 @@ pub fn plan(
         replay,
         executed_fresh,
     }))
+}
+
+/// Parse a sealed terminal event and bind its outcome to the map key that named
+/// it. A skipped event is terminal only when the routing decision is actually
+/// `skip`; replaying a `run` decision as a skip would suppress a required review.
+fn replayable_terminal_event(
+    event: &serde_json::Value,
+    name: &str,
+    definition: &crate::reviewer::Reviewer,
+) -> Option<RunEvent> {
+    if definition.name != name {
+        return None;
+    }
+    let parsed = serde_json::from_value::<RunEvent>(event.clone()).ok()?;
+    let has_agent_trigger = definition.trigger.agent().is_some();
+    let valid = match &parsed {
+        RunEvent::ReviewerResolved {
+            reviewer, trigger, ..
+        } => {
+            reviewer == name
+                && match trigger {
+                    None => true,
+                    Some(trigger) => has_agent_trigger && trigger.decision == TriggerDecision::Run,
+                }
+        }
+        RunEvent::ReviewerSkipped {
+            reviewer, trigger, ..
+        } => reviewer == name && has_agent_trigger && trigger.decision == TriggerDecision::Skip,
+        _ => false,
+    };
+    if valid { Some(parsed) } else { None }
 }
 
 /// Build a [`AttestationOutcome::Fallback`] from a reason.
@@ -327,7 +352,7 @@ mod tests {
     use crate::attest::attest;
     use crate::attest::bundle::{Bundle as BundleT, envelope};
     use crate::attest::sign::sign;
-    use crate::event::{Gates, ReviewerRef, RunId};
+    use crate::event::{Gates, ReviewerRef, RunId, TriggerDecision, TriggerResolution};
     use crate::paths::Layout;
     use crate::reviewer::Mode;
     use crate::store;
@@ -442,7 +467,7 @@ mod tests {
         // discovering it from the repository root, the same way `bastion review`
         // did when the run was sealed, so the fixture needs the file present, not
         // just an in-memory `Config`.
-        let registry_yaml = "reviewers:\n  - name: r1\n    trigger: [\"**\"]\n    mode: gate\n    prompt: p\n  - name: r2\n    trigger: [\"**\"]\n    mode: gate\n    prompt: p\n";
+        let registry_yaml = "reviewers:\n  - name: r1\n    trigger: [\"**\"]\n    mode: gate\n    prompt: p\n  - name: r2\n    trigger:\n      kind: agent\n      prompt: route r2\n    mode: gate\n    prompt: p\n";
         std::fs::write(repo.join(".bastion.yaml"), registry_yaml).unwrap();
         git(&repo, &["add", ".bastion.yaml"]);
         git(&repo, &["commit", "-m", "add registry"]);
@@ -477,6 +502,7 @@ mod tests {
             RunEvent::ReviewerResolved {
                 carried: false,
                 scope_digest: None,
+                trigger: None,
                 run: run_id.clone(),
                 reviewer: "r1".into(),
                 verdict: Decision::Pass,
@@ -487,16 +513,17 @@ mod tests {
                 has_transcript: false,
                 replayed: false,
             },
-            RunEvent::ReviewerResolved {
-                carried: false,
-                scope_digest: None,
+            RunEvent::ReviewerSkipped {
                 run: run_id.clone(),
                 reviewer: "r2".into(),
-                verdict: Decision::Pass,
-                summary: "also fine".into(),
-                findings: vec![],
-                usage: None,
-                duration_ms: 12,
+                mode: Mode::Gate,
+                trigger: TriggerResolution {
+                    backend: crate::reviewer::Backend::ClaudeCode,
+                    decision: TriggerDecision::Skip,
+                    reason: "r2 does not apply".into(),
+                    usage: None,
+                    duration_ms: 12,
+                },
                 has_transcript: false,
                 replayed: false,
             },
@@ -506,8 +533,9 @@ mod tests {
                 verdict: Decision::Pass,
                 gates: Gates {
                     total: 2,
-                    passed: 2,
+                    passed: 1,
                     blocked: 0,
+                    skipped: 1,
                 },
                 duration_ms: 22,
                 tokens_in: 0,
@@ -521,7 +549,12 @@ mod tests {
         let secret: &'static [u8] = b"fixture-test-secret";
         let sealed_events: Vec<serde_json::Value> = resolved_events
             .iter()
-            .filter(|e| matches!(e, RunEvent::ReviewerResolved { .. }))
+            .filter(|e| {
+                matches!(
+                    e,
+                    RunEvent::ReviewerResolved { .. } | RunEvent::ReviewerSkipped { .. }
+                )
+            })
             .map(|e| serde_json::to_value(e).unwrap())
             .collect();
         let seal = crate::seal::seal(
@@ -558,7 +591,7 @@ mod tests {
     ) -> crate::reviewer::Reviewer {
         crate::reviewer::Reviewer {
             name: name.into(),
-            trigger: vec!["**".into()],
+            trigger: vec!["**".into()].into(),
             mode: crate::reviewer::Mode::Gate,
             backend: crate::reviewer::Backend::default(),
             model: None,
@@ -571,6 +604,23 @@ mod tests {
             attestation,
             prompt: "p".into(),
         }
+    }
+
+    fn agent_reviewer_def(
+        name: &str,
+        attestation: Option<crate::reviewer::AttestationPolicy>,
+    ) -> crate::reviewer::Reviewer {
+        let mut reviewer = reviewer_def(name, attestation);
+        reviewer.trigger = crate::reviewer::Trigger::Agent(crate::reviewer::AgentTrigger {
+            kind: crate::reviewer::AgentTriggerKind::Agent,
+            prompt: format!("route {name}"),
+            backend: crate::reviewer::Backend::Any,
+            model: None,
+            effort: None,
+            timeout: None,
+            paths: Vec::new(),
+        });
+        reviewer
     }
 
     /// A fully attested [`build_fixture`] repo: attest it with a fresh keypair
@@ -633,7 +683,7 @@ mod tests {
         }
         let att = build_attested_fixture();
         let r1 = reviewer_def("r1", None);
-        let r2 = reviewer_def("r2", None);
+        let r2 = agent_reviewer_def("r2", None);
         let routed: std::collections::BTreeMap<&str, &crate::reviewer::Reviewer> =
             [("r1", &r1), ("r2", &r2)].into_iter().collect();
 
@@ -661,6 +711,89 @@ mod tests {
             plan.replay.get("r1"),
             Some(RunEvent::ReviewerResolved { .. })
         ));
+        assert!(matches!(
+            plan.replay.get("r2"),
+            Some(RunEvent::ReviewerSkipped {
+                trigger: TriggerResolution {
+                    backend: crate::reviewer::Backend::ClaudeCode,
+                    decision: TriggerDecision::Skip,
+                    ..
+                },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn replay_rejects_a_skipped_event_whose_trigger_decision_is_run() {
+        let reviewer = agent_reviewer_def("r1", None);
+        let event = serde_json::to_value(RunEvent::ReviewerSkipped {
+            run: RunId("r-invalid-skip".into()),
+            reviewer: "r1".into(),
+            mode: Mode::Gate,
+            trigger: TriggerResolution {
+                backend: crate::reviewer::Backend::Codex,
+                decision: TriggerDecision::Run,
+                reason: "the concern applies".into(),
+                usage: None,
+                duration_ms: 10,
+            },
+            has_transcript: false,
+            replayed: false,
+        })
+        .unwrap();
+
+        assert!(replayable_terminal_event(&event, "r1", &reviewer).is_none());
+    }
+
+    #[test]
+    fn replay_rejects_a_resolved_event_whose_trigger_decision_is_skip() {
+        let reviewer = agent_reviewer_def("r1", None);
+        let event = serde_json::to_value(RunEvent::ReviewerResolved {
+            run: RunId("r-invalid-resolution".into()),
+            reviewer: "r1".into(),
+            verdict: Decision::Pass,
+            summary: "looks fine".into(),
+            findings: Vec::new(),
+            usage: None,
+            duration_ms: 10,
+            has_transcript: false,
+            replayed: false,
+            carried: false,
+            scope_digest: None,
+            trigger: Some(TriggerResolution {
+                backend: crate::reviewer::Backend::Codex,
+                decision: TriggerDecision::Skip,
+                reason: "the concern does not apply".into(),
+                usage: None,
+                duration_ms: 5,
+            }),
+        })
+        .unwrap();
+
+        assert!(replayable_terminal_event(&event, "r1", &reviewer).is_none());
+    }
+
+    #[test]
+    fn replay_rejects_a_skipped_event_for_a_path_trigger() {
+        let reviewer = reviewer_def("r1", None);
+        let event = serde_json::to_value(RunEvent::ReviewerSkipped {
+            run: RunId("r-invalid-path-skip".into()),
+            reviewer: "r1".into(),
+            mode: Mode::Gate,
+            trigger: TriggerResolution {
+                backend: crate::reviewer::Backend::Codex,
+                decision: TriggerDecision::Skip,
+                reason: "the concern does not apply".into(),
+                usage: None,
+                duration_ms: 10,
+            },
+            has_transcript: false,
+            replayed: false,
+        })
+        .unwrap();
+
+        assert!(replayable_terminal_event(&event, "r1", &reviewer).is_none());
     }
 
     #[test]
@@ -673,7 +806,7 @@ mod tests {
         let r1 = reviewer_def("r1", None);
         // r2 is covered by the bundle (build_fixture seals both r1 and r2) but opts
         // out of replay.
-        let r2 = reviewer_def("r2", Some(crate::reviewer::AttestationPolicy::Never));
+        let r2 = agent_reviewer_def("r2", Some(crate::reviewer::AttestationPolicy::Never));
         let routed: std::collections::BTreeMap<&str, &crate::reviewer::Reviewer> =
             [("r1", &r1), ("r2", &r2)].into_iter().collect();
 
