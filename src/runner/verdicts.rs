@@ -88,16 +88,18 @@ impl Reuse {
     }
 }
 
-/// Reconstruct a [`Resolved`] row from a previously-resolved verdict being
-/// folded back in without re-execution: replayed from a signed attestation, or
-/// carried from the branch's prior run.
+/// Reconstruct a [`Resolved`] row from a terminal outcome folded back in without
+/// re-execution: replayed from a signed attestation, or carried from the branch's
+/// prior run.
 ///
 /// `event` arrives already parsed and boundary-checked by its producer
 /// ([`crate::attest::replay::plan`] for a replay, [`crate::carry::plan`] for a
-/// carry), each of which only ever hands this function a
-/// [`RunEvent::ReviewerResolved`] whose `reviewer` field matches `reviewer.name`.
+/// carry), each of which only ever hands this function a terminal reviewer event
+/// whose `reviewer` field matches `reviewer.name`. Carry supplies only
+/// [`RunEvent::ReviewerResolved`], while replay may also supply
+/// [`RunEvent::ReviewerSkipped`].
 /// There is nothing left to parse or revalidate at *that* boundary; a
-/// non-`ReviewerResolved` variant reaching here would be a planner defect, so the
+/// different variant reaching here would be a planner defect, so the
 /// let-else arm exists only to keep this total, not to police untrusted data a
 /// second time.
 ///
@@ -114,6 +116,25 @@ impl Reuse {
 /// before trusting its decision.
 fn resolve_reused(reviewer: &Reviewer, event: &RunEvent, reuse: Reuse) -> Resolved {
     let is_gate = reviewer.mode == Mode::Gate;
+    if let RunEvent::ReviewerSkipped {
+        trigger, replayed, ..
+    } = event
+    {
+        return Resolved {
+            reviewer: reviewer.clone(),
+            decision: Decision::Pass,
+            summary: trigger.reason.clone(),
+            findings: Vec::new(),
+            usage: None,
+            transcript: None,
+            duration: Duration::from_millis(trigger.duration_ms),
+            replayed: *replayed || matches!(reuse, Reuse::Replayed),
+            carried: false,
+            scope_digest: None,
+            skipped: true,
+            trigger: Some(trigger.clone()),
+        };
+    }
     let RunEvent::ReviewerResolved {
         verdict,
         summary,
@@ -121,6 +142,7 @@ fn resolve_reused(reviewer: &Reviewer, event: &RunEvent, reuse: Reuse) -> Resolv
         usage,
         duration_ms,
         scope_digest,
+        trigger,
         ..
     } = event
     else {
@@ -164,6 +186,8 @@ fn resolve_reused(reviewer: &Reviewer, event: &RunEvent, reuse: Reuse) -> Resolv
         replayed,
         carried,
         scope_digest: reuse.scope_digest(scope_digest),
+        skipped: false,
+        trigger: trigger.clone(),
     }
 }
 

@@ -114,6 +114,7 @@ pub fn attest(
         .iter()
         .filter_map(|event| match event {
             RunEvent::ReviewerResolved { reviewer, .. }
+            | RunEvent::ReviewerSkipped { reviewer, .. }
                 if sealed_reviewer_names.contains(reviewer.as_str()) =>
             {
                 Some((reviewer.as_str(), event))
@@ -408,6 +409,7 @@ mod tests {
             RunEvent::ReviewerResolved {
                 carried: false,
                 scope_digest: None,
+                trigger: None,
                 run: run_id.clone(),
                 reviewer: "r1".into(),
                 verdict: Decision::Pass,
@@ -421,6 +423,7 @@ mod tests {
             RunEvent::ReviewerResolved {
                 carried: false,
                 scope_digest: None,
+                trigger: None,
                 run: run_id.clone(),
                 reviewer: "r2".into(),
                 verdict: Decision::Pass,
@@ -439,6 +442,7 @@ mod tests {
                     total: 2,
                     passed: 2,
                     blocked: 0,
+                    skipped: 0,
                 },
                 duration_ms: 22,
                 tokens_in: 0,

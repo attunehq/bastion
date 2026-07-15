@@ -43,14 +43,21 @@ pub fn show(layout: &Layout, run: Option<&str>, format: Format) -> Result<()> {
     let stdout = io::stdout();
     let mut out = stdout.lock();
     for event in &events {
-        if matches!(
-            event,
-            RunEvent::ReviewerResolved { .. } | RunEvent::RunCompleted { .. }
-        ) {
+        if is_show_event(event) {
             render::write_event(&mut out, format, event)?;
         }
     }
     Ok(())
+}
+
+/// Whether a persisted event belongs in `bastion show`'s terminal read-back.
+fn is_show_event(event: &RunEvent) -> bool {
+    matches!(
+        event,
+        RunEvent::ReviewerResolved { .. }
+            | RunEvent::ReviewerSkipped { .. }
+            | RunEvent::RunCompleted { .. }
+    )
 }
 
 /// `bastion runs`: list recorded runs.
@@ -85,3 +92,30 @@ pub fn clean(layout: &Layout, keep: Option<usize>, older_than: Option<Duration>)
 
 /// How many runs to keep when `bastion clean` is given no arguments.
 const DEFAULT_KEEP: usize = 20;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::{RunId, TriggerDecision, TriggerResolution};
+    use crate::reviewer::{Backend, Mode};
+
+    #[test]
+    fn show_includes_semantic_skips() {
+        let skipped = RunEvent::ReviewerSkipped {
+            run: RunId("r-show".into()),
+            reviewer: "semantic".into(),
+            mode: Mode::Gate,
+            trigger: TriggerResolution {
+                backend: Backend::Codex,
+                decision: TriggerDecision::Skip,
+                reason: "the concern does not apply".into(),
+                usage: None,
+                duration_ms: 10,
+            },
+            has_transcript: true,
+            replayed: false,
+        };
+
+        assert!(is_show_event(&skipped));
+    }
+}

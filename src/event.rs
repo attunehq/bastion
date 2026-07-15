@@ -4,8 +4,8 @@
 //! events are streamed to stdout as JSONL (`docs/developer-guide/local-surface.md`) and persisted to the
 //! run's `run.jsonl`; the GitHub surfaces (`docs/developer-guide/github-adapter.md`) mirror them one to
 //! one. Verbose detail (transcripts) is deliberately kept *off* the stream and
-//! saved to disk instead, hence [`ReviewerResolved::has_transcript`] rather than
-//! the transcript itself.
+//! saved to disk instead, hence `has_transcript` on each terminal reviewer event
+//! rather than the transcript itself.
 
 use std::fmt;
 
@@ -51,20 +51,49 @@ pub struct Gates {
     pub passed: u32,
     /// Gates that blocked (or failed closed).
     pub blocked: u32,
+    /// Gates whose agent trigger decided the reviewer did not apply.
+    #[serde(default)]
+    pub skipped: u32,
+}
+
+/// The semantic decision an agent trigger made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TriggerDecision {
+    /// Execute the full reviewer.
+    Run,
+    /// Omit the full reviewer from this changeset.
+    Skip,
+}
+
+/// The recorded result of an agent trigger call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TriggerResolution {
+    /// The backend that made the routing decision.
+    pub backend: crate::reviewer::Backend,
+    /// Whether the full reviewer ran.
+    pub decision: TriggerDecision,
+    /// The agent's concise explanation, or the fail-closed reason that forced a run.
+    pub reason: String,
+    /// Token and cost accounting for the trigger call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+    /// Wall-clock duration of the trigger call.
+    pub duration_ms: u64,
 }
 
 /// One event in a run's life cycle.
 ///
 /// Serialized with a `"type"` discriminator using the dotted names from the
-/// design (`run.started`, `reviewer.started`, `reviewer.resolved`,
-/// `run.completed`).
+/// design (`run.started`, `reviewer.started`, the terminal reviewer events,
+/// and `run.completed`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 #[non_exhaustive]
 pub enum RunEvent {
     /// The run's plan: the locally-rendered equivalent of a PR's pending
-    /// checks appearing. Each listed reviewer executes, replays from a
-    /// verified attestation, or carries its unchanged prior pass forward.
+    /// checks appearing. Each listed reviewer executes, semantically skips,
+    /// replays from a verified attestation, or carries an unchanged prior pass.
     #[serde(rename = "run.started")]
     RunStarted {
         /// The run id.
@@ -75,7 +104,7 @@ pub enum RunEvent {
         base: String,
         /// Number of changed files.
         changed: u32,
-        /// The reviewers in the plan (executing, replaying, or carrying).
+        /// The reviewer candidates in the plan.
         reviewers: Vec<ReviewerRef>,
         /// Whether this run was deliberately narrowed to a subset of the
         /// triggered reviewers (`bastion review --reviewer`). A partial run's
@@ -139,13 +168,33 @@ pub enum RunEvent {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         carried: bool,
         /// A digest of everything this reviewer's verdict was scoped to: its own
-        /// effective definition plus the diff of the changed files its trigger
-        /// matched. A later run whose digest is identical may carry this verdict
-        /// forward instead of re-executing the reviewer. `None` for runs
+        /// effective definition plus the path-matched diff for a path trigger or
+        /// the full changeset for an agent trigger. A later run whose digest is
+        /// identical may carry this verdict forward instead of re-executing the reviewer. `None` for runs
         /// persisted before the field existed and for replayed events, which
         /// simply makes them ineligible to carry from.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scope_digest: Option<String>,
+        /// The agent trigger decision that preceded this full review, if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger: Option<TriggerResolution>,
+    },
+    /// An agent trigger decided that the full reviewer did not apply.
+    #[serde(rename = "reviewer.skipped")]
+    ReviewerSkipped {
+        /// The run id.
+        run: RunId,
+        /// The reviewer name.
+        reviewer: String,
+        /// Its mode.
+        mode: Mode,
+        /// The recorded semantic routing decision.
+        trigger: TriggerResolution,
+        /// Whether a trigger transcript was saved locally.
+        has_transcript: bool,
+        /// Whether this outcome was replayed from an attestation.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        replayed: bool,
     },
     /// A CI run that replayed one or more reviewers from a signed local
     /// attestation instead of executing them, recorded once per run as the
@@ -222,6 +271,7 @@ impl RunEvent {
             RunEvent::RunStarted { run, .. }
             | RunEvent::ReviewerStarted { run, .. }
             | RunEvent::ReviewerResolved { run, .. }
+            | RunEvent::ReviewerSkipped { run, .. }
             | RunEvent::AttestationReplayed { run, .. }
             | RunEvent::AttestationFallback { run, .. }
             | RunEvent::RunCompleted { run, .. } => run,
@@ -239,6 +289,7 @@ mod tests {
         let event = RunEvent::ReviewerResolved {
             carried: false,
             scope_digest: None,
+            trigger: None,
             run: RunId("r-0f3a".into()),
             reviewer: "tenant-isolation".into(),
             verdict: Decision::Block,
@@ -291,6 +342,7 @@ mod tests {
         let event = RunEvent::ReviewerResolved {
             carried: false,
             scope_digest: None,
+            trigger: None,
             run: RunId("r-1".into()),
             reviewer: "tenant-isolation".into(),
             verdict: Decision::Pass,
@@ -320,6 +372,7 @@ mod tests {
             replayed: false,
             carried: true,
             scope_digest: Some("abc123".into()),
+            trigger: None,
         };
         let line = serde_json::to_string(&event).unwrap();
         assert!(line.contains(r#""carried":true"#));

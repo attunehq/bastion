@@ -60,6 +60,7 @@ pub(super) fn check_runs(ctx: &PrContext, digest: &RunDigest) -> Vec<CheckRun> {
 /// success (it never gates) and carries its findings along.
 pub(super) fn reviewer_check(ctx: &PrContext, row: &ReviewerRow) -> CheckRun {
     let (conclusion, decision_word) = match row.mode {
+        _ if row.skipped => (Conclusion::Success, "Skipped"),
         Mode::Advisor => (Conclusion::Success, "Advisory"),
         Mode::Gate if row.blocks() => (Conclusion::Failure, "Blocked"),
         Mode::Gate => (Conclusion::Success, "Passed"),
@@ -91,8 +92,22 @@ pub(super) fn aggregate_check(ctx: &PrContext, digest: &RunDigest) -> CheckRun {
             "Blocked: a gate verdict is internally inconsistent".to_string()
         }
         AggregateOutcome::PassedNoGates => "No gates triggered".to_string(),
-        AggregateOutcome::Passed { passed, total } => format!("{passed}/{total} gates passed"),
-        AggregateOutcome::Blocked { passed, total } => {
+        AggregateOutcome::Passed {
+            passed,
+            total,
+            skipped,
+        } if skipped > 0 => format!("{passed}/{total} gates passed, {skipped} skipped"),
+        AggregateOutcome::Passed { passed, total, .. } => {
+            format!("{passed}/{total} gates passed")
+        }
+        AggregateOutcome::Blocked {
+            passed,
+            total,
+            skipped,
+        } if skipped > 0 => {
+            format!("Blocked: {passed}/{total} gates passed, {skipped} skipped")
+        }
+        AggregateOutcome::Blocked { passed, total, .. } => {
             format!("Blocked: {passed}/{total} gates passed")
         }
         AggregateOutcome::Incomplete => "Incomplete run".to_string(),

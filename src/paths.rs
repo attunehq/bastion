@@ -12,7 +12,7 @@
 //!       reviewers/
 //!         tenant-isolation/
 //!           transcript.jsonl      # the full agent session
-//!           verdict.json          # the raw structured verdict
+//!           verdict.json          # the raw structured verdict; absent on a skip
 //!           meta.json             # backend, timing, usage, matched trigger
 //!     latest                      # pointer to the most recent run
 //! ```
@@ -112,7 +112,8 @@ impl Layout {
         self.reviewer_dir(id, reviewer).join("transcript.jsonl")
     }
 
-    /// A reviewer's raw structured verdict (`.../verdict.json`).
+    /// A reviewer's raw structured verdict (`.../verdict.json`), absent when an
+    /// agent trigger skipped the full review.
     #[must_use]
     pub fn verdict(&self, id: &RunId, reviewer: &str) -> PathBuf {
         self.reviewer_dir(id, reviewer).join("verdict.json")

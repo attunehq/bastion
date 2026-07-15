@@ -93,6 +93,18 @@ fn write_event_human<W: Write>(out: &mut W, event: &RunEvent) -> io::Result<()> 
             }
             Ok(())
         }
+        RunEvent::ReviewerSkipped {
+            reviewer,
+            trigger,
+            replayed,
+            ..
+        } => writeln!(
+            out,
+            "  - {reviewer}: skipped by agent trigger: {} ({}s{})",
+            trigger.reason,
+            trigger.duration_ms / 1000,
+            if *replayed { ", replayed" } else { "" },
+        ),
         RunEvent::AttestationReplayed {
             reviewers,
             public_key,
@@ -118,7 +130,7 @@ fn write_event_human<W: Write>(out: &mut W, event: &RunEvent) -> io::Result<()> 
             ..
         } => writeln!(
             out,
-            "{} run complete{}: {}/{} gates passed ({}s{}, {cost_usd})",
+            "{} run complete{}: {}/{} gates passed, {} skipped ({}s{}, {cost_usd})",
             marker(*verdict),
             // A filtered green speaks only for the reviewers that ran; say so on
             // the one line a person actually reads.
@@ -129,6 +141,7 @@ fn write_event_human<W: Write>(out: &mut W, event: &RunEvent) -> io::Result<()> 
             },
             gates.passed,
             gates.total,
+            gates.skipped,
             duration_ms / 1000,
             token_counter(*tokens_in, *tokens_out, *cache_read),
         ),
@@ -210,6 +223,7 @@ mod tests {
         RunEvent::ReviewerResolved {
             carried: false,
             scope_digest: None,
+            trigger: None,
             run: RunId("r-1".into()),
             reviewer: "tenant-isolation".into(),
             verdict: Decision::Block,
@@ -246,6 +260,7 @@ mod tests {
                 total: 2,
                 passed: 2,
                 blocked: 0,
+                skipped: 0,
             },
             duration_ms: 40_000,
             tokens_in,

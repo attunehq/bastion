@@ -94,9 +94,10 @@ Each line carries a `type`:
 
 | Event | What to do with it |
 | --- | --- |
-| `run.started` | Lists the reviewers that matched your changes. Each executes, or has an unchanged prior pass carried forward. |
+| `run.started` | Lists candidate reviewers. Each executes, records an agent-trigger skip, replays, or carries an unchanged prior pass. |
 | `reviewer.started` | One reviewer began. Nothing to do. |
 | `reviewer.resolved` | One reviewer finished. If its `verdict` is `block`, act on its `findings`. |
+| `reviewer.skipped` | An agent trigger decided the full reviewer does not apply. This is a recorded routing outcome, not a pass verdict. |
 | `run.completed` | The aggregate `verdict` (`pass` or `block`) and the gate tally. |
 
 A `finding` tells you exactly what to change: a `path`, a `line_start` and
@@ -134,7 +135,8 @@ rebase as a reason to expect, or budget for, a full re-review.
 - Pass `--fresh` to re-execute everything (say, after changing something a
   reviewer's trigger does not cover but you believe it should judge).
 - Pass `--reviewer <name>` (repeatable; alias `--only`) to run a hand-picked
-  subset of the triggered reviewers. The run is then marked **partial**
+  subset of the triggered reviewers. Naming a reviewer bypasses its agent
+  trigger and runs the full review. The run is then marked **partial**
   (`"partial": true` on `run.started` and `run.completed`): its green speaks
   only for the reviewers that ran, it cannot be attested, and it does not
   replace a full green. Use it to iterate on one stubborn reviewer, then finish
@@ -261,6 +263,10 @@ to explain away per change.
   `.bastion.yaml`. Never edit, disable, or narrow a reviewer's trigger to
   get past a block. Fix the code instead. If you believe a reviewer is wrong, say so
   to the human who owns the policy; do not route around it.
+- **Agent-trigger skips are decisions, not permission to ignore a concern.** A
+  skip needs no action in the review loop. If its routing prompt or path
+  prefilter is wrong as policy, report that to the human owner; never edit it to
+  suppress a reviewer on your own change.
 - **Gates fail closed.** A gate that errors or times out blocks, exactly as if it
   had found a problem. A block is a normal outcome, not a crash: read it and fix it.
 - **Run the gate in one place.** Decide where it runs before you run it (the section

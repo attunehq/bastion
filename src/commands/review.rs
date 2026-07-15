@@ -137,6 +137,7 @@ pub async fn review(
 
     let router = Router::compile(&config.reviewers)?;
     let triggered = router.matched(&changed);
+    let force = !only.is_empty();
     let matched = select_reviewers(&triggered, &config.reviewers, &only)?;
     // Partial means coverage was actually reduced: selecting every triggered
     // reviewer by name is still a full run.
@@ -175,6 +176,7 @@ pub async fn review(
                 total: 0,
                 passed: 0,
                 blocked: 0,
+                skipped: 0,
             },
             duration_ms: 0,
             tokens_in: 0,
@@ -313,6 +315,7 @@ pub async fn review(
         replayed,
         attestation,
         partial,
+        force,
         carried,
         scope_digests,
         digest_probe,
@@ -977,7 +980,7 @@ mod tests {
     fn named_reviewer(name: &str) -> crate::reviewer::Reviewer {
         crate::reviewer::Reviewer {
             name: name.into(),
-            trigger: vec!["**".into()],
+            trigger: vec!["**".into()].into(),
             mode: Mode::Gate,
             backend: crate::reviewer::Backend::ClaudeCode,
             model: None,

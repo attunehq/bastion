@@ -779,7 +779,7 @@ mod tests {
     fn reviewer() -> Reviewer {
         Reviewer {
             name: "demo".into(),
-            trigger: vec!["**".into()],
+            trigger: vec!["**".into()].into(),
             mode: Mode::Gate,
             backend: reviewer::Backend::Codex,
             model: None,
@@ -802,6 +802,7 @@ mod tests {
             base: "main",
             merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
+            purpose: crate::backend::ReviewPurpose::Review,
         }
     }
 
@@ -837,6 +838,7 @@ mod tests {
             base: "main",
             merge_base: "deadbeef",
             context: &context,
+            purpose: crate::backend::ReviewPurpose::Review,
         };
         let prompt = build_prompt(&req);
         let prompt_at = prompt

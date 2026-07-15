@@ -348,6 +348,7 @@ mod tests {
                     total: 1,
                     passed: 1,
                     blocked: 0,
+                    skipped: 0,
                 },
                 duration_ms: 100,
                 tokens_in: 0,
@@ -484,6 +485,7 @@ mod tests {
             RunEvent::ReviewerResolved {
                 carried: false,
                 scope_digest: None,
+                trigger: None,
                 run: RunId(id.into()),
                 reviewer: reviewer.into(),
                 verdict: Decision::Block,
@@ -502,6 +504,7 @@ mod tests {
                     total: 1,
                     passed: 0,
                     blocked: 1,
+                    skipped: 0,
                 },
                 duration_ms: 1,
                 tokens_in: 0,

@@ -119,12 +119,17 @@ struct ReviewerRow {
     /// store. The report flags a carried reviewer in its per-reviewer check-run
     /// summary and, at comment level, in the [`carried_callout`].
     carried: bool,
+    /// Whether an agent trigger omitted the full reviewer.
+    skipped: bool,
 }
 
 impl ReviewerRow {
     /// The at-a-glance verdict word for this row. An advisor never gates, so it
     /// reads as `advisory` regardless of the decision the runner clamped to pass.
     fn verdict_word(&self) -> &'static str {
+        if self.skipped {
+            return "skipped";
+        }
         match self.mode {
             Mode::Advisor => "advisory",
             Mode::Gate => self.decision.as_str(),
@@ -262,6 +267,28 @@ fn digest(events: &[RunEvent]) -> RunDigest {
                     usage: *usage,
                     replayed: *replayed,
                     carried: *carried,
+                    skipped: false,
+                });
+            }
+            RunEvent::ReviewerSkipped {
+                reviewer,
+                mode,
+                trigger,
+                replayed,
+                ..
+            } => {
+                digest.rows.push(ReviewerRow {
+                    name: reviewer.clone(),
+                    mode: *mode,
+                    backend: Some(trigger.backend),
+                    decision: Decision::Pass,
+                    summary: trigger.reason.clone(),
+                    findings: Vec::new(),
+                    duration_ms: trigger.duration_ms,
+                    usage: trigger.usage,
+                    replayed: *replayed,
+                    carried: false,
+                    skipped: true,
                 });
             }
             RunEvent::RunCompleted {
@@ -337,9 +364,17 @@ enum AggregateOutcome {
     PassedNoGates,
     /// A clean pass: `passed` of `total` gates passed (with a clean aggregate,
     /// `passed == total`).
-    Passed { passed: u32, total: u32 },
+    Passed {
+        passed: u32,
+        total: u32,
+        skipped: u32,
+    },
     /// Blocked: `passed` of `total` gates passed.
-    Blocked { passed: u32, total: u32 },
+    Blocked {
+        passed: u32,
+        total: u32,
+        skipped: u32,
+    },
     /// The run never completed, so there is no verdict to report.
     Incomplete,
 }
@@ -349,12 +384,22 @@ impl AggregateOutcome {
     /// pass is clean unless a gate row contradicts itself, in which case it fails
     /// closed as [`AggregateOutcome::BlockedInconsistent`].
     fn classify(digest: &RunDigest) -> Self {
-        let (passed, total) = digest.gates.map_or((0, 0), |g| (g.passed, g.total));
+        let (passed, total, skipped) = digest
+            .gates
+            .map_or((0, 0, 0), |g| (g.passed, g.total, g.skipped));
         match digest.aggregate {
             Some(Decision::Pass) if any_gate_blocks(digest) => Self::BlockedInconsistent,
             Some(Decision::Pass) if total == 0 => Self::PassedNoGates,
-            Some(Decision::Pass) => Self::Passed { passed, total },
-            Some(Decision::Block) => Self::Blocked { passed, total },
+            Some(Decision::Pass) => Self::Passed {
+                passed,
+                total,
+                skipped,
+            },
+            Some(Decision::Block) => Self::Blocked {
+                passed,
+                total,
+                skipped,
+            },
             None => Self::Incomplete,
         }
     }

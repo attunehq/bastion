@@ -35,13 +35,21 @@ Two properties matter most:
 
 ## The trigger and the changeset
 
-A reviewer's **trigger** is a list of path globs. A reviewer runs only when at
-least one changed file matches one of its globs. That is what makes a hundred
-reviewers cheap: a docs-only change wakes the docs reviewers and nothing else.
+A reviewer's **trigger** decides whether the reviewer applies to a changeset.
+The usual form is a list of path globs; the reviewer runs when at least one
+changed file matches. A docs-only change then wakes the docs reviewers and
+nothing else.
 
 ```yaml
 trigger: [src/server/**, src/client/**]   # runs when server or client code changed
 ```
+
+For a concern that paths cannot identify narrowly, `kind: agent` asks a cheaper
+model whether the full reviewer applies. Optional `paths` run first as a cheap
+prefilter. The agent sees the actual changeset, and any failure or uncertainty
+runs the full reviewer. A confident skip is recorded separately from a pass
+verdict. See [Agent triggers](./authoring-reviewers.md#trigger) for the schema and
+cost model.
 
 The **changeset** is everything in your working tree that differs from the point
 where your branch forked from the base branch (the merge base), *including
@@ -63,8 +71,10 @@ Every reviewer has a **mode** that decides whether it can block a merge:
 | `gate` | Yes, when it returns `block` | **Fails closed**: resolves to `block` |
 | `advisor` | No, ever | **Fails open**: ignored in the aggregate |
 
-A **gate** is a hard requirement: it must produce a clean `pass` for the merge to
-proceed. If it crashes, times out, or cannot produce a valid verdict, it resolves
+A **gate** is a hard requirement when its trigger says the reviewer applies: the
+full reviewer must produce a clean `pass` for the merge to proceed. An agent trigger
+may instead record a semantic skip, which is counted separately from a pass. If an
+applicable gate crashes, times out, or cannot produce a valid verdict, it resolves
 to a block, never a silent pass. An **advisor** comments but never holds up the
 merge; even a clean `block` verdict from an advisor is treated as a pass for
 aggregation, and its findings are recorded as `optional` (an advisor's findings
@@ -77,9 +87,11 @@ coverage, doc gaps, style preferences).
 
 ## The verdict
 
-Every reviewer returns a structured **verdict**, captured through the backend's
-structured-output mechanism (a JSON schema for Claude Code, a requested verdict
-block for Codex) so Bastion can parse and aggregate it:
+Every full reviewer execution returns a structured **verdict**, captured through the
+backend's structured-output mechanism (a JSON schema for Claude Code, a requested
+verdict block for Codex) so Bastion can parse and aggregate it. An agent trigger
+that skips the full reviewer records `reviewer.skipped` instead, with no verdict or
+findings. A full reviewer's verdict has this shape:
 
 ```yaml
 verdict: pass | block    # the authoritative gate decision (ignored for advisors)
@@ -112,15 +124,15 @@ does not need to ask for it.
 
 ## The merge gate
 
-Bastion runs the matched reviewers in parallel (they have wildly different
+Bastion resolves the reviewer candidates in parallel (they have wildly different
 latencies, one might take 90 seconds, another 15 minutes) and **aggregates** their
-verdicts into a single decision. Not every matched reviewer executes every time:
-in CI a reviewer covered by a verified attestation replays its recorded verdict,
-and on a re-run (local or in CI) a reviewer whose prior pass is unchanged carries it
-forward; both still count in the aggregate:
+terminal outcomes into a single decision. A candidate may execute, record an
+agent-trigger skip, replay from a verified attestation in CI, or carry an unchanged
+prior pass on a re-run:
 
-- **All gates must pass.** The aggregate is `pass` only when every gate returned a
-  clean `pass`.
+- **Every applicable gate must pass.** An agent trigger may decide its reviewer
+  does not apply; that gate increments `gates.skipped` without producing a pass
+  verdict. The aggregate is `pass` when every gate that did apply passed.
 - **Any blocked, errored, or timed-out gate blocks the aggregate.** "All gates
   pass" never includes a gate that failed to produce a verdict.
 - **Advisors never affect the aggregate.** They contribute findings, not gate
@@ -182,7 +194,7 @@ authenticates from auth baked into its image or from a credential written into i
    bastion review  --->  compute changeset (working tree vs merge base)
         |
         v
-   route: select reviewers whose trigger globs match
+   route: apply path prefilters, then resolve agent triggers
         |
         v
    run matched reviewers in parallel; a reviewer may instead replay from a verified
@@ -191,11 +203,11 @@ authenticates from auth baked into its image or from a credential written into i
    is timeout-bounded)
         |
         v
-   each returns a verdict (pass/block + summary + findings)
+   each returns a verdict, or records an agent-trigger skip
         |
         v
-   aggregate: all gates must pass  --->  one decision (exit code locally; the
-                                          review gate in CI)
+   aggregate: every applicable gate must pass  --->  one decision (exit code locally;
+                                                       the review gate in CI)
 ```
 
 ---
