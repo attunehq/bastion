@@ -54,7 +54,7 @@ jobs:
             echo "No site build inputs changed; skipping the build."
           fi
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         if: steps.inputs.outputs.changed == 'true'
         with:
           # Match Deploy site: the current LTS line Astro supports.
