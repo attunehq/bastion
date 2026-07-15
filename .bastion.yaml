@@ -62,19 +62,18 @@ attestations: true
 # itself (an explicit field on a reviewer wins). Every reviewer below pins
 # `backend: codex`, which satisfies the rule that an inherited model needs a
 # pinned backend (a model under `backend: any` is a load error). The Codex backend
-# forwards `model` as `-m` and `effort` as `model_reasoning_effort`. Medium
-# effort is the default; only the trust-boundary gate below opts up to high,
-# because it is the one reviewer whose misses ship real bugs. See
+# forwards `model` as `-m` and `effort` as `model_reasoning_effort`. Both
+# reviewers use Terra at high effort. See
 # docs/user-guide/authoring-reviewers.md#registry-wide-defaults.
 defaults:
-  model: gpt-5.5
-  effort: medium
+  model: gpt-5.6-terra
+  effort: high
 
 reviewers:
   # The gate on Bastion's core safety invariant, and the one reviewer whose
   # misses ship real bugs (a dirty-worktree attestation hole, a seal-time TOCTOU,
-  # a carry binding hole), so it runs at high effort. Its trigger is the trust
-  # boundary its prompt declares as its scope, not all of src/: the modules where
+  # a carry binding hole). Its trigger is the trust boundary its prompt declares
+  # as its scope, not all of src/: the modules where
   # a verdict is produced live, reused, aggregated, sealed, and attested. A change
   # elsewhere cannot violate the invariant, so it should not pay for this
   # reviewer. The runner, backend, commands, and attest entries are directory
@@ -94,7 +93,6 @@ reviewers:
       ]
     mode: gate
     backend: codex
-    effort: high
     prompt: |
       Bastion's core safety invariant is that gates fail closed, advisors fail
       open, and every verdict is internally consistent. That invariant is
