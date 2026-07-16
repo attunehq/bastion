@@ -61,13 +61,17 @@ Two audiences, two formats. By default `bastion review` renders human-readable p
 We stream **JSONL**: one JSON object per line, emitted as each thing happens. It is the natural fit for a live, append-only sequence of events; an agent can read it line by line as it arrives, and every agent already parses JSON without a library. A run is a sequence of typed events:
 
 ```jsonl
-{"type":"run.started","run":"r-0f3a","branch":"feat/cart","base":"main","changed":12,"reviewers":[{"name":"file-responsibility","mode":"gate"},{"name":"tenant-isolation","mode":"gate"}]}
+{"type":"run.started","run":"r-0f3a","branch":"feat/cart","base":"main","changed":12,"reviewers":[{"name":"tenant-isolation","mode":"gate"},{"name":"single-responsibility","mode":"gate"}]}
 {"type":"reviewer.started","run":"r-0f3a","reviewer":"tenant-isolation","mode":"gate","backend":"claude-code"}
+{"type":"reviewer.started","run":"r-0f3a","reviewer":"single-responsibility","mode":"gate","backend":"codex"}
+{"type":"reviewer.finished","run":"r-0f3a","reviewer":"single-responsibility","duration_ms":842,"completed":1,"total":2}
+{"type":"reviewer.finished","run":"r-0f3a","reviewer":"tenant-isolation","duration_ms":38120,"completed":2,"total":2}
 {"type":"reviewer.resolved","run":"r-0f3a","reviewer":"tenant-isolation","verdict":"block","summary":"A new query path reads rows without scoping by tenant id.","findings":[{"kind":"blocking","path":"src/server/db.ts","line_start":88,"line_end":91,"detail":"scope this query by tenant_id"}],"usage":{"tokens_in":18204,"tokens_out":1560,"cache_read":12000,"cost_usd":0.21},"duration_ms":38120,"has_transcript":true}
-{"type":"run.completed","run":"r-0f3a","verdict":"block","gates":{"total":2,"passed":1,"blocked":1,"skipped":0},"duration_ms":41030,"tokens_in":20480,"tokens_out":1875,"cache_read":13100,"cost_usd":0.37}
+{"type":"reviewer.skipped","run":"r-0f3a","reviewer":"single-responsibility","mode":"gate","trigger":{"backend":"codex","decision":"skip","reason":"No responsibility boundary changed.","duration_ms":842},"has_transcript":true}
+{"type":"run.completed","run":"r-0f3a","verdict":"block","gates":{"total":2,"passed":0,"blocked":1,"skipped":1},"duration_ms":41030,"tokens_in":20480,"tokens_out":1875,"cache_read":13100,"cost_usd":0.37}
 ```
 
-`reviewer.resolved` carries a full verdict, findings, usage, and any preceding agent-trigger `run` decision. `reviewer.skipped` carries the trigger backend, skip reason, and usage without claiming the reviewer passed. `run.completed` is the aggregate `bastion` check and includes `gates.skipped`; trigger usage is included in its totals. `run.started` and `reviewer.started` are local progress for an agent reacting as the run goes; the GitHub side is posted after the run finishes, so it has no separate surface for them.
+`reviewer.finished` is live progress for a fresh reviewer task. It records elapsed time and counts over the fresh tasks in this run. It does not carry an outcome because the runner rechecks scope digests against the post-run tree before finalizing verdicts. `reviewer.resolved` carries that final verdict, findings, usage, and any preceding agent-trigger `run` decision. `reviewer.skipped` carries the trigger backend, skip reason, and usage without claiming the reviewer passed. `run.completed` is the aggregate `bastion` check and includes `gates.skipped`; trigger usage is included in its totals. These progress events are local. The GitHub side is posted after the run finishes, so it has no equivalent in-progress surface.
 
 One case ends the run outside this happy path: a [per-run spend cap](./design.md#bounding-a-runs-spend) tripping. If a broken or unauthenticated agent CLI respawns in a loop, the governor aborts the fan-out; the run still emits a `run.completed` with a `block` aggregate (every affected reviewer failed closed) and persists, but it is not sealed, and `bastion review` then exits non-zero with a stderr line naming what was capped and how many agents launched. So an agent reading the stream sees an ordinary `block`; the exit status and the stderr line are what distinguish a spend-cap abort from a code-review block.
 

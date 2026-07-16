@@ -80,8 +80,9 @@ bastion review --base <branch> --format jsonl
 ```
 
 - `--base` is the branch you are merging into (default `main`).
-- `--format jsonl` gives you one JSON object per line, emitted as each reviewer
-  resolves. Always use it: the default human format is for a person watching.
+- `--format jsonl` gives you one flushed JSON object per line, including live
+  progress as fresh reviewer tasks finish. Always use it: the default human format
+  is for a person watching.
 - The process exits zero when the gate passes and non-zero when it blocks, so you
   can branch on the exit code alone when you only need pass or fail.
 
@@ -96,7 +97,8 @@ Each line carries a `type`:
 | --- | --- |
 | `run.started` | Lists candidate reviewers. Each executes, records an agent-trigger skip, replays, or carries an unchanged prior pass. |
 | `reviewer.started` | One reviewer began. Nothing to do. |
-| `reviewer.resolved` | One reviewer finished. If its `verdict` is `block`, act on its `findings`. |
+| `reviewer.finished` | One fresh reviewer task stopped. This is progress only; wait for its final outcome. |
+| `reviewer.resolved` | One reviewer was finalized. If its `verdict` is `block`, act on its `findings`. |
 | `reviewer.skipped` | An agent trigger decided the full reviewer does not apply. This is a recorded routing outcome, not a pass verdict. |
 | `run.completed` | The aggregate `verdict` (`pass` or `block`) and the gate tally. |
 
