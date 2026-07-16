@@ -73,11 +73,11 @@ GitHub surface has a local twin:
 | The aggregate `bastion` check and the sticky PR comment        | `run.completed` event               |
 | Transcript in the uploaded run artifact                        | saved on disk, `bastion transcript` |
 
-The local stream additionally carries `run.started` and `reviewer.started` for an
-agent reacting as the run goes; those have no separate GitHub surface, because
-`bastion github report` runs after the review finishes and renders the result in one
-pass. This mapping is deliberate, so an agent's local loop and the CI gate stay
-aligned on what a review means.
+The local stream additionally carries `run.started`, `reviewer.started`, and
+`reviewer.finished` for an agent reacting as the run goes; those have no separate
+GitHub surface, because `bastion github report` runs after the review finishes and
+renders the result in one pass. This mapping is deliberate, so an agent's local
+loop and the CI gate stay aligned on what a review means.
 
 ## The one required check
 

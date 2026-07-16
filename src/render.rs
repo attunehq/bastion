@@ -35,7 +35,8 @@ pub fn write_event<W: Write>(out: &mut W, format: Format, event: &RunEvent) -> i
             serde_json::to_string(event).map_err(io::Error::other)?
         ),
         Format::Human => write_event_human(out, event),
-    }
+    }?;
+    out.flush()
 }
 
 fn write_event_human<W: Write>(out: &mut W, event: &RunEvent) -> io::Result<()> {
@@ -70,6 +71,17 @@ fn write_event_human<W: Write>(out: &mut W, event: &RunEvent) -> io::Result<()> 
                 backend.as_str()
             )
         }
+        RunEvent::ReviewerFinished {
+            reviewer,
+            duration_ms,
+            completed,
+            total,
+            ..
+        } => writeln!(
+            out,
+            "  .. {reviewer} execution finished ({completed}/{total} fresh complete, {}s)",
+            duration_ms / 1000,
+        ),
         RunEvent::ReviewerResolved {
             reviewer,
             verdict,
@@ -310,6 +322,51 @@ mod tests {
         assert!(line.contains(r#""type":"reviewer.resolved""#));
         let parsed: RunEvent = serde_json::from_str(line.trim()).unwrap();
         assert_eq!(parsed, resolved());
+    }
+
+    #[test]
+    fn finished_progress_names_the_reviewer_and_fresh_task_counts() {
+        let event = RunEvent::ReviewerFinished {
+            run: RunId("r-1".into()),
+            reviewer: "tenant-isolation".into(),
+            duration_ms: 4200,
+            completed: 2,
+            total: 3,
+        };
+        let mut buf = Vec::new();
+        write_event(&mut buf, Format::Human, &event).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert_eq!(
+            text,
+            "  .. tenant-isolation execution finished (2/3 fresh complete, 4s)\n"
+        );
+    }
+
+    #[test]
+    fn each_streamed_event_is_flushed() {
+        #[derive(Default)]
+        struct FlushCountingWriter {
+            bytes: Vec<u8>,
+            flushes: usize,
+        }
+
+        impl Write for FlushCountingWriter {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.bytes.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                self.flushes += 1;
+                Ok(())
+            }
+        }
+
+        let mut out = FlushCountingWriter::default();
+        write_event(&mut out, Format::Jsonl, &resolved()).unwrap();
+
+        assert_eq!(out.flushes, 1);
+        assert!(out.bytes.ends_with(b"\n"));
     }
 
     #[test]

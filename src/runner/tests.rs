@@ -302,6 +302,7 @@ async fn run_scenario_with_ctx(
                     tokio::time::sleep(d).await;
                     Ok(pass("late"))
                 }
+                Some(Response::Panic) => panic!("reviewer task panic"),
                 None => Ok(pass("default")),
             }
         })
@@ -325,6 +326,7 @@ enum Response {
     Outcome(ReviewOutcome),
     Error(String),
     Hang(Duration),
+    Panic,
 }
 
 fn responses(pairs: Vec<(&str, Response)>) -> std::collections::HashMap<String, Response> {
@@ -630,19 +632,104 @@ async fn a_timed_out_advisor_is_ignored() {
     assert_eq!(decision, Decision::Pass);
 }
 
+#[tokio::test(start_paused = true)]
+async fn finished_events_cover_every_task_outcome() {
+    let completed = reviewer("completed", Mode::Gate);
+    let failed = reviewer("failed", Mode::Gate);
+    let mut timed_out = reviewer("timed-out", Mode::Gate);
+    timed_out.timeout = Some(Duration::from_secs(1));
+    let crashed = reviewer("crashed", Mode::Gate);
+    let reviewers = [&completed, &failed, &timed_out, &crashed];
+
+    let (_decision, events, _layout) = run_scenario(
+        &reviewers,
+        responses(vec![
+            ("completed", Response::Outcome(pass("ok"))),
+            ("failed", Response::Error("backend failed".into())),
+            ("timed-out", Response::Hang(Duration::from_secs(60))),
+            ("crashed", Response::Panic),
+        ]),
+    )
+    .await;
+
+    let finished: std::collections::HashSet<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            RunEvent::ReviewerFinished { reviewer, .. } => Some(reviewer.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(finished.len(), 4);
+    assert!(finished.contains("completed"));
+    assert!(finished.contains("failed"));
+    assert!(finished.contains("timed-out"));
+    assert!(finished.contains("crashed"));
+}
+
+#[tokio::test]
+async fn finished_event_arrives_while_another_reviewer_is_still_running() {
+    let fast = reviewer("fast", Mode::Gate);
+    let slow = reviewer("slow", Mode::Gate);
+    let reviewers = [&fast, &slow];
+    let context = ctx(&reviewers);
+    let tmp = tempfile::tempdir().unwrap();
+    let layout = Layout::with_root(tmp.path().to_path_buf());
+    let release_slow = std::sync::Arc::new(tokio::sync::Notify::new());
+    let exec_release = release_slow.clone();
+    let exec: std::sync::Arc<ReviewFn> = std::sync::Arc::new(move |req: OwnedRequest| {
+        let release = exec_release.clone();
+        Box::pin(async move {
+            if req.reviewer.name == "slow" {
+                release.notified().await;
+            }
+            Ok(pass("ok"))
+        })
+    });
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut emit = move |event: &RunEvent| {
+        tx.send(event.clone()).expect("receiver remains open");
+    };
+    let run = execute_with(&reviewers, &context, &layout, &mut emit, exec);
+    tokio::pin!(run);
+
+    let progress = loop {
+        tokio::select! {
+            result = &mut run => panic!("run completed before fast progress event: {result:?}"),
+            event = rx.recv() => {
+                let event = event.expect("event stream remains open");
+                if matches!(&event, RunEvent::ReviewerFinished { reviewer, .. } if reviewer == "fast") {
+                    break event;
+                }
+            }
+        }
+    };
+    assert!(matches!(
+        progress,
+        RunEvent::ReviewerFinished {
+            completed: 1,
+            total: 2,
+            ..
+        }
+    ));
+
+    release_slow.notify_one();
+    assert_eq!(run.await.expect("run completes"), Decision::Pass);
+}
+
 #[tokio::test]
 async fn persisted_run_jsonl_is_the_full_event_stream() {
     // run.jsonl must contain the started events too, not just resolve/completed,
     // so a replay sees the same sequence the live stream emitted.
     let g1 = reviewer("g1", Mode::Gate);
     let reviewers = [&g1];
-    let (_decision, _events, layout) = run_scenario(
+    let (_decision, events, layout) = run_scenario(
         &reviewers,
         responses(vec![("g1", Response::Outcome(pass("ok")))]),
     )
     .await;
 
     let persisted = crate::store::read_run(&layout, &RunId("r-exec".into())).unwrap();
+    assert_eq!(&persisted[1..], events.as_slice());
     assert!(
         matches!(persisted.first(), Some(RunEvent::RunStarted { .. })),
         "stream must open with run.started"
@@ -652,6 +739,12 @@ async fn persisted_run_jsonl_is_the_full_event_stream() {
             .iter()
             .any(|e| matches!(e, RunEvent::ReviewerStarted { .. })),
         "stream must include reviewer.started"
+    );
+    assert!(
+        persisted
+            .iter()
+            .any(|e| matches!(e, RunEvent::ReviewerFinished { .. })),
+        "stream must include reviewer.finished"
     );
     assert!(
         persisted

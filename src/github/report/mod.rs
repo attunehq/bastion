@@ -243,6 +243,7 @@ fn digest(events: &[RunEvent]) -> RunDigest {
                 // First start wins, matching the prior first-match scan.
                 backends.entry(reviewer.clone()).or_insert(*backend);
             }
+            RunEvent::ReviewerFinished { .. } => {}
             RunEvent::ReviewerResolved {
                 reviewer,
                 verdict,

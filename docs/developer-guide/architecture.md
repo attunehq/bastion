@@ -148,7 +148,9 @@ Following one review top to bottom touches most of the crate:
    effective `SpawnLimits` (`src/backend/governor.rs`, `src/limits.rs`), then spawns
    every candidate that is neither replaying nor carrying onto a `JoinSet`,
    and emits `reviewer.started` up front, including for replayed and carried
-   candidates so the plan reads the same either way. An agent-triggered candidate
+   candidates so the plan reads the same either way. As each fresh task stops, the
+   runner emits `reviewer.finished` in completion order with its duration and
+   fresh-task counts. An agent-triggered candidate
    first runs its least-privilege routing profile without author intent. A valid `skip`
    becomes `reviewer.skipped`; every trigger failure becomes `run`, then the full
    reviewer is bounded by its `timeout` (default 15m). Each agent launch uses the
@@ -163,14 +165,16 @@ Following one review top to bottom touches most of the crate:
    entirely and is never handed to the `JoinSet`: its outcome is folded in from
    the attested bundle's terminal event (replay) or the prior run's persisted
    `reviewer.resolved` event (carry).
-7. **Resolve & aggregate** (`runner/`). Each full-review result has fail-closed/fail-open
+7. **Resolve & aggregate** (`runner/`). After every fresh task stops, scope digests
+   are rechecked against the post-run tree and final events retain registry order.
+   Each full-review result has fail-closed/fail-open
    policy applied: a gate that blocks, errors, or times out resolves to `block`
    (with a synthetic blocking finding); an advisor that fails is dropped. A replayed
    verdict carries the same policy as if it had executed, so a replayed block still
    blocks. A semantic skip increments the gate tally's `skipped` count and contributes
    no pass. The aggregate is `block` if any gate blocked, else `pass`.
 8. **Emit & persist** (`render.rs`, `store.rs`, `seal.rs`). Events stream out as
-   human text or JSONL as they happen; the full event stream, plus per-reviewer
+   flushed human text or JSONL as they happen; the full event stream, plus per-reviewer
    transcript, verdict, and metadata, is written under the run's directory, and
    `latest` is updated. The runner then seals an eligible run on a best-effort
    basis: a canonical digest of the committed HEAD tree, the merge-base tree,

@@ -611,6 +611,7 @@ pub(crate) fn event_kind(event: &RunEvent) -> &'static str {
     match event {
         RunEvent::RunStarted { .. } => "run.started",
         RunEvent::ReviewerStarted { .. } => "reviewer.started",
+        RunEvent::ReviewerFinished { .. } => "reviewer.finished",
         RunEvent::ReviewerResolved { .. } => "reviewer.resolved",
         RunEvent::RunCompleted { .. } => "run.completed",
         // `RunEvent` is `#[non_exhaustive]`; a new variant should surface here.

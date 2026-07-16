@@ -25,6 +25,7 @@
 //! [`MockBackend`], and dispatch) lives in [`crate::backend`] and is re-exported
 //! here for the call sites that predate the split.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -346,7 +347,7 @@ pub async fn execute_with(
     // collect it in registry order, then resolve fresh + replayed + carried rows
     // and re-check each stamped scope digest against the post-run tree.
     let started_events = emit_started_events(ctx, matched, emit);
-    let results = run_fresh(matched, ctx, &exec, &governor).await;
+    let (results, finished_events) = run_fresh(matched, ctx, &exec, &governor, emit).await;
     let mut resolved = resolve_all(matched, ctx, results);
     recheck_scope_digests(&mut resolved, ctx);
 
@@ -355,11 +356,13 @@ pub async fn execute_with(
     // decided and rendered before any reviewer was dispatched) followed by the
     // retained `reviewer.started` events, so a replay sees the same sequence the
     // live `emit` produced.
-    let mut events = Vec::with_capacity(started_events.len() + resolved.len() + 3);
+    let mut events =
+        Vec::with_capacity(started_events.len() + finished_events.len() + resolved.len() + 3);
     if let Some(fallback) = ctx.attestation_fallback.clone() {
         events.push(fallback);
     }
     events.extend(started_events);
+    events.extend(finished_events);
     for item in &resolved {
         persist_reviewer(layout, &ctx.run, item)
             .wrap_err_with(|| format!("persisting reviewer '{}'", item.reviewer.name))?;
@@ -514,9 +517,9 @@ fn emit_started_events(
     started_events
 }
 
-/// Run the fresh `matched` reviewers concurrently, each bounded by its `timeout`,
-/// and collect the results back into registry order so the persisted stream is
-/// deterministic regardless of completion timing.
+/// Run the fresh `matched` reviewers concurrently, each bounded by its `timeout`.
+/// Progress events retain completion order while results return in registry order,
+/// keeping final verdicts deterministic for persistence and sealing.
 ///
 /// A slot stays `None` when its task neither completed nor errored cleanly (a
 /// panic); [`resolve`] treats that as a crash, fail-closed for a gate.
@@ -525,8 +528,10 @@ async fn run_fresh(
     ctx: &ExecContext,
     exec: &Arc<ReviewFn>,
     governor: &Arc<SpawnGovernor>,
-) -> Vec<Option<ReviewTaskResult>> {
+    emit: &mut dyn FnMut(&RunEvent),
+) -> (Vec<Option<ReviewTaskResult>>, Vec<RunEvent>) {
     let mut set: JoinSet<(usize, ReviewTaskResult)> = JoinSet::new();
+    let mut tasks = HashMap::with_capacity(matched.len());
     for (index, reviewer) in matched.iter().enumerate() {
         let request = OwnedRequest {
             reviewer: (*reviewer).clone(),
@@ -540,7 +545,8 @@ async fn run_fresh(
         };
         let force = ctx.force;
         let exec = exec.clone();
-        set.spawn(async move {
+        let spawned = Instant::now();
+        let handle = set.spawn(async move {
             let started = Instant::now();
             let (outcome, trigger) = run_one(request, exec, force).await;
             (
@@ -552,22 +558,42 @@ async fn run_fresh(
                 },
             )
         });
+        tasks.insert(handle.id(), (index, spawned));
     }
 
     let mut results: Vec<Option<ReviewTaskResult>> = (0..matched.len()).map(|_| None).collect();
-    while let Some(joined) = set.join_next().await {
-        match joined {
-            Ok((index, result)) => results[index] = Some(result),
-            Err(join_err) => {
-                // A panicked task: we have no index, so we cannot place it. This
-                // should not happen (tasks catch their own errors), but if it
-                // does, it must not silently drop a gate. Fall through; the
-                // corresponding slot stays `None` and is treated as a crash.
-                tracing::error!(error = %join_err, "a reviewer task panicked");
+    let mut finished_events = Vec::with_capacity(matched.len());
+    let total = u32::try_from(matched.len()).unwrap_or(u32::MAX);
+    while let Some(joined) = set.join_next_with_id().await {
+        let (id, index, duration) = match joined {
+            Ok((id, (index, result))) => {
+                let duration = result.duration;
+                results[index] = Some(result);
+                (id, index, duration)
             }
-        }
+            Err(join_err) => {
+                let id = join_err.id();
+                let Some((index, started)) = tasks.get(&id).copied() else {
+                    tracing::error!(error = %join_err, "a reviewer task failed with no task metadata");
+                    continue;
+                };
+                tracing::error!(error = %join_err, "a reviewer task panicked or was cancelled");
+                (id, index, started.elapsed())
+            }
+        };
+        tasks.remove(&id);
+        let completed = u32::try_from(finished_events.len() + 1).unwrap_or(u32::MAX);
+        let event = RunEvent::ReviewerFinished {
+            run: ctx.run.clone(),
+            reviewer: matched[index].name.clone(),
+            duration_ms: duration_ms(duration),
+            completed,
+            total,
+        };
+        emit(&event);
+        finished_events.push(event);
     }
-    results
+    (results, finished_events)
 }
 
 /// Resolve every reviewer in the plan into a [`Resolved`] row.

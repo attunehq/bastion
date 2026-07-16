@@ -154,12 +154,14 @@ With `--format jsonl`, Bastion emits one JSON object per line, as each thing
 happens. A run is a typed sequence of events:
 
 ```jsonl
-{"type":"run.started","run":"r-0f3a","branch":"feat/cart","base":"main","changed":12,"reviewers":[{"name":"file-responsibility","mode":"gate"},{"name":"tenant-isolation","mode":"gate"},{"name":"single-responsibility","mode":"gate"}]}
+{"type":"run.started","run":"r-0f3a","branch":"feat/cart","base":"main","changed":12,"reviewers":[{"name":"tenant-isolation","mode":"gate"},{"name":"single-responsibility","mode":"gate"}]}
 {"type":"reviewer.started","run":"r-0f3a","reviewer":"tenant-isolation","mode":"gate","backend":"claude-code"}
-{"type":"reviewer.resolved","run":"r-0f3a","reviewer":"tenant-isolation","verdict":"block","summary":"A new query path reads rows without scoping by tenant id.","findings":[{"kind":"blocking","path":"src/server/db.rs","line_start":88,"line_end":91,"detail":"scope this query by tenant_id"}],"usage":{"tokens_in":18204,"tokens_out":1560,"cache_read":12000,"cost_usd":0.21},"duration_ms":38120,"has_transcript":true}
 {"type":"reviewer.started","run":"r-0f3a","reviewer":"single-responsibility","mode":"gate","backend":"codex"}
+{"type":"reviewer.finished","run":"r-0f3a","reviewer":"single-responsibility","duration_ms":842,"completed":1,"total":2}
+{"type":"reviewer.finished","run":"r-0f3a","reviewer":"tenant-isolation","duration_ms":38120,"completed":2,"total":2}
+{"type":"reviewer.resolved","run":"r-0f3a","reviewer":"tenant-isolation","verdict":"block","summary":"A new query path reads rows without scoping by tenant id.","findings":[{"kind":"blocking","path":"src/server/db.rs","line_start":88,"line_end":91,"detail":"scope this query by tenant_id"}],"usage":{"tokens_in":18204,"tokens_out":1560,"cache_read":12000,"cost_usd":0.21},"duration_ms":38120,"has_transcript":true}
 {"type":"reviewer.skipped","run":"r-0f3a","reviewer":"single-responsibility","mode":"gate","trigger":{"backend":"codex","decision":"skip","reason":"No responsibility boundary changed.","duration_ms":842},"has_transcript":true}
-{"type":"run.completed","run":"r-0f3a","verdict":"block","gates":{"total":3,"passed":1,"blocked":1,"skipped":1},"duration_ms":41030,"tokens_in":20480,"tokens_out":1875,"cache_read":13100,"cost_usd":0.37}
+{"type":"run.completed","run":"r-0f3a","verdict":"block","gates":{"total":2,"passed":0,"blocked":1,"skipped":1},"duration_ms":41030,"tokens_in":20480,"tokens_out":1875,"cache_read":13100,"cost_usd":0.37}
 ```
 
 The event types:
@@ -168,7 +170,8 @@ The event types:
 | --- | --- |
 | `run.started` | The run began; lists the reviewer candidates in the plan. Each executes, semantically skips, replays from a verified attestation, or carries from the branch's previous run. Under `--reviewer` the list holds only the selected reviewers, and the event carries `partial: true` when that selection excludes a candidate. |
 | `reviewer.started` | One reviewer candidate began resolving: dispatched to its trigger or reviewer backend, reconstructed from a verified attestation bundle, or carried from the branch's previous run. |
-| `reviewer.resolved` | One reviewer finished; carries its `verdict`, `summary`, `findings`, `usage`, and a `has_transcript` flag. An agent-triggered reviewer that ran also carries its preceding `trigger` decision and usage. Carries `replayed: true` when the terminal outcome came from a verified attestation, and `carried: true` when the verdict was carried forward from the branch's previous run instead of a fresh execution. A reviewer that produced a real verdict this run is also stamped with `scope_digest`, a hash of everything the verdict was keyed to; a later run carries a prior pass only when its own digest is identical. |
+| `reviewer.finished` | One fresh reviewer task stopped executing. `completed` and `total` count only the fresh tasks because replayed and carried reviewers dispatch no backend. This event is progress only. The final outcome follows after post-run scope-digest checks. |
+| `reviewer.resolved` | One reviewer was finalized; carries its `verdict`, `summary`, `findings`, `usage`, and a `has_transcript` flag. An agent-triggered reviewer that ran also carries its preceding `trigger` decision and usage. Carries `replayed: true` when the terminal outcome came from a verified attestation, and `carried: true` when the verdict was carried forward from the branch's previous run instead of a fresh execution. A reviewer that produced a real verdict this run is also stamped with `scope_digest`, a hash of everything the verdict was keyed to; a later run carries a prior pass only when its own digest is identical. |
 | `reviewer.skipped` | An agent trigger decided that its full reviewer did not apply. Carries the trigger backend, decision, reason, usage, duration, and transcript availability without recording a pass verdict. It can also carry `replayed: true` when CI restored the terminal outcome from an attestation. |
 | `run.completed` | The aggregate decision and gate tally, including `gates.skipped`, plus the run's wall-clock `duration_ms` and usage totals summed across trigger and full-reviewer calls. Carries `partial: true` (as does `run.started`) when `--reviewer` narrowed the run. |
 | `run.attested` | A signed local run was replayed; carries the replayed `reviewers`, the attesting `public_key`, and `attested_at`. |
@@ -178,9 +181,9 @@ How an agent should consume it:
 
 - **Only need the outcome?** Ignore everything until `run.completed` and read its
   `verdict`.
-- **Want to react as you go?** Read each terminal reviewer event as it lands. Act
-  on `reviewer.resolved` findings; record `reviewer.skipped` as an intentional
-  omission, not a pass that needs fixing.
+- **Want live progress?** Read each `reviewer.finished` event as it lands. Act on
+  `reviewer.resolved` findings after finalization; record `reviewer.skipped` as an
+  intentional omission, not a pass that needs fixing.
 
 ### For agents: the consumption contract
 
@@ -419,16 +422,17 @@ for the full trust model.
 ## The same surface in CI
 
 For the repository's reviewers, these local events are not a separate system from CI;
-they are the same decisions in a finer-grained form. Each such JSONL event has a
-GitHub twin (a check run, a comment, an annotation), laid out side by side in the
+their terminal outcomes have GitHub twins (check runs, comments, and annotations),
+laid out side by side in the
 [Continuous integration](./continuous-integration.md#how-a-run-maps-to-github)
-chapter. A green local loop predicts a green PR when both runs see the same reviewers
-and context. The two surfaces run the repository's reviewers and aggregation, and CI
-adds the PR's description and discussion that a default local run does not, so a
-reviewer that weighs that context can decide differently. A purely local run can also
-include your personal user-level reviewers; their `run.started` and
-terminal `reviewer.resolved` or `reviewer.skipped` events are local-only and never
-become checks or comments (see
+chapter. The local `run.started`, `reviewer.started`, and `reviewer.finished` progress
+events have no separate GitHub surface. A green local loop predicts a green PR when
+both runs see the same reviewers and context. The two surfaces run the repository's
+reviewers and aggregation, and CI adds the PR's description and discussion that a
+default local run does not, so a reviewer that weighs that context can decide
+differently. A purely local run can also include your personal user-level reviewers;
+their `run.started` and terminal `reviewer.resolved` or `reviewer.skipped` events are
+local-only and never become checks or comments (see
 [Authoring reviewers](./authoring-reviewers.md#user-level-reviewers)).
 
 ---

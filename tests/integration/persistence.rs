@@ -44,6 +44,7 @@ fn a_blocking_run_persists_and_replays_faithfully() {
         [
             "run.started",
             "reviewer.started",
+            "reviewer.finished",
             "reviewer.resolved",
             "run.completed"
         ],

@@ -85,8 +85,8 @@ pub struct TriggerResolution {
 /// One event in a run's life cycle.
 ///
 /// Serialized with a `"type"` discriminator using the dotted names from the
-/// design (`run.started`, `reviewer.started`, the terminal reviewer events,
-/// and `run.completed`).
+/// design (`run.started`, `reviewer.started`, `reviewer.finished`, the terminal
+/// reviewer events, and `run.completed`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 #[non_exhaustive]
@@ -130,6 +130,22 @@ pub enum RunEvent {
         /// The backend it runs on when it executes (nominal for a replayed or
         /// carried reviewer).
         backend: Backend,
+    },
+    /// A fresh reviewer task stopped executing. This is live progress, not the
+    /// authoritative verdict: terminal reviewer events follow after the runner
+    /// revalidates scope digests against the post-run tree.
+    #[serde(rename = "reviewer.finished")]
+    ReviewerFinished {
+        /// The run id.
+        run: RunId,
+        /// The reviewer name.
+        reviewer: String,
+        /// Wall-clock task duration in milliseconds.
+        duration_ms: u64,
+        /// Fresh reviewer tasks that have stopped so far.
+        completed: u32,
+        /// Fresh reviewer tasks dispatched in this run.
+        total: u32,
     },
     /// A reviewer reached its conclusion, carrying the verdict and findings but
     /// not the transcript (see [`ReviewerResolved::has_transcript`]).
@@ -270,6 +286,7 @@ impl RunEvent {
         match self {
             RunEvent::RunStarted { run, .. }
             | RunEvent::ReviewerStarted { run, .. }
+            | RunEvent::ReviewerFinished { run, .. }
             | RunEvent::ReviewerResolved { run, .. }
             | RunEvent::ReviewerSkipped { run, .. }
             | RunEvent::AttestationReplayed { run, .. }
@@ -322,6 +339,27 @@ mod tests {
         let parsed: RunEvent = serde_json::from_str(&line).expect("round-trips");
         assert_eq!(parsed, event);
         assert_eq!(parsed.run_id().as_str(), "r-0f3a");
+    }
+
+    #[test]
+    fn finished_event_matches_the_documented_jsonl_shape() {
+        let event = RunEvent::ReviewerFinished {
+            run: RunId("r-0f3a".into()),
+            reviewer: "tenant-isolation".into(),
+            duration_ms: 38_120,
+            completed: 2,
+            total: 9,
+        };
+
+        let line = serde_json::to_string(&event).expect("serializes");
+        assert_eq!(
+            line,
+            r#"{"type":"reviewer.finished","run":"r-0f3a","reviewer":"tenant-isolation","duration_ms":38120,"completed":2,"total":9}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<RunEvent>(&line).expect("deserializes"),
+            event
+        );
     }
 
     #[test]
