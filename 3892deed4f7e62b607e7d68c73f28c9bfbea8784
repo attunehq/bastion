@@ -1,0 +1,7 @@
+{"kind":"bastion-attestation","schema":1,"version":"v0.6.0","attested_at":"2026-07-15T02:00:51Z","public_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBKBzABH32MQTbq+FOccyzJgLh1eBK/hFwDz06bi3LYB jssblck-github-local-GRACE-2026-06-23","seal":{"version":"v0.6.0","head_tree":"a6cbdd9b4060e3073d9735fc8a50c098d6e6b249","base_tree":"b555954c34cf749dd9f79993641668a0886efe31","patch_id":"c182033ee6c5511fd896c8323dc483e3760c5c22","config_hash":"9b44f597d05f1504c8a64f3a7a4ccd5cc2e4158a11983af76f70a03a6720f648","seams":false,"dirty":false,"reviewers":["fail-closed-gates"],"mac":"5cbf7ee8ae85ee18500293a3e45e998485aa9bf7b1975d8af5bc38bd039fe678"},"events":{"fail-closed-gates":{"duration_ms":107164,"findings":[],"has_transcript":true,"reviewer":"fail-closed-gates","run":"r-3892dee","scope_digest":"6df309576caacf60bcfa48a79383edf95ff0642a6471de69caf803fc0df36866","summary":"No live-decision-path safety issues found.","type":"reviewer.resolved","usage":{"cache_read":293504,"cost_usd":0.0,"tokens_in":365046,"tokens_out":2812},"verdict":"pass"}}}
+-----BEGIN SSH SIGNATURE-----
+U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgEoHMAEffYxBNur4U5xzLMmAuHV
+4Er+EXAPPTpuLctgEAAAAHYmFzdGlvbgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gtZWQy
+NTUxOQAAAED+0E4/7A+1iy/qcawh8PIkuq4d5dUC+RkDaOO3rfuzZfy0nS+OWNe82HYaDI
+r7GNIjDly18iVzdd7RQ79O4hEE
+-----END SSH SIGNATURE-----
