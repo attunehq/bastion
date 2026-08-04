@@ -348,22 +348,39 @@ fn read_if_exists(path: &Path) -> Result<Option<String>> {
 mod tests {
     use super::*;
 
+    #[derive(serde::Deserialize)]
+    struct SkillFrontMatter {
+        name: String,
+        description: String,
+    }
+
     #[test]
     fn bundled_skill_is_a_valid_skill_file() {
-        // Every bundled skill must be a Claude Code skill: front matter first, with
-        // a name matching its slug so the installed directory and the skill agree.
+        // Every bundled skill must be a Claude Code skill: parseable YAML front
+        // matter first, with a name matching its slug so the installed directory
+        // and the skill agree.
         // Normalize newlines first: the embedded source carries CRLF on a Windows
         // checkout, but the skill is identical content on every platform.
         for skill in BUNDLED {
             let source = normalize_newlines(skill.source);
-            assert!(
-                source.starts_with("---\n"),
-                "{} must start with YAML front matter",
+            let after_open = source
+                .strip_prefix("---\n")
+                .unwrap_or_else(|| panic!("{} must start with YAML front matter", skill.slug));
+            let (yaml, _) = after_open
+                .split_once("\n---\n")
+                .unwrap_or_else(|| panic!("{} must close its YAML front matter", skill.slug));
+            let front_matter: SkillFrontMatter =
+                serde_yaml_ng::from_str(yaml).unwrap_or_else(|error| {
+                    panic!("{} has invalid YAML front matter: {error}", skill.slug)
+                });
+            assert_eq!(
+                front_matter.name, skill.slug,
+                "{} front matter must declare its slug as `name`",
                 skill.slug
             );
             assert!(
-                source.contains(&format!("name: {}", skill.slug)),
-                "{} front matter must declare its slug as `name`",
+                !front_matter.description.trim().is_empty(),
+                "{} front matter must carry a non-empty description",
                 skill.slug
             );
             assert!(
