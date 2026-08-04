@@ -69,7 +69,7 @@ pub const MARKER: &str = "<!-- bastion-report -->";
 /// The hosted walkthrough for creating the dedicated Bastion GitHub App. Linked
 /// from the comment footer when the report is posting under the shared
 /// `github-actions` identity (see [`SHARED_APP_SLUG`]).
-const SETUP_URL: &str = "https://bastion.jessica.black/github-app";
+const SETUP_URL: &str = "https://bastion.attune.inc/github-app";
 
 /// The `app.slug` GitHub stamps on check runs created with the default Actions
 /// `GITHUB_TOKEN`. Check runs created by a distinct GitHub App carry that app's

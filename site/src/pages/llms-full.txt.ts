@@ -4,7 +4,7 @@ import { loadGuide, rawSlugFor } from "../lib/guide";
 // llms-full.txt: the entire user guide concatenated in reading order, so an
 // agent can ingest the whole thing in one request. Each section is prefixed
 // with its canonical URL for citation.
-const SITE = "https://bastion.jessica.black";
+const SITE = "https://bastion.attune.inc";
 
 export const GET: APIRoute = async () => {
   const entries = await loadGuide();

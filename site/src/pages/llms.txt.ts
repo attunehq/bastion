@@ -4,7 +4,7 @@ import { loadGuide, isIndex, rawSlugFor } from "../lib/guide";
 // llms.txt (https://llmstxt.org): a curated, machine-readable index of the
 // docs so an agent can discover the guide and fetch any page as Markdown in one
 // hop. Each link points at the raw `.md` representation served from /guide.
-const SITE = "https://bastion.jessica.black";
+const SITE = "https://bastion.attune.inc";
 
 export const GET: APIRoute = async () => {
   const entries = await loadGuide();

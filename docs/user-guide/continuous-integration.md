@@ -399,7 +399,7 @@ creates it. So the fix is to post the report under a small app of your own rathe
 than the shared Actions identity:
 
 1. Create the app. Go to
-   [bastion.jessica.black/github-app](https://bastion.jessica.black/github-app) and
+   [bastion.attune.inc/github-app](https://bastion.attune.inc/github-app) and
    follow the walkthrough; it shows how to create a GitHub App by hand in GitHub's UI
    with exactly the permissions the report step needs (`checks: write`,
    `pull_requests: write`, `contents: read`, no webhook). The app's **name** is what

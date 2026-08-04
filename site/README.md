@@ -1,6 +1,6 @@
 # Bastion marketing site
 
-The source for [bastion.jessica.black](https://bastion.jessica.black): the
+The source for [bastion.attune.inc](https://bastion.attune.inc): the
 single-page explainer for what Bastion is and why you'd want it, plus the hosted
 **user guide** under `/guide`.
 
@@ -95,11 +95,11 @@ and deploys it to GitHub Pages.
 
 A custom domain needs three things set up once, outside this repo:
 
-1. **DNS:** a `CNAME` record for `bastion.jessica.black` pointing at
+1. **DNS:** a `CNAME` record for `bastion.attune.inc` pointing at
    `jssblck.github.io` (or four `A` records to the GitHub Pages apex IPs if you
    ever serve a bare apex instead of a subdomain).
 2. **Repo settings -> Pages:** set the build source to **GitHub Actions**, and set
-   the custom domain to `bastion.jessica.black` (this matches `public/CNAME`, which
+   the custom domain to `bastion.attune.inc` (this matches `public/CNAME`, which
    the build copies into `dist/`). Enable **Enforce HTTPS** once the certificate is
    issued.
 3. The first successful run of the workflow publishes the site.
