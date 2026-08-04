@@ -141,4 +141,4 @@ For a healthy deployment:
 
 That is the guide. If you want to work on Bastion itself rather than use it, the
 design notes and contributor docs live in the
-[Bastion repository](https://github.com/jssblck/bastion).
+[Bastion repository](https://github.com/attunehq/bastion).

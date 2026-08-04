@@ -4,9 +4,9 @@ set -euo pipefail
 # bastion installer script
 #
 # Usage:
-#   curl -sSfL https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.sh | bash
-#   curl -sSfL https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.sh | bash -s -- -b /usr/local/bin
-#   curl -sSfL https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.sh | bash -s -- -v 0.1.0
+#   curl -sSfL https://raw.githubusercontent.com/attunehq/bastion/main/scripts/install.sh | bash
+#   curl -sSfL https://raw.githubusercontent.com/attunehq/bastion/main/scripts/install.sh | bash -s -- -b /usr/local/bin
+#   curl -sSfL https://raw.githubusercontent.com/attunehq/bastion/main/scripts/install.sh | bash -s -- -v 0.1.0
 #
 # Options:
 #   -v, --version    Specify a version (default: latest)
@@ -33,7 +33,7 @@ YELLOW='\033[0;33m'
 NC='\033[0m' # No Color
 
 # GitHub repository configuration
-REPO="jssblck/bastion"
+REPO="attunehq/bastion"
 GITHUB_BASE="https://github.com/${REPO}"
 GITHUB_DOWNLOAD="${GITHUB_BASE}/releases/download"
 
@@ -237,7 +237,7 @@ parse_args() {
       -h|--help)
         echo "bastion installer"
         echo
-        echo "Usage: curl -sSfL https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.sh | bash [args]"
+        echo "Usage: curl -sSfL https://raw.githubusercontent.com/attunehq/bastion/main/scripts/install.sh | bash [args]"
         echo
         echo "Options:"
         echo "  -v, --version    Specify a version (default: latest)"
@@ -252,18 +252,18 @@ parse_args() {
         echo
         echo "Examples:"
         echo "  # Install latest version"
-        echo "  curl -sSfL https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.sh | bash"
+        echo "  curl -sSfL https://raw.githubusercontent.com/attunehq/bastion/main/scripts/install.sh | bash"
         echo
         echo "  # Install specific version"
-        echo "  curl -sSfL https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.sh | bash -s -- -v 0.1.0"
+        echo "  curl -sSfL https://raw.githubusercontent.com/attunehq/bastion/main/scripts/install.sh | bash -s -- -v 0.1.0"
         echo
         echo "  # Install to custom directory"
-        echo "  curl -sSfL https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.sh | bash -s -- -b /usr/local/bin"
+        echo "  curl -sSfL https://raw.githubusercontent.com/attunehq/bastion/main/scripts/install.sh | bash -s -- -b /usr/local/bin"
         echo
         echo "  # Force the static musl build (works on old-glibc systems)"
-        echo "  curl -sSfL https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.sh | bash -s -- --libc musl"
+        echo "  curl -sSfL https://raw.githubusercontent.com/attunehq/bastion/main/scripts/install.sh | bash -s -- --libc musl"
         echo "  # ...or via the environment, with no '-s --' needed:"
-        echo "  curl -sSfL https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.sh | BASTION_LIBC=musl bash"
+        echo "  curl -sSfL https://raw.githubusercontent.com/attunehq/bastion/main/scripts/install.sh | BASTION_LIBC=musl bash"
         exit 0
         ;;
       *)

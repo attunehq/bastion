@@ -96,7 +96,7 @@ and deploys it to GitHub Pages.
 A custom domain needs three things set up once, outside this repo:
 
 1. **DNS:** a `CNAME` record for `bastion.attune.inc` pointing at
-   `jssblck.github.io` (or four `A` records to the GitHub Pages apex IPs if you
+   `attunehq.github.io` (or four `A` records to the GitHub Pages apex IPs if you
    ever serve a bare apex instead of a subdomain).
 2. **Repo settings -> Pages:** set the build source to **GitHub Actions**, and set
    the custom domain to `bastion.attune.inc` (this matches `public/CNAME`, which

@@ -13,7 +13,7 @@ The core design ([`design.md`](./design.md)) is deliberately CI-agnostic; it des
 > `bastion github report` runs after `bastion review` finishes, each check run is
 > posted already completed with its conclusion. The packaged form is the GitHub
 > Action ([`action.yml`](../../action.yml) at the repository root, pinned as
-> `jssblck/bastion@v0`); this repository dogfoods it through
+> `attunehq/bastion@v0`); this repository dogfoods it through
 > [`.github/workflows/bastion.yml`](../../.github/workflows/bastion.yml).
 
 The guiding rule is the same as the core: Bastion does not own CI, it plugs into yours. The workflow, the secrets, the preview environments, and the branch protection rules are GitHub's; Bastion reads and writes them through a thin adapter and otherwise stays out of the way.
@@ -36,7 +36,7 @@ Native reviewers run directly on the Actions runner. A reviewer that declares a 
 
 The adapter ships as a composite GitHub Action, the
 [`action.yml`](../../action.yml) at the repository root, so an adopter writes
-`uses: jssblck/bastion@v0` instead of hand-rolling the steps. Its contract is
+`uses: attunehq/bastion@v0` instead of hand-rolling the steps. Its contract is
 deliberately the same split as the local CLI: the consumer owns the checkout
 (full history, PR head SHA) and the backend CLI plus its credential,
 authenticated in a prior step exactly as a contributor authenticates locally;
@@ -262,7 +262,7 @@ jobs:
       # run, reviews, uploads the run, reports, and fails on a blocked gate, in
       # that order. Step env is visible to native reviewers, so this is where a
       # preview URL reaches the agents.
-      - uses: jssblck/bastion@v0
+      - uses: attunehq/bastion@v0
         env:
           PREVIEW_URL: ${{ steps.preview.outputs.url }}
         with:

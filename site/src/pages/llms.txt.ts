@@ -34,7 +34,7 @@ export const GET: APIRoute = async () => {
   out.push("## Optional");
   out.push("");
   out.push(`- [Full guide as one file](${SITE}/llms-full.txt): every chapter concatenated for a single fetch.`);
-  out.push(`- [Source repository](https://github.com/jssblck/bastion): the developer guide, reviewer registry, and code.`);
+  out.push(`- [Source repository](https://github.com/attunehq/bastion): the developer guide, reviewer registry, and code.`);
   out.push("");
 
   return new Response(out.join("\n"), {

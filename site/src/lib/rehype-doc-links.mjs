@@ -11,7 +11,7 @@
 // The docs are a single source of truth; this plugin is what lets one set of
 // files serve both readers without hand-maintained, surface-specific links.
 
-const REPO = "https://github.com/jssblck/bastion";
+const REPO = "https://github.com/attunehq/bastion";
 const BLOB = `${REPO}/blob/main`;
 
 // All user-guide chapters live in this one flat directory, so a relative link's

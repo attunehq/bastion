@@ -38,7 +38,7 @@ use sha2::{Digest, Sha256};
 
 /// The GitHub `owner/repo` releases are pulled from. `BASTION_REPO` overrides it,
 /// matching the `REPO` the install scripts pin.
-pub const DEFAULT_REPO: &str = "jssblck/bastion";
+pub const DEFAULT_REPO: &str = "attunehq/bastion";
 
 /// The target triple this binary was built for, baked by `build.rs`. It is the
 /// exact infix of the release asset name (`bastion-<target>.tar.gz`), so the
@@ -784,7 +784,7 @@ mod tests {
             ),
             ("/releases/tag/v9.9.9".to_string(), ok(b"release page")),
         ]);
-        let updater = Updater::with_endpoints("jssblck/bastion".to_string(), Some(base)).unwrap();
+        let updater = Updater::with_endpoints("attunehq/bastion".to_string(), Some(base)).unwrap();
         assert_eq!(updater.latest_tag().await.unwrap(), "v9.9.9");
     }
 
@@ -804,7 +804,7 @@ mod tests {
             ),
             (format!("/releases/download/v9.9.9/{asset}"), ok(&archive)),
         ]);
-        let updater = Updater::with_endpoints("jssblck/bastion".to_string(), Some(base)).unwrap();
+        let updater = Updater::with_endpoints("attunehq/bastion".to_string(), Some(base)).unwrap();
 
         let dest = tempfile::NamedTempFile::new().unwrap();
         updater.fetch("v9.9.9", dest.path()).await.unwrap();
@@ -831,7 +831,7 @@ mod tests {
             ),
             (format!("/releases/download/v9.9.9/{asset}"), ok(&archive)),
         ]);
-        let updater = Updater::with_endpoints("jssblck/bastion".to_string(), Some(base)).unwrap();
+        let updater = Updater::with_endpoints("attunehq/bastion".to_string(), Some(base)).unwrap();
 
         let dest = tempfile::NamedTempFile::new().unwrap();
         let err = updater

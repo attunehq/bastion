@@ -416,7 +416,7 @@ Whether to use a plain key file or a presence-gated one (a hardware token or an
 OS keychain entry that prompts you per signature) is your call to make. A plain
 file key means an agent running on your machine could sign an attestation
 without you noticing, the same trust you already extend to that machine
-through your commit access. See [Attestation](https://github.com/jssblck/bastion/blob/main/docs/developer-guide/attestation.md)
+through your commit access. See [Attestation](https://github.com/attunehq/bastion/blob/main/docs/developer-guide/attestation.md)
 for the full trust model.
 
 ## The same surface in CI

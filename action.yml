@@ -127,7 +127,7 @@ runs:
         GH_TOKEN: ${{ inputs.github-token }}
       run: |
         set -euo pipefail
-        repo="jssblck/bastion"
+        repo="attunehq/bastion"
         want="$INPUT_VERSION"
         if [ -z "$want" ]; then
           if [[ "$ACTION_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then

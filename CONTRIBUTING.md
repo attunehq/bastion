@@ -82,7 +82,7 @@ To cut a release:
    to published in a final step.
 4. After publishing a stable release, the workflow force-advances the floating
    major tag (`v0` for a `v0.x.y` release) to the tagged commit. That tag is what
-   GitHub Action consumers pin (`uses: jssblck/bastion@v0`), and the action
+   GitHub Action consumers pin (`uses: attunehq/bastion@v0`), and the action
    resolves it to the newest stable release in that major, so both the action
    code and the engine track the release with no consumer-side bump. Prerelease
    tags do not move it. Never push a bare major tag by hand; the workflow's

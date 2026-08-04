@@ -597,7 +597,7 @@ The prompt is the reviewer. A few habits keep recall high:
   the author fixes the whole set from one run.
 
 Some worked examples, taken from Bastion's own registry
-([`.bastion.yaml`](https://github.com/jssblck/bastion/blob/main/.bastion.yaml)):
+([`.bastion.yaml`](https://github.com/attunehq/bastion/blob/main/.bastion.yaml)):
 
 ```yaml
   - name: error-handling

@@ -39,19 +39,19 @@ For the full motivation, mental model, and threat model, see
 ## Install
 
 The install scripts detect your platform, download the matching archive from the
-latest [GitHub release](https://github.com/jssblck/bastion/releases), verify its
+latest [GitHub release](https://github.com/attunehq/bastion/releases), verify its
 SHA-256 checksum, and put `bastion` on your `PATH`.
 
 **Linux, macOS, and Windows (Git Bash):**
 
 ```sh
-curl -sSfL https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.sh | bash
+curl -sSfL https://raw.githubusercontent.com/attunehq/bastion/main/scripts/install.sh | bash
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
-irm https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/attunehq/bastion/main/scripts/install.ps1 | iex
 ```
 
 The shell installer accepts `-v/--version`, `-b/--bin-dir`, `-t/--tmp-dir`, and
@@ -60,7 +60,7 @@ The shell installer accepts `-v/--version`, `-b/--bin-dir`, `-t/--tmp-dir`, and
 `$env:Help="true"` for details. For example, to pin a version and install location:
 
 ```sh
-curl -sSfL https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.sh | bash -s -- -v 0.1.0 -b /usr/local/bin
+curl -sSfL https://raw.githubusercontent.com/attunehq/bastion/main/scripts/install.sh | bash -s -- -v 0.1.0 -b /usr/local/bin
 ```
 
 On Linux the installer autodetects the C runtime: it picks the statically linked
@@ -71,7 +71,7 @@ undetectable), and the glibc build only when the host glibc is 2.35 or newer
 and runs anywhere:
 
 ```sh
-curl -sSfL https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.sh | BASTION_LIBC=musl bash
+curl -sSfL https://raw.githubusercontent.com/attunehq/bastion/main/scripts/install.sh | BASTION_LIBC=musl bash
 ```
 
 Prefer to do it by hand? Prebuilt binaries for Linux (x86_64 and aarch64, glibc and
@@ -81,7 +81,7 @@ and the release lists SHA-256 `checksums.txt`:
 
 ```sh
 # Example: Linux x86_64
-curl -sSL https://github.com/jssblck/bastion/releases/latest/download/bastion-x86_64-unknown-linux-gnu.tar.gz | tar -xz
+curl -sSL https://github.com/attunehq/bastion/releases/latest/download/bastion-x86_64-unknown-linux-gnu.tar.gz | tar -xz
 sudo install bastion-x86_64-unknown-linux-gnu/bastion /usr/local/bin/
 bastion --version
 ```
@@ -104,7 +104,7 @@ merge gate. You check out the PR head and authenticate your backend CLI, and
 the action does the rest:
 
 ```yaml
-- uses: jssblck/bastion@v0
+- uses: attunehq/bastion@v0
 ```
 
 The [continuous integration chapter](docs/user-guide/continuous-integration.md)
