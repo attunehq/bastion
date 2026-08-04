@@ -66,7 +66,7 @@ const html = `<!doctype html><html><head><meta charset="utf-8">
     <span class="pill pass"><span class="dot"></span>pass</span>
     <span class="pill block"><span class="dot"></span>block</span>
     <span class="pill advisor"><span class="dot"></span>advisor</span>
-    <span class="foot">bastion.jessica.black</span>
+    <span class="foot">bastion.attune.inc</span>
   </div>
 </body></html>`;
 

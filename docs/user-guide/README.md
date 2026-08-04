@@ -19,10 +19,10 @@ an author's personal user-level reviewers, which CI never sees).
 This guide is self-contained: everything you need to run Bastion, write reviewers,
 and wire it into CI is here, with nothing essential living elsewhere. If you want to
 work on Bastion itself rather than use it, the contributor and design docs live in the
-[Bastion repository](https://github.com/jssblck/bastion).
+[Bastion repository](https://github.com/attunehq/bastion).
 
 > **Reading this as an agent?** The whole guide is also served as a single plain-text
-> file at [`bastion.jessica.black/llms-full.txt`](https://bastion.jessica.black/llms-full.txt),
+> file at [`bastion.attune.inc/llms-full.txt`](https://bastion.attune.inc/llms-full.txt),
 > so you can ingest every chapter in one fetch instead of crawling pages.
 
 ## Read in order

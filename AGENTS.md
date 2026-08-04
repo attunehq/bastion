@@ -73,7 +73,7 @@ Guidance that follows, so we stop re-deriving it:
     seal in `src/seal.rs`, `bastion attest` and the CI planner in `src/attest/`.
 - `.bastion.yaml`: the example reviewer registry at the repository root (the
   `.bastion.yml` spelling is also honored); update it when the schema changes.
-- `action.yml`: the composite GitHub Action consumers pin (`jssblck/bastion@v0`).
+- `action.yml`: the composite GitHub Action consumers pin (`attunehq/bastion@v0`).
   Its inputs and outputs are a downstream surface like the CLI; the consumer-facing
   reference is `docs/user-guide/continuous-integration.md`. Sequencing lesson for
   any future pinnable artifact: snapshot discipline (docs describe only the

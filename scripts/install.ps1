@@ -2,9 +2,9 @@
 # bastion installer script for Windows (PowerShell)
 #
 # Usage:
-#   irm https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.ps1 | iex
-#   $env:Version="0.1.0"; irm https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.ps1 | iex
-#   $env:BinDir="C:\Tools"; irm https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/attunehq/bastion/main/scripts/install.ps1 | iex
+#   $env:Version="0.1.0"; irm https://raw.githubusercontent.com/attunehq/bastion/main/scripts/install.ps1 | iex
+#   $env:BinDir="C:\Tools"; irm https://raw.githubusercontent.com/attunehq/bastion/main/scripts/install.ps1 | iex
 #
 # Options (set via environment variables or script parameters):
 #   Version      Specify a version (default: latest)
@@ -18,7 +18,7 @@ param(
 )
 
 # GitHub repository configuration
-$REPO = "jssblck/bastion"
+$REPO = "attunehq/bastion"
 $GITHUB_BASE = "https://github.com/$REPO"
 $GITHUB_DOWNLOAD = "$GITHUB_BASE/releases/download"
 
@@ -43,9 +43,9 @@ function Show-Help {
 bastion installer for Windows
 
 Usage:
-  irm https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.ps1 | iex
-  `$env:Version="0.1.0"; irm https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.ps1 | iex
-  `$env:BinDir="C:\Tools"; irm https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.ps1 | iex
+  irm https://raw.githubusercontent.com/attunehq/bastion/main/scripts/install.ps1 | iex
+  `$env:Version="0.1.0"; irm https://raw.githubusercontent.com/attunehq/bastion/main/scripts/install.ps1 | iex
+  `$env:BinDir="C:\Tools"; irm https://raw.githubusercontent.com/attunehq/bastion/main/scripts/install.ps1 | iex
 
 Options (set via environment variables):
   Version      Specify a version (default: latest)
@@ -54,13 +54,13 @@ Options (set via environment variables):
 
 Examples:
   # Install latest version
-  irm https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.ps1 | iex
+  irm https://raw.githubusercontent.com/attunehq/bastion/main/scripts/install.ps1 | iex
 
   # Install specific version
-  `$env:Version="0.1.0"; irm https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.ps1 | iex
+  `$env:Version="0.1.0"; irm https://raw.githubusercontent.com/attunehq/bastion/main/scripts/install.ps1 | iex
 
   # Install to custom directory
-  `$env:BinDir="C:\Tools"; irm https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.ps1 | iex
+  `$env:BinDir="C:\Tools"; irm https://raw.githubusercontent.com/attunehq/bastion/main/scripts/install.ps1 | iex
 "@
     exit 0
 }

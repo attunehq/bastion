@@ -5,7 +5,7 @@ edition = "2024"
 description = "Agentic code review: single-concern reviewers as fitness functions, run locally and in CI."
 readme = "README.md"
 license = "AGPL-3.0-or-later"
-repository = "https://github.com/jssblck/bastion"
+repository = "https://github.com/attunehq/bastion"
 keywords = ["code-review", "agents", "ci", "llm", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 

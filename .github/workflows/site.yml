@@ -1,7 +1,7 @@
 name: Deploy site
 
 # Builds the marketing site in site/ and deploys it to GitHub Pages.
-# The custom domain (bastion.jessica.black) is carried by site/public/CNAME.
+# The custom domain (bastion.attune.inc) is carried by site/public/CNAME.
 on:
   push:
     branches: [main]

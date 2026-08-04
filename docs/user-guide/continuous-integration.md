@@ -95,7 +95,7 @@ The per-reviewer checks stay informational; `bastion` is the gate.
 ## The workflow
 
 The packaged adapter is the **Bastion GitHub Action**: the `action.yml` at the
-root of the Bastion repository, pinned as `jssblck/bastion@v0`. Its contract
+root of the Bastion repository, pinned as `attunehq/bastion@v0`. Its contract
 mirrors the local loop. You own the checkout and the backend credential, exactly
 as a contributor owns their clone and their `codex login`; the action owns the
 engine and the review. A complete workflow:
@@ -134,7 +134,7 @@ jobs:
       # billing" below; drop it in here. Then stand up anything your reviewers
       # consume (a preview env, a database).
 
-      - uses: jssblck/bastion@v0
+      - uses: attunehq/bastion@v0
 ```
 
 The action then, in order:
@@ -399,7 +399,7 @@ creates it. So the fix is to post the report under a small app of your own rathe
 than the shared Actions identity:
 
 1. Create the app. Go to
-   [bastion.jessica.black/github-app](https://bastion.jessica.black/github-app) and
+   [bastion.attune.inc/github-app](https://bastion.attune.inc/github-app) and
    follow the walkthrough; it shows how to create a GitHub App by hand in GitHub's UI
    with exactly the permissions the report step needs (`checks: write`,
    `pull_requests: write`, `contents: read`, no webhook). The app's **name** is what
@@ -424,7 +424,7 @@ report reads GitHub's response, the workflow does not pass a flag.
 
 For a complete, working example (the action plus per-author backend credentials,
 the dedicated-app mint, and fork-PR safety), see Bastion's own
-[`.github/workflows/bastion.yml`](https://github.com/jssblck/bastion/blob/main/.github/workflows/bastion.yml).
+[`.github/workflows/bastion.yml`](https://github.com/attunehq/bastion/blob/main/.github/workflows/bastion.yml).
 It wires up the per-author auth recipe in [Authentication & billing](#authentication--billing)
 below, on the Codex backend.
 
@@ -504,7 +504,7 @@ accepting that an agent on that machine could sign an attestation on its own,
 the same trust already extended to that machine through commit access. Bastion
 cannot tell the two kinds of key apart from the signature alone, so this is a
 call for the author (or your team's policy) to make, not something the tool
-enforces. See the [attestation design](https://github.com/jssblck/bastion/blob/main/docs/developer-guide/attestation.md#trust-posture)
+enforces. See the [attestation design](https://github.com/attunehq/bastion/blob/main/docs/developer-guide/attestation.md#trust-posture)
 for the full reasoning.
 
 ## Authentication & billing
@@ -671,7 +671,7 @@ starts once it exists. (See
 ## Self-hosting note
 
 Bastion dogfoods the adapter through
-[`.github/workflows/bastion.yml`](https://github.com/jssblck/bastion/blob/main/.github/workflows/bastion.yml),
+[`.github/workflows/bastion.yml`](https://github.com/attunehq/bastion/blob/main/.github/workflows/bastion.yml),
 which consumes the GitHub Action from the PR's own checkout (`uses: ./`) so
 action changes take effect in the same PR. The engine stays out of the PR's
 reach: with no release ref to pin, the action installs the latest published

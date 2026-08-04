@@ -64,7 +64,7 @@ turned on; how to read each is in "Detecting the two conditions" below.
   `attestations: true`. Present and true means enabled; absent or false means not.
 
 - **Is Bastion configured in CI?** Look under `.github/workflows/` for a workflow
-  that runs Bastion: the packaged action (a step with `uses: jssblck/bastion@...`) is
+  that runs Bastion: the packaged action (a step with `uses: attunehq/bastion@...`) is
   the usual form, but a raw `bastion github` or `bastion review` invocation in a
   workflow step counts too. If no workflow runs Bastion, it is a local-only tool here
   (case 2). Note that attestation being enabled implies CI runs Bastion, since
@@ -219,7 +219,7 @@ forge, or signing fails, treat it as case 4: do not keep retrying, and let CI ru
 the gate. CI reviewing the changeset once is the correct fallback; the report warns
 only when an attestation was offered and refused, for example a note that no longer
 matches CI's checkout. See
-[Attesting a run for CI](https://github.com/jssblck/bastion/blob/main/docs/user-guide/local-workflow.md#attesting-a-run-for-ci)
+[Attesting a run for CI](https://github.com/attunehq/bastion/blob/main/docs/user-guide/local-workflow.md#attesting-a-run-for-ci)
 for the full mechanics and trust model.
 
 ## When a verdict surprises you

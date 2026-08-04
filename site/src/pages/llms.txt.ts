@@ -4,7 +4,7 @@ import { loadGuide, isIndex, rawSlugFor } from "../lib/guide";
 // llms.txt (https://llmstxt.org): a curated, machine-readable index of the
 // docs so an agent can discover the guide and fetch any page as Markdown in one
 // hop. Each link points at the raw `.md` representation served from /guide.
-const SITE = "https://bastion.jessica.black";
+const SITE = "https://bastion.attune.inc";
 
 export const GET: APIRoute = async () => {
   const entries = await loadGuide();
@@ -34,7 +34,7 @@ export const GET: APIRoute = async () => {
   out.push("## Optional");
   out.push("");
   out.push(`- [Full guide as one file](${SITE}/llms-full.txt): every chapter concatenated for a single fetch.`);
-  out.push(`- [Source repository](https://github.com/jssblck/bastion): the developer guide, reviewer registry, and code.`);
+  out.push(`- [Source repository](https://github.com/attunehq/bastion): the developer guide, reviewer registry, and code.`);
   out.push("");
 
   return new Response(out.join("\n"), {

@@ -77,7 +77,7 @@ fn github_report_posts_a_comment_and_checks_for_a_blocked_run() {
     // default GITHUB_TOKEN does), so the report detects the missing dedicated app
     // from the check-run response on its own and closes the comment with the nudge.
     assert!(
-        comment.body.contains("bastion.jessica.black/github-app"),
+        comment.body.contains("bastion.attune.inc/github-app"),
         "report should detect the shared app and nudge toward a dedicated one: {}",
         comment.body
     );

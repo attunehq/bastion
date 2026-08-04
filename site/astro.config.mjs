@@ -6,7 +6,7 @@ import rehypeDocLinks from "./src/lib/rehype-doc-links.mjs";
 // Custom domain (CNAME in public/) serves the site at the root path, so no
 // `base` is needed. `site` powers canonical URLs, sitemap, and Open Graph tags.
 export default defineConfig({
-  site: "https://bastion.jessica.black",
+  site: "https://bastion.attune.inc",
   trailingSlash: "never",
   build: {
     inlineStylesheets: "auto",

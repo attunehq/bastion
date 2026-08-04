@@ -20,20 +20,20 @@ chapter, [Concepts](./concepts.md), defines each precisely.
 
 The quickest path is the install script. It detects your platform, downloads the
 matching archive from the latest
-[GitHub release](https://github.com/jssblck/bastion/releases), verifies its
+[GitHub release](https://github.com/attunehq/bastion/releases), verifies its
 SHA-256 checksum, and puts `bastion` on your `PATH`.
 
 On Linux, macOS, or Windows under Git Bash:
 
 ```sh
-curl -sSfL https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.sh | bash
+curl -sSfL https://raw.githubusercontent.com/attunehq/bastion/main/scripts/install.sh | bash
 bastion --version
 ```
 
 On Windows, from PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/attunehq/bastion/main/scripts/install.ps1 | iex
 bastion --version
 ```
 
@@ -53,9 +53,9 @@ gnu|musl` (or `BASTION_LIBC=...`) when you want to override it, for example to
 take the portable musl build everywhere:
 
 ```sh
-curl -sSfL https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.sh | bash -s -- --libc musl
+curl -sSfL https://raw.githubusercontent.com/attunehq/bastion/main/scripts/install.sh | bash -s -- --libc musl
 # ...or, without the `-s --` dance, via the environment:
-curl -sSfL https://raw.githubusercontent.com/jssblck/bastion/main/scripts/install.sh | BASTION_LIBC=musl bash
+curl -sSfL https://raw.githubusercontent.com/attunehq/bastion/main/scripts/install.sh | BASTION_LIBC=musl bash
 ```
 
 Prefer to grab the archive yourself? Prebuilt binaries are attached to every
@@ -65,7 +65,7 @@ put `bastion` on your `PATH`:
 
 ```sh
 # Example: Linux x86_64
-curl -sSL https://github.com/jssblck/bastion/releases/latest/download/bastion-x86_64-unknown-linux-gnu.tar.gz | tar -xz
+curl -sSL https://github.com/attunehq/bastion/releases/latest/download/bastion-x86_64-unknown-linux-gnu.tar.gz | tar -xz
 sudo install bastion-x86_64-unknown-linux-gnu/bastion /usr/local/bin/
 bastion --version
 ```
@@ -103,7 +103,7 @@ in CI or a pipe; set `BASTION_NO_UPDATE_CHECK=1` to silence it entirely.
 
 Two environment variables retarget where updates come from, for a fork or a
 private mirror of the releases: `BASTION_REPO` overrides the `owner/name`
-repository (default `jssblck/bastion`), and `BASTION_BASE_URL` overrides the base
+repository (default `attunehq/bastion`), and `BASTION_BASE_URL` overrides the base
 URL the release archive and `checksums.txt` are fetched from. Leave both unset for
 the normal case.
 

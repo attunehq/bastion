@@ -269,7 +269,7 @@ jobs:
           set -euo pipefail
           gh release edit "${{ needs.prepare.outputs.tag }}" --draft=false
 
-      # Consumers of the GitHub Action pin `uses: jssblck/bastion@v0`, and that
+      # Consumers of the GitHub Action pin `uses: attunehq/bastion@v0`, and that
       # floating tag must track the newest stable release in its major. Advance
       # it here, after the release is published, so the tag never points at a
       # release consumers cannot see. Prereleases are skipped: an -rc engine
