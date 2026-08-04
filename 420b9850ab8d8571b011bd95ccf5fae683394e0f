@@ -1,0 +1,7 @@
+{"kind":"bastion-attestation","schema":2,"version":"v0.6.2","attested_at":"2026-08-04T23:50:14Z","public_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEZqeKHuBx/94Mvds7q0uudr48Qit25XflrxohnM9Uen jess@MacBook-Pro-signing","seal":{"version":"v0.6.2","head_tree":"50cd7f981e02c7fef95ed0a736b852a679c0beee","base_tree":"fb45545ea8b9414a241ac256b4f1b4d21ab92c5d","patch_id":"683f642d1bacb32cc3fddccf3771ab275b112c8d","config_hash":"b09b584a27a193d56b2cccffc4d147425964728ba884bda1db38c83b8f026ea3","seams":false,"dirty":false,"reviewers":["user-docs-in-sync"],"mac":"e01b2934203af73bb5129217dff8de2e90178541664ae1ce8693cb3f10305981"},"events":{"user-docs-in-sync":{"duration_ms":37907,"findings":[],"has_transcript":true,"reviewer":"user-docs-in-sync","run":"r-420b985","scope_digest":"b41c458408ef04fd31d9ad0900f331f13e9ae34603de2292a5ece0674817eee0","summary":"The repository and site transfer updates user-visible defaults and links, and docs/user-guide matches.","type":"reviewer.resolved","usage":{"cache_read":153088,"cost_usd":0.0,"tokens_in":198322,"tokens_out":1643},"verdict":"pass"}}}
+-----BEGIN SSH SIGNATURE-----
+U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgRmp4oe4HH/3gy92zurS652vjxC
+K3bld+WvGiGcz1R6cAAAAHYmFzdGlvbgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gtZWQy
+NTUxOQAAAEA+h6GetqtyslMN0B7glaR0KsxpIOvdffPuLWllN/46QuxRFO1s30R49kvZPH
+xzyHTK/lsxQepqMYleRTAjVFEM
+-----END SSH SIGNATURE-----
