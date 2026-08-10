@@ -11,7 +11,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use clap::{Parser, Subcommand};
+use clap::parser::ValueSource;
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use color_eyre::eyre::{Context, Result, bail};
 
 use crate::paths::Layout;
@@ -242,7 +243,12 @@ pub enum GithubCommand {
 /// Returns any error from the dispatched command, or exits early via clap on a
 /// parse error or `--help`/`--version`.
 pub async fn run() -> Result<ExitCode> {
-    let cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let has_explicit_review_repo = matches
+        .subcommand_matches("review")
+        .and_then(|review| review.value_source("repo"))
+        == Some(ValueSource::CommandLine);
+    let cli = Cli::from_arg_matches(&matches).wrap_err("parsing command line")?;
     maybe_nag_about_update(&cli.command);
     let layout = match cli.data_dir {
         Some(root) => Layout::with_root(root),
@@ -269,7 +275,7 @@ pub async fn run() -> Result<ExitCode> {
             // needs both a number and a repository; `--repo` alone has no PR to read, and
             // `--pr` without a resolvable repository is a usage error, not a silent local
             // review.
-            if should_merge_user_reviewers && (repo.is_some() || pr.is_some()) {
+            if should_merge_user_reviewers && (has_explicit_review_repo || pr.is_some()) {
                 bail!("`--with-user-reviewers` cannot be used with `--repo`/`--pr`");
             }
             let github = match (repo, pr) {
@@ -403,7 +409,6 @@ fn parse_duration(raw: &str) -> std::result::Result<Duration, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::CommandFactory;
 
     #[test]
     fn cli_definition_is_valid() {

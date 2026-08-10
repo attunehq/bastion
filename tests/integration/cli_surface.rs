@@ -433,6 +433,42 @@ fn a_repo_hint_rejects_user_reviewer_merging() {
     );
 }
 
+/// Actions exports `GITHUB_REPOSITORY` for every process. That ambient fallback
+/// is not an explicit GitHub-source request when no PR number is present, so it
+/// must not prevent an otherwise local personal-reviewer merge.
+#[test]
+fn an_ambient_github_repository_allows_local_user_reviewer_merging() {
+    let Some(fake) = tooling() else { return };
+
+    let repo = TestRepo::new(&registry(&[
+        Reviewer::new("repo-only", "codex", "gate").behavior("pass")
+    ]))
+    .with_user_registry(&registry(&[
+        Reviewer::new("user-only", "codex", "gate").behavior("pass")
+    ]));
+    let output = repo.run(
+        fake,
+        &[
+            "review",
+            "--base",
+            "main",
+            "--with-user-reviewers",
+            "--format",
+            "jsonl",
+        ],
+        &[("GITHUB_REPOSITORY", "attunehq/bastion")],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("repo-only"), "stdout:\n{stdout}");
+    assert!(stdout.contains("user-only"), "stdout:\n{stdout}");
+}
+
 /// A registry split across files reviews like one file: the root's `include:`
 /// pulls in a second registry whose reviewer reads its prompt from a markdown
 /// file, and both reviewers execute through the real binary and gate together.
