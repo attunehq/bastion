@@ -407,6 +407,32 @@ fn a_github_source_rejects_user_reviewer_merging() {
     );
 }
 
+/// A repository hint without a PR still cannot be combined with personal
+/// reviewers. Reject it rather than silently treating the invocation as local.
+#[test]
+fn a_repo_hint_rejects_user_reviewer_merging() {
+    let Some(fake) = tooling() else { return };
+
+    let repo = TestRepo::new(&registry(&[Reviewer::new("repo", "codex", "gate")]));
+    let output = repo.run(
+        fake,
+        &[
+            "review",
+            "--repo",
+            "attunehq/bastion",
+            "--with-user-reviewers",
+        ],
+        &[],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains("`--with-user-reviewers` cannot be used with `--repo`/`--pr`"),
+        "stderr:\n{stderr}"
+    );
+}
+
 /// A registry split across files reviews like one file: the root's `include:`
 /// pulls in a second registry whose reviewer reads its prompt from a markdown
 /// file, and both reviewers execute through the real binary and gate together.

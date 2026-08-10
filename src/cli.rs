@@ -269,6 +269,9 @@ pub async fn run() -> Result<ExitCode> {
             // needs both a number and a repository; `--repo` alone has no PR to read, and
             // `--pr` without a resolvable repository is a usage error, not a silent local
             // review.
+            if should_merge_user_reviewers && (repo.is_some() || pr.is_some()) {
+                bail!("`--with-user-reviewers` cannot be used with `--repo`/`--pr`");
+            }
             let github = match (repo, pr) {
                 (Some(repo), Some(pr)) => Some(crate::commands::GithubSource::new(&repo, pr)?),
                 (None, Some(_)) => bail!(
@@ -276,9 +279,6 @@ pub async fn run() -> Result<ExitCode> {
                 ),
                 (Some(_), None) | (None, None) => None,
             };
-            if github.is_some() && should_merge_user_reviewers {
-                bail!("`--with-user-reviewers` cannot be used with `--repo`/`--pr`");
-            }
             // User-level reviewers are a local-only convenience. A review carrying a
             // GitHub source (`--repo`/`--pr`, set under Actions) is the governed CI
             // path, so it runs the repository's reviewers alone: a self-hosted runner
