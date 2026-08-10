@@ -160,8 +160,8 @@ Reviewers live in a declarative file at your repository root: `.bastion.yaml` (t
 `.bastion.yml` spelling is also honored). Bastion discovers it by walking up from
 your current directory, so you can run `bastion` from anywhere inside the repo. You
 can also keep personal reviewers in a user-level `.bastion.yaml` in your platform
-config directory; a local `bastion review` merges them with the repository's, which
-lets you run a reviewer locally even in a repo that has not adopted Bastion (see
+config directory. Bastion uses them when a repo has not adopted Bastion; pass
+`--with-user-reviewers` to merge them with a repository's reviewers (see
 [Authoring reviewers](./authoring-reviewers.md#user-level-reviewers)). Create the
 repository file:
 
@@ -309,8 +309,9 @@ The most common first-run snags and what they mean:
   personal one, or pass a file explicitly.
 - **A reviewer registry error (malformed YAML, duplicate name, missing field).**
   The registry is validated before any agent runs, so these fail fast with a clear
-  message. Run `bastion validate` (no model call) to check the merged set a local
-  review would run, or `bastion validate path/to/.bastion.yaml` to check one
+  message. Run `bastion validate` (no model call) to check the set a local review
+  would run, add `--with-user-reviewers` to check the merged set, or run `bastion
+  validate path/to/.bastion.yaml` to check one
   registry (and everything it includes) without the user-level layer; fix it and
   re-run. See [Authoring reviewers](./authoring-reviewers.md).
 - **The review blocks immediately with "did not produce a verdict".** A gate failed

@@ -145,14 +145,14 @@ fn a_prior_pass_carries_forward_only_while_its_scoped_diff_is_unchanged() {
     std::fs::write(repo.path().join("docs/note.md"), "first draft\n").unwrap();
 
     // First run: everything executes fresh.
-    let first = repo.review(fake);
+    let first = repo.review_with_args(fake, &["--with-user-reviewers"]);
     assert!(first.exited_zero(), "stderr:\n{}", first.stderr);
     assert!(!first.carried("docs-gate"));
     assert!(!first.carried("src-gate"));
 
     // Second run, nothing changed: the user-level reviewer carries its pass;
     // the repo reviewer stays fresh because its prior seal is seam-tainted.
-    let second = repo.review(fake);
+    let second = repo.review_with_args(fake, &["--with-user-reviewers"]);
     assert!(second.exited_zero(), "stderr:\n{}", second.stderr);
     assert!(
         second.carried("docs-gate"),
@@ -181,7 +181,15 @@ fn a_prior_pass_carries_forward_only_while_its_scoped_diff_is_unchanged() {
     // `--fresh` opts out entirely.
     let output = repo.run(
         fake,
-        &["review", "--base", "main", "--fresh", "--format", "jsonl"],
+        &[
+            "review",
+            "--base",
+            "main",
+            "--fresh",
+            "--with-user-reviewers",
+            "--format",
+            "jsonl",
+        ],
         &[],
     );
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -199,7 +207,7 @@ fn a_prior_pass_carries_forward_only_while_its_scoped_diff_is_unchanged() {
 
     // Touching the scoped content invalidates the carry.
     std::fs::write(repo.path().join("docs/note.md"), "second draft\n").unwrap();
-    let after_edit = repo.review(fake);
+    let after_edit = repo.review_with_args(fake, &["--with-user-reviewers"]);
     assert!(
         !after_edit.carried("docs-gate"),
         "an edited scoped file must re-execute the reviewer"
@@ -230,7 +238,7 @@ fn selecting_every_reviewer_is_full_and_a_selection_never_carries() {
     std::fs::write(repo.path().join("docs/note.md"), "first draft\n").unwrap();
 
     // Seed a prior run whose docs-gate pass would carry on a plain re-run.
-    let first = repo.review(fake);
+    let first = repo.review_with_args(fake, &["--with-user-reviewers"]);
     assert!(first.exited_zero(), "stderr:\n{}", first.stderr);
 
     // Naming both triggered reviewers: full coverage, so not partial, and the
@@ -241,6 +249,7 @@ fn selecting_every_reviewer_is_full_and_a_selection_never_carries() {
             "review",
             "--base",
             "main",
+            "--with-user-reviewers",
             "--reviewer",
             "src-gate",
             "--reviewer",

@@ -7,6 +7,7 @@
 //! `docs/developer-guide/github-adapter.md`.
 
 use std::num::NonZeroU64;
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -29,8 +30,8 @@ pub struct Cli {
     pub data_dir: Option<PathBuf>,
 
     /// Override the user-level config directory searched for a personal
-    /// `.bastion.yaml`, whose reviewers are merged with the repository's. Defaults
-    /// to the platform config dir (e.g. `~/.config/bastion`).
+    /// `.bastion.yaml`. Defaults to the platform config dir (e.g.
+    /// `~/.config/bastion`).
     #[arg(long, global = true, value_name = "PATH", env = crate::config::CONFIG_DIR_ENV)]
     pub config_dir: Option<PathBuf>,
 
@@ -80,6 +81,11 @@ pub enum Command {
         /// passes forward).
         #[arg(long)]
         fresh: bool,
+        /// Merge personal user-level reviewers with the repository's reviewers.
+        /// Without this flag, personal reviewers are used only when no repository
+        /// registry or `--include` reviewer configuration exists.
+        #[arg(long = "with-user-reviewers")]
+        should_merge_user_reviewers: bool,
     },
     /// Parse the reviewer registry and report any problems, without running a
     /// reviewer or spending a model call.
@@ -88,6 +94,11 @@ pub enum Command {
         /// (or `.bastion.yml`) found by walking up from the current directory.
         #[arg(value_name = "FILE")]
         file: Option<PathBuf>,
+        /// Merge personal user-level reviewers with the repository's reviewers.
+        /// Without this flag, personal reviewers are used only when no repository
+        /// registry or `--include` reviewer configuration exists.
+        #[arg(long = "with-user-reviewers")]
+        should_merge_user_reviewers: bool,
     },
     /// Print a reviewer's saved session transcript (defaults to the latest run).
     Transcript {
@@ -251,6 +262,7 @@ pub async fn run() -> Result<ExitCode> {
             pr,
             reviewers,
             fresh,
+            should_merge_user_reviewers,
         } => {
             let cwd = std::env::current_dir().wrap_err("determining the current directory")?;
             // Parse the `--repo`/`--pr` pair into a GitHub source at the boundary so an
@@ -270,11 +282,17 @@ pub async fn run() -> Result<ExitCode> {
             // path, so it runs the repository's reviewers alone: a self-hosted runner
             // that happens to have a personal config dir must not merge ungoverned
             // reviewers into a PR's gate, and the `repo:` scope must never reach a
-            // check run. Only a purely local review layers in the user registry.
+            // check run. A purely local review uses the user registry as a fallback,
+            // or merges it when `--with-user-reviewers` explicitly asks for both.
             let review_user_dir = if github.is_some() {
                 None
             } else {
-                user_config_dir.as_deref()
+                user_config_for_discovery(
+                    &cwd,
+                    user_config_dir.as_deref(),
+                    &cli.includes,
+                    should_merge_user_reviewers,
+                )?
             };
             let options = crate::commands::ReviewOptions {
                 base,
@@ -292,15 +310,22 @@ pub async fn run() -> Result<ExitCode> {
                 Decision::Block => ExitCode::FAILURE,
             })
         }
-        Command::Validate { file } => {
+        Command::Validate {
+            file,
+            should_merge_user_reviewers,
+        } => {
             let cwd = std::env::current_dir().wrap_err("determining the current directory")?;
-            crate::commands::validate(
-                &cwd,
-                file.as_deref(),
-                user_config_dir.as_deref(),
-                &cli.includes,
-            )
-            .map(|()| ExitCode::SUCCESS)
+            let validate_user_dir = match file.as_ref() {
+                Some(_) => None,
+                None => user_config_for_discovery(
+                    &cwd,
+                    user_config_dir.as_deref(),
+                    &cli.includes,
+                    should_merge_user_reviewers,
+                )?,
+            };
+            crate::commands::validate(&cwd, file.as_deref(), validate_user_dir, &cli.includes)
+                .map(|()| ExitCode::SUCCESS)
         }
         Command::Transcript { first, second } => {
             let (run, reviewer) = match second {
@@ -360,6 +385,30 @@ pub async fn run() -> Result<ExitCode> {
         Command::UpdateCheck => crate::commands::update_check_worker()
             .await
             .map(|()| ExitCode::SUCCESS),
+    }
+}
+
+/// Select the user-level registry for local discovery.
+///
+/// Personal reviewers are the fallback when the repository has no reviewer
+/// configuration of its own. `--with-user-reviewers` opts into the additive
+/// merge when a repository registry or explicit `--include` layer exists.
+///
+/// # Errors
+///
+/// Returns an error when repository registry discovery cannot inspect a
+/// candidate path.
+fn user_config_for_discovery<'a>(
+    cwd: &Path,
+    user_dir: Option<&'a Path>,
+    includes: &[PathBuf],
+    should_merge_user_reviewers: bool,
+) -> Result<Option<&'a Path>> {
+    let has_repository_config = crate::config::locate_kind(cwd)?.is_some() || !includes.is_empty();
+    if has_repository_config && !should_merge_user_reviewers {
+        Ok(None)
+    } else {
+        Ok(user_dir)
     }
 }
 
@@ -503,13 +552,36 @@ mod tests {
     }
 
     #[test]
+    fn user_reviewer_merge_is_an_explicit_review_and_validate_flag() {
+        let review = Cli::parse_from(["bastion", "review", "--with-user-reviewers"]);
+        assert!(matches!(
+            review.command,
+            Command::Review {
+                should_merge_user_reviewers: true,
+                ..
+            }
+        ));
+
+        let validate = Cli::parse_from(["bastion", "validate", "--with-user-reviewers"]);
+        assert!(matches!(
+            validate.command,
+            Command::Validate {
+                should_merge_user_reviewers: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn validate_takes_an_optional_file_argument() {
         let none = Cli::parse_from(["bastion", "validate"]);
-        assert!(matches!(none.command, Command::Validate { file: None }));
+        assert!(matches!(none.command, Command::Validate { file: None, .. }));
 
         let some = Cli::parse_from(["bastion", "validate", "config/.bastion.yaml"]);
         match some.command {
-            Command::Validate { file: Some(path) } => {
+            Command::Validate {
+                file: Some(path), ..
+            } => {
                 assert_eq!(path, PathBuf::from("config/.bastion.yaml"));
             }
             other => panic!("expected validate with a file, got {other:?}"),

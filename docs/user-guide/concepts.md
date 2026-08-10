@@ -20,8 +20,8 @@ plus an optional execution profile (backend, timeout, environment, inputs, a
 container `runner`, and `capabilities`, among others). All of it is declared
 statically in `.bastion.yaml`; [Authoring reviewers](./authoring-reviewers.md)
 is the full field reference. The repository's `.bastion.yaml` is the shared, governed
-set; locally you can also keep personal reviewers in a user-level `.bastion.yaml`,
-and `bastion review` runs the merged set (see
+set; locally you can also keep fallback reviewers in a user-level `.bastion.yaml`,
+or merge them explicitly with `--with-user-reviewers` (see
 [Authoring reviewers](./authoring-reviewers.md#user-level-reviewers)).
 
 Two properties matter most:
@@ -144,7 +144,8 @@ always-present check named `bastion`. Either way the aggregation rule is the sam
 CI runs the repository's reviewers. The decision matches when both runs see the same
 reviewers and context; two things can make a local run differ: CI can add the PR's
 description and discussion that a default local run does not, and a purely local run
-can include your personal user-level reviewers, which CI never runs (see
+can include your personal user-level reviewers with `--with-user-reviewers`, which
+CI never runs (see
 [Authoring reviewers](./authoring-reviewers.md#user-level-reviewers)).
 
 ## The backend

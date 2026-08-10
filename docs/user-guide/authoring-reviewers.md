@@ -145,15 +145,17 @@ generated block.
 ## User-level reviewers
 
 You can also keep personal reviewers in a user-level `.bastion.yaml` (or
-`.bastion.yml`) in your platform config directory, so a reviewer you rely on runs
-locally whether or not a given repository has adopted Bastion:
+`.bastion.yml`) in your platform config directory. Bastion uses them as the
+fallback in repositories that have not configured reviewers:
 
 - Linux: `$XDG_CONFIG_HOME/bastion`, defaulting to `~/.config/bastion`.
 - macOS: `~/Library/Application Support/bastion`.
 - Windows: `%APPDATA%\bastion`.
 
-When both files exist, a local `bastion review` merges the repository's reviewers
-with your user-level ones into one set, by reviewer name:
+By default, Bastion uses this file only when the repository has no reviewer
+registry. This keeps a local run aligned with the repository's configured policy
+and avoids extra model calls. Pass `--with-user-reviewers` to `bastion review` or
+`bastion validate` to merge both files. The merge combines reviewers by name:
 
 - A reviewer only one file defines is included as-is.
 - The same reviewer in both files is deduplicated to one. Sameness is compared by the
@@ -170,7 +172,7 @@ CI runs) skips the user-level registry, so a pull request is gated by the
 repository's reviewers alone, the `repo:` scope never appears there, and a personal
 reviewer can never gate someone else's change.
 `--config-dir <path>` (or `$BASTION_CONFIG_DIR`) overrides where the user-level file
-is read from.
+is read from. It does not enable merging by itself.
 
 The user-level file supports the full schema, though `attestations:` only has
 meaning in the repository's registry (a personal reviewer never gates a PR, so
@@ -628,14 +630,16 @@ Run `bastion validate` to parse the registry and report any problem without runn
 a single reviewer or spending a model call:
 
 ```sh
-bastion validate                          # validate the merged set review would run
+bastion validate                          # validate the default set review would run
+bastion validate --with-user-reviewers    # validate the explicit merged set
 bastion validate path/to/.bastion.yaml    # check one registry and its include tree
 ```
 
-With no file argument it validates the same merged set a local `bastion review`
-would run, the discovered repository registry plus your user-level one, and names
-each source it merged, listing every included registry file and prompt file it
-pulled in. An explicit `FILE` skips the user-level merging but still resolves the
+With no file argument it validates the same set a local `bastion review` would run:
+the repository registry when one exists, otherwise your user-level registry. Pass
+`--with-user-reviewers` to validate the merged set. The output names each source it
+loaded and lists every included registry file and prompt file it pulled in. An
+explicit `FILE` skips the user-level merging but still resolves the
 file fully: its `include:` entries, its prompt files, and any `--include` flags
 all load, as they would on a real review. It loads through the same path `bastion review` uses, so
 it catches exactly the errors a real review would hit at load time: malformed

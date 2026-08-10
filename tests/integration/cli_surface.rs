@@ -103,8 +103,36 @@ fn the_legacy_registry_location_still_works_with_a_deprecation_warning() {
     );
 }
 
-/// A user-level registry merges with the repository's through the real binary: a
-/// reviewer the user keeps in their config dir runs locally even when the repo
+/// A repository registry suppresses fallback user-level reviewers by default, so
+/// the local run matches the repository-governed reviewer set without extra model
+/// calls.
+#[test]
+fn a_repository_registry_uses_only_repository_reviewers_by_default() {
+    let Some(fake) = tooling() else { return };
+
+    let repo = TestRepo::new(&registry(&[
+        Reviewer::new("repo-only", "codex", "gate").behavior("pass")
+    ]))
+    .with_user_registry(&registry(&[Reviewer::new(
+        "user-only",
+        "claude-code",
+        "gate",
+    )
+    .behavior("pass")]));
+
+    let run = repo.review(fake);
+
+    assert!(run.exited_zero(), "stderr:\n{}", run.stderr);
+    let (decision, gates, _cost) = run.completed();
+    assert_eq!(decision, Decision::Pass);
+    assert_eq!(gates.total, 1);
+    assert_eq!(run.resolved_count(), 1);
+    assert_eq!(run.resolved("repo-only").0, Decision::Pass);
+}
+
+/// `--with-user-reviewers` merges a user-level registry with the repository's
+/// through the real binary. A reviewer the user keeps in their config dir runs
+/// locally even when the repo
 /// never defined it, an identical reviewer present in both files is deduplicated,
 /// and a same-name reviewer whose config differs survives under the `repo:` scope
 /// alongside the user's. This is the local-only path; CI, with no user config dir,
@@ -130,7 +158,7 @@ fn a_user_registry_merges_with_the_repository_registry() {
             .prompt("user prompt"),
     ]));
 
-    let run = repo.review(fake);
+    let run = repo.review_with_args(fake, &["--with-user-reviewers"]);
 
     assert!(run.exited_zero(), "stderr:\n{}", run.stderr);
     let (decision, gates, _cost) = run.completed();
@@ -150,6 +178,46 @@ fn a_user_registry_merges_with_the_repository_registry() {
 
     let runs = store::list_runs(&repo.layout()).unwrap();
     assert_eq!(runs[0].reviewers, 5);
+}
+
+/// `validate` follows the same fallback and explicit-merge rules as `review`.
+#[test]
+fn validate_merges_user_reviewers_only_when_requested() {
+    let Some(fake) = tooling() else { return };
+
+    let repo = TestRepo::new(&registry(&[Reviewer::new("repo-only", "codex", "gate")]))
+        .with_user_registry(&registry(&[Reviewer::new(
+            "user-only",
+            "claude-code",
+            "advisor",
+        )]));
+
+    let fallback = repo.run(fake, &["validate"], &[]);
+    assert!(
+        fallback.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&fallback.stderr)
+    );
+    let fallback_stdout = String::from_utf8_lossy(&fallback.stdout);
+    assert!(
+        fallback_stdout.contains("1 reviewer(s), 1 gate(s), 0 advisor(s)"),
+        "stdout:\n{fallback_stdout}"
+    );
+    assert!(!fallback_stdout.contains("user-only"));
+
+    let merged = repo.run(fake, &["validate", "--with-user-reviewers"], &[]);
+    assert!(
+        merged.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&merged.stderr)
+    );
+    let merged_stdout = String::from_utf8_lossy(&merged.stdout);
+    assert!(
+        merged_stdout.contains("2 reviewer(s), 1 gate(s), 1 advisor(s)"),
+        "stdout:\n{merged_stdout}"
+    );
+    assert!(merged_stdout.contains("repo-only"));
+    assert!(merged_stdout.contains("user-only"));
 }
 
 /// A repository with no registry of its own still runs the user's personal

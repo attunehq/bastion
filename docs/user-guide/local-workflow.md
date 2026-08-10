@@ -13,8 +13,8 @@ The local CLI applies the same reviewers and decisions CI enforces: CI executes 
 fresh, records an agent-trigger skip, replays an attested local outcome, or carries
 an unchanged reviewer forward from the branch's previous CI run. So a green local loop usually means a PR that CI
 confirms. Two things can make a local run differ: CI feeds reviewers the PR's
-description and discussion that a default local run lacks, and a local run also merges
-in any personal reviewers from your user-level registry, which CI never sees (see
+description and discussion that a default local run lacks, and a local run can merge
+in personal reviewers with `--with-user-reviewers`, which CI never sees (see
 [Authoring reviewers](./authoring-reviewers.md#user-level-reviewers)). This chapter
 covers the loop in depth.
 
@@ -55,7 +55,8 @@ its scoped content is unchanged and otherwise executing fresh (see
 - `--format <human|jsonl>`: output format. Defaults to `human`.
 - `--repo <owner/name>`: the GitHub repository to gather pull request context from. Defaults to `$GITHUB_REPOSITORY`.
 - `--pr <number>`: the pull request whose description and discussion the reviewers read as context. Requires a repository, from `--repo` or `$GITHUB_REPOSITORY`; passing `--pr` with no repository is an error.
-- `--config-dir <path>`: the user-level config directory to merge personal reviewers from (env `BASTION_CONFIG_DIR`). Defaults to your platform config directory (`~/.config/bastion` on Linux, `~/Library/Application Support/bastion` on macOS, `%APPDATA%\bastion` on Windows). The user-level layer is applied only to a purely local review; a review carrying `--repo`/`--pr` uses the repository's reviewers alone.
+- `--config-dir <path>`: the user-level config directory to search for personal reviewers (env `BASTION_CONFIG_DIR`). Defaults to your platform config directory (`~/.config/bastion` on Linux, `~/Library/Application Support/bastion` on macOS, `%APPDATA%\bastion` on Windows). Personal reviewers are the fallback when the repository has no reviewer configuration.
+- `--with-user-reviewers`: merge personal reviewers into a repository's configured reviewer set. This applies only to a purely local review; a review carrying `--repo`/`--pr` uses the repository's reviewers alone.
 - `--include <path>` (repeatable): merge an extra reviewer registry file into the repository registry, like an `include:` entry in the root file except that a relative path resolves against the current directory (see [Splitting the registry across files](./authoring-reviewers.md#splitting-the-registry-across-files)). The extra reviewers become part of the effective repository configuration for the run, so `bastion attest` needs the same `--include` flags to re-derive the same configuration hash.
 - `--reviewer <name>` (repeatable; alias `--only`): run only these triggered reviewers. An unknown or untriggered name is an error. Excluding a triggered reviewer makes the run *partial* (see below).
 - `--fresh`: disable the incremental carry below, so no reviewer reuses a prior pass (local or CI). It does not affect attestation replay: a `--repo`/`--pr` run still replays reviewers a verified attestation covers.
@@ -430,7 +431,8 @@ events have no separate GitHub surface. A green local loop predicts a green PR w
 both runs see the same reviewers and context. The two surfaces run the repository's
 reviewers and aggregation, and CI adds the PR's description and discussion that a
 default local run does not, so a reviewer that weighs that context can decide
-differently. A purely local run can also include your personal user-level reviewers;
+differently. A purely local run can also include your personal user-level reviewers
+with `--with-user-reviewers`;
 their `run.started` and terminal `reviewer.resolved` or `reviewer.skipped` events are
 local-only and never become checks or comments (see
 [Authoring reviewers](./authoring-reviewers.md#user-level-reviewers)).

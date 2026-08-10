@@ -364,10 +364,9 @@ impl TestRepo {
         Self { repo, data, config }
     }
 
-    /// Write a user-level `.bastion.yaml` into this repo's isolated config dir, so a
-    /// `review`/`validate` run layers its reviewers beneath the repository's. This is
-    /// the local-only path: a reviewer a user keeps in their config dir runs even when
-    /// the repository does not adopt Bastion in CI.
+    /// Write a user-level `.bastion.yaml` into this repo's isolated config dir. A
+    /// `review`/`validate` run uses it as a fallback when the repository has no
+    /// registry, or merges it when `--with-user-reviewers` is passed.
     pub(crate) fn with_user_registry(self, yaml: &str) -> Self {
         std::fs::write(self.config.path().join(".bastion.yaml"), yaml).unwrap();
         self
