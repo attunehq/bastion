@@ -173,7 +173,7 @@ pub fn attest(
     // `includes` must be the same `--include` set the run was reviewed with:
     // extra includes are part of the effective repository config, so the hash
     // only matches when this command re-derives it from the same files.
-    let (_, repo_attestation, _) = Config::discover_merged_attested(root, None, includes)
+    let (_, repo_attestation, _) = Config::discover_merged_attested(root, None, includes, false)
         .wrap_err("re-deriving the effective repository reviewer config")?;
     drift_check(
         "the reviewer registry has changed since this run",

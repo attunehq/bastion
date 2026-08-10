@@ -403,10 +403,21 @@ impl TestRepo {
     /// backends, this repo's private data directory, and any `extra_env` (which
     /// Bastion inherits and propagates to the agent child).
     pub(crate) fn run(&self, fake: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> Output {
+        self.run_from(fake, self.repo.path(), args, extra_env)
+    }
+
+    /// Run `bastion <args>` from a directory inside this repo.
+    pub(crate) fn run_from(
+        &self,
+        fake: &Path,
+        cwd: &Path,
+        args: &[&str],
+        extra_env: &[(&str, &str)],
+    ) -> Output {
         let mut command = Command::new(bastion_bin());
         command
             .args(args)
-            .current_dir(self.repo.path())
+            .current_dir(cwd)
             .env("BASTION_DATA_DIR", self.data.path())
             // Point the user-level config dir at this repo's isolated (empty by
             // default) directory, so the developer's real `~/.config/bastion` never

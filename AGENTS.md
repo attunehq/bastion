@@ -66,8 +66,9 @@ Guidance that follows, so we stop re-deriving it:
   - `docs/developer-guide/local-surface.md`: the local CLI surface this crate
     implements. For the repository's reviewers the local and GitHub surfaces are
     deliberate mirror images; keep them in sync. The user-level registry is a
-    local-only exception, so a purely local review can run personal reviewers the
-    GitHub adapter does not.
+    local-only exception. A purely local review uses personal reviewers as a
+    fallback, or merges them with `--with-user-reviewers`; the GitHub adapter never
+    runs them.
   - `docs/developer-guide/attestation.md`: the design for signed local runs that
     CI verifies and replays instead of re-executing reviewers. Implemented: the
     seal in `src/seal.rs`, `bastion attest` and the CI planner in `src/attest/`.
@@ -177,9 +178,10 @@ second copy to drift against.
   repository's reviewers: the same reviewers, verdicts, and findings, presented
   through whatever each transport makes natural. A schema change touches both
   surfaces and `docs/`. The user-level registry is the deliberate exception. A purely
-  local `bastion review` also merges in an author's personal reviewers from the
-  platform config dir, which the GitHub adapter and any `--repo`/`--pr` run never see,
-  so a personal reviewer cannot gate someone else's PR.
+  local `bastion review` uses an author's personal reviewers when the repository has
+  no registry, or merges them when `--with-user-reviewers` is passed. The GitHub
+  adapter and any `--repo`/`--pr` run never see them, so a personal reviewer cannot
+  gate someone else's PR.
 - Reviewers are declarative and static. Do not add code paths that generate
   reviewers on the fly; that would break the stable trigger set and the
   governance story.

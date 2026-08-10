@@ -14,12 +14,12 @@
 //! downstream bind the resolved content, not the file layout.
 //!
 //! Locally, reviewers can also come from a user-level `.bastion.yaml` in the
-//! platform config directory ([`user_config_dir`]). [`Config::discover_merged`]
-//! layers it onto the repository's so a personal reviewer runs even when a repo has
-//! not adopted Bastion; CI, which has no user config directory, sees the repository
-//! set alone. Includes stay within their layer: a user-file include merges into the
-//! user layer, a repo-file include (and any `--include` passed on the command line)
-//! into the repository layer.
+//! platform config directory ([`user_config_dir`]). Discovery uses it as a fallback
+//! when no repository registry exists, or layers it onto the repository registry
+//! when the caller opts in. CI, which has no user config directory, sees the
+//! repository set alone. Includes stay within their layer: a user-file include
+//! merges into the user layer, a repo-file include (and any `--include` passed on
+//! the command line) into the repository layer.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -312,10 +312,9 @@ impl Config {
         Ok((found, config))
     }
 
-    /// Discover the merged registry `bastion review` runs: the repository registry
-    /// (walked up from `start`) with the user-level registry (in `user_dir`)
-    /// layered beneath it, so a reviewer a user keeps in their config dir runs
-    /// locally whether or not the repository adopts Bastion in CI.
+    /// Discover and merge the repository registry (walked up from `start`) with
+    /// the user-level registry (in `user_dir`). This convenience always opts into
+    /// the additive merge.
     ///
     /// `user_dir` is the resolved user config directory ([`user_config_dir`]), or
     /// `None` to skip the user-level layer entirely. Either source may be absent;
@@ -327,18 +326,21 @@ impl Config {
     /// if a candidate path cannot be inspected (a stat error other than not-found),
     /// if a discovered file fails to load, or if the merged set fails validation.
     pub fn discover_merged(start: &Path, user_dir: Option<&Path>) -> Result<Self> {
-        Self::discover_merged_located(start, user_dir, &[]).map(|(_, config)| config)
+        Self::discover_merged_located(start, user_dir, &[], true).map(|(_, config)| config)
     }
 
-    /// Like [`Config::discover_merged`], but also returns the [`Sources`] the merged
-    /// config was built from, so a caller (such as `bastion validate`) can report
-    /// exactly which files fed it.
+    /// Discover the selected registries and return the [`Sources`] the config was
+    /// built from, so a caller (such as `bastion validate`) can report exactly
+    /// which files fed it.
     ///
     /// The repository registry is loaded as the base, then the user-level reviewers
     /// are merged onto it as a set: an identical reviewer in both files is
     /// deduplicated, and a same-name-different-config collision keeps both with the
     /// repo side scoped to [`REPO_SCOPE_PREFIX`] (the merge is `layer_user`). The
     /// merged set is re-validated so a residual duplicate name fails closed.
+    /// Without `should_merge_user_reviewers`, the user registry is selected only
+    /// when no repository registry is found. Command-line includes do not suppress
+    /// that fallback.
     ///
     /// # Errors
     ///
@@ -350,8 +352,9 @@ impl Config {
         start: &Path,
         user_dir: Option<&Path>,
         extra_includes: &[PathBuf],
+        should_merge_user_reviewers: bool,
     ) -> Result<(Sources, Self)> {
-        Self::discover_merged_attested(start, user_dir, extra_includes)
+        Self::discover_merged_attested(start, user_dir, extra_includes, should_merge_user_reviewers)
             .map(|(sources, _, config)| (sources, config))
     }
 
@@ -380,6 +383,11 @@ impl Config {
     /// they move the attestation hash; a run reviewed with extra includes only
     /// replays in CI if CI passes the same files.
     ///
+    /// Without `should_merge_user_reviewers`, the user registry is selected only
+    /// when `locate_kind(start)` finds no repository registry. The repository and
+    /// user decisions therefore use the same discovery root and resolved paths.
+    /// Extra includes do not suppress the personal fallback.
+    ///
     /// # Errors
     ///
     /// Returns an error if neither a repository nor a user-level registry is
@@ -390,9 +398,15 @@ impl Config {
         start: &Path,
         user_dir: Option<&Path>,
         extra_includes: &[PathBuf],
+        should_merge_user_reviewers: bool,
     ) -> Result<(Sources, RepoAttestation, Self)> {
         let repo = locate_kind(start)?;
-        let user = match user_dir {
+        let selected_user_dir = if repo.is_none() || should_merge_user_reviewers {
+            user_dir
+        } else {
+            None
+        };
+        let user = match selected_user_dir {
             Some(dir) => locate_user(dir)?,
             None => None,
         };
@@ -1474,9 +1488,13 @@ reviewer:
         let extra_file = extra.path().join("mine.yaml");
         std::fs::write(&extra_file, reviewer_yaml("mine", "p")).unwrap();
 
-        let (sources, _, config) =
-            Config::discover_merged_attested(empty.path(), None, std::slice::from_ref(&extra_file))
-                .unwrap();
+        let (sources, _, config) = Config::discover_merged_attested(
+            empty.path(),
+            None,
+            std::slice::from_ref(&extra_file),
+            false,
+        )
+        .unwrap();
         assert_eq!(config.reviewers.len(), 1);
         assert!(sources.repo.is_none());
         assert_eq!(sources.repo_files.includes, [extra_file]);
@@ -1485,13 +1503,14 @@ reviewer:
     #[test]
     fn extra_includes_are_part_of_the_repo_attestation_hash() {
         let dir = registry_dir(&reviewer_yaml("root", "p"));
-        let (_, without, _) = Config::discover_merged_attested(dir.path(), None, &[]).unwrap();
+        let (_, without, _) =
+            Config::discover_merged_attested(dir.path(), None, &[], false).unwrap();
 
         let extra = tempfile::tempdir().unwrap();
         let extra_file = extra.path().join("mine.yaml");
         std::fs::write(&extra_file, reviewer_yaml("mine", "p")).unwrap();
         let (_, with, _) =
-            Config::discover_merged_attested(dir.path(), None, &[extra_file]).unwrap();
+            Config::discover_merged_attested(dir.path(), None, &[extra_file], false).unwrap();
 
         assert_ne!(
             without.config_hash, with.config_hash,
@@ -1509,7 +1528,7 @@ reviewer:
         std::fs::write(user.path().join("extra.yaml"), reviewer_yaml("mine", "p")).unwrap();
 
         let (sources, attestation, config) =
-            Config::discover_merged_attested(repo.path(), Some(user.path()), &[]).unwrap();
+            Config::discover_merged_attested(repo.path(), Some(user.path()), &[], true).unwrap();
         let names: Vec<&str> = config.reviewers.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, ["tenant-isolation", "mine"]);
         assert!(!attestation.reviewers.contains("mine"));
@@ -1819,7 +1838,7 @@ reviewers:
             "reviewers:\n  - name: my-style\n    trigger: [src/**]\n    mode: advisor\n    prompt: p\n",
         );
         let (_, attestation, _) =
-            Config::discover_merged_attested(repo.path(), Some(user.path()), &[]).unwrap();
+            Config::discover_merged_attested(repo.path(), Some(user.path()), &[], true).unwrap();
         assert_eq!(attestation.config_hash, hash_without_user);
     }
 
@@ -1862,7 +1881,7 @@ reviewers:
             "reviewers:\n  - name: my-style\n    trigger: [src/**]\n    mode: advisor\n    prompt: p\n",
         );
         let (_, attestation, config) =
-            Config::discover_merged_attested(repo.path(), Some(user.path()), &[]).unwrap();
+            Config::discover_merged_attested(repo.path(), Some(user.path()), &[], true).unwrap();
         assert_eq!(
             config.reviewers.len(),
             2,
@@ -1883,7 +1902,7 @@ reviewers:
             "reviewers:\n  - name: tenant-isolation\n    trigger: [src/**]\n    mode: gate\n    prompt: user prompt\n",
         );
         let (_, attestation, _) =
-            Config::discover_merged_attested(repo.path(), Some(user.path()), &[]).unwrap();
+            Config::discover_merged_attested(repo.path(), Some(user.path()), &[], true).unwrap();
         assert_eq!(
             attestation.reviewers,
             ["repo:tenant-isolation".to_string()].into_iter().collect(),
@@ -1894,7 +1913,8 @@ reviewers:
     #[test]
     fn discover_merged_attested_reports_the_attestations_flag() {
         let repo = registry_dir(&format!("attestations: true\n{REPO_YAML}"));
-        let (_, attestation, _) = Config::discover_merged_attested(repo.path(), None, &[]).unwrap();
+        let (_, attestation, _) =
+            Config::discover_merged_attested(repo.path(), None, &[], false).unwrap();
         assert!(attestation.attestations_enabled);
     }
 }

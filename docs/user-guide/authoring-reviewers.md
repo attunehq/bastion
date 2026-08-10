@@ -173,6 +173,8 @@ repository's reviewers alone, the `repo:` scope never appears there, and a perso
 reviewer can never gate someone else's change.
 `--config-dir <path>` (or `$BASTION_CONFIG_DIR`) overrides where the user-level file
 is read from. It does not enable merging by itself.
+`--include` adds files to the repository layer but does not suppress the personal
+fallback when no repository registry exists.
 
 The user-level file supports the full schema, though `attestations:` only has
 meaning in the repository's registry (a personal reviewer never gates a PR, so
@@ -639,7 +641,7 @@ With no file argument it validates the same set a local `bastion review` would r
 the repository registry when one exists, otherwise your user-level registry. Pass
 `--with-user-reviewers` to validate the merged set. The output names each source it
 loaded and lists every included registry file and prompt file it pulled in. An
-explicit `FILE` skips the user-level merging but still resolves the
+explicit `FILE` rejects `--with-user-reviewers` and still resolves the
 file fully: its `include:` entries, its prompt files, and any `--include` flags
 all load, as they would on a real review. It loads through the same path `bastion review` uses, so
 it catches exactly the errors a real review would hit at load time: malformed

@@ -246,6 +246,115 @@ fn a_user_only_registry_runs_when_the_repo_has_none() {
     assert_eq!(runs[0].reviewers, 1);
 }
 
+/// Discovery and loading start from the same git root. A registry below that root
+/// is not repository policy, even when the command runs from its directory, so the
+/// personal fallback remains available.
+#[test]
+fn a_subdirectory_registry_does_not_suppress_personal_fallback() {
+    let Some(fake) = tooling() else { return };
+
+    let repo = TestRepo::without_registry().with_user_registry(&registry(&[Reviewer::new(
+        "my-personal",
+        "codex",
+        "gate",
+    )
+    .behavior("pass")]));
+    let package = repo.path().join("package");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join(".bastion.yaml"),
+        registry(&[Reviewer::new("nested", "codex", "gate").behavior("block")]),
+    )
+    .unwrap();
+
+    let validation = repo.run_from(fake, &package, &["validate"], &[]);
+    let validation_stdout = String::from_utf8_lossy(&validation.stdout);
+    assert!(
+        validation.status.success(),
+        "stdout:\n{validation_stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&validation.stderr)
+    );
+    assert!(
+        validation_stdout.contains("my-personal"),
+        "stdout:\n{validation_stdout}"
+    );
+    assert!(
+        !validation_stdout.contains("nested"),
+        "stdout:\n{validation_stdout}"
+    );
+
+    let output = repo.run_from(
+        fake,
+        &package,
+        &["review", "--base", "main", "--format", "jsonl"],
+        &[],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("my-personal"), "stdout:\n{stdout}");
+    assert!(!stdout.contains("nested"), "stdout:\n{stdout}");
+}
+
+/// `--include` adds to the repository layer but does not claim that a repository
+/// registry exists. Personal fallback reviewers still run when it is the only
+/// discovered registry.
+#[test]
+fn an_include_does_not_suppress_personal_fallback() {
+    let Some(fake) = tooling() else { return };
+
+    let repo = TestRepo::without_registry().with_user_registry(&registry(&[Reviewer::new(
+        "my-personal",
+        "codex",
+        "gate",
+    )
+    .behavior("pass")]));
+    std::fs::write(
+        repo.path().join("extra.yaml"),
+        registry(&[Reviewer::new("included", "codex", "gate").behavior("pass")]),
+    )
+    .unwrap();
+
+    let run = repo.review_with_args(fake, &["--include", "extra.yaml"]);
+
+    assert!(run.exited_zero(), "stderr:\n{}", run.stderr);
+    assert_eq!(run.resolved_count(), 2);
+    assert_eq!(run.resolved("my-personal").0, Decision::Pass);
+    assert_eq!(run.resolved("included").0, Decision::Pass);
+}
+
+/// Explicit user-reviewer merging is incompatible with GitHub-source reviews,
+/// where personal reviewers must never enter the governed gate.
+#[test]
+fn a_github_source_rejects_user_reviewer_merging() {
+    let Some(fake) = tooling() else { return };
+
+    let repo = TestRepo::new(&registry(&[Reviewer::new("repo", "codex", "gate")]));
+    let output = repo.run(
+        fake,
+        &[
+            "review",
+            "--repo",
+            "attunehq/bastion",
+            "--pr",
+            "147",
+            "--with-user-reviewers",
+        ],
+        &[],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains("`--with-user-reviewers` cannot be used with `--repo`/`--pr`"),
+        "stderr:\n{stderr}"
+    );
+}
+
 /// A registry split across files reviews like one file: the root's `include:`
 /// pulls in a second registry whose reviewer reads its prompt from a markdown
 /// file, and both reviewers execute through the real binary and gate together.

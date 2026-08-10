@@ -7,7 +7,6 @@
 //! `docs/developer-guide/github-adapter.md`.
 
 use std::num::NonZeroU64;
-use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -83,7 +82,7 @@ pub enum Command {
         fresh: bool,
         /// Merge personal user-level reviewers with the repository's reviewers.
         /// Without this flag, personal reviewers are used only when no repository
-        /// registry or `--include` reviewer configuration exists.
+        /// registry exists.
         #[arg(long = "with-user-reviewers")]
         should_merge_user_reviewers: bool,
     },
@@ -96,8 +95,8 @@ pub enum Command {
         file: Option<PathBuf>,
         /// Merge personal user-level reviewers with the repository's reviewers.
         /// Without this flag, personal reviewers are used only when no repository
-        /// registry or `--include` reviewer configuration exists.
-        #[arg(long = "with-user-reviewers")]
+        /// registry exists.
+        #[arg(long = "with-user-reviewers", conflicts_with = "file")]
         should_merge_user_reviewers: bool,
     },
     /// Print a reviewer's saved session transcript (defaults to the latest run).
@@ -277,6 +276,9 @@ pub async fn run() -> Result<ExitCode> {
                 ),
                 (Some(_), None) | (None, None) => None,
             };
+            if github.is_some() && should_merge_user_reviewers {
+                bail!("`--with-user-reviewers` cannot be used with `--repo`/`--pr`");
+            }
             // User-level reviewers are a local-only convenience. A review carrying a
             // GitHub source (`--repo`/`--pr`, set under Actions) is the governed CI
             // path, so it runs the repository's reviewers alone: a self-hosted runner
@@ -284,16 +286,10 @@ pub async fn run() -> Result<ExitCode> {
             // reviewers into a PR's gate, and the `repo:` scope must never reach a
             // check run. A purely local review uses the user registry as a fallback,
             // or merges it when `--with-user-reviewers` explicitly asks for both.
-            let review_user_dir = if github.is_some() {
-                None
-            } else {
-                user_config_for_discovery(
-                    &cwd,
-                    user_config_dir.as_deref(),
-                    &cli.includes,
-                    should_merge_user_reviewers,
-                )?
-            };
+            let review_user_dir = github
+                .is_none()
+                .then_some(user_config_dir.as_deref())
+                .flatten();
             let options = crate::commands::ReviewOptions {
                 base,
                 format,
@@ -301,6 +297,7 @@ pub async fn run() -> Result<ExitCode> {
                 only: reviewers,
                 fresh,
                 includes: cli.includes,
+                should_merge_user_reviewers,
             };
             let decision = crate::commands::review(&layout, &cwd, options, review_user_dir).await?;
             // A blocked review is an expected, non-error outcome that must still
@@ -315,17 +312,14 @@ pub async fn run() -> Result<ExitCode> {
             should_merge_user_reviewers,
         } => {
             let cwd = std::env::current_dir().wrap_err("determining the current directory")?;
-            let validate_user_dir = match file.as_ref() {
-                Some(_) => None,
-                None => user_config_for_discovery(
-                    &cwd,
-                    user_config_dir.as_deref(),
-                    &cli.includes,
-                    should_merge_user_reviewers,
-                )?,
-            };
-            crate::commands::validate(&cwd, file.as_deref(), validate_user_dir, &cli.includes)
-                .map(|()| ExitCode::SUCCESS)
+            crate::commands::validate(
+                &cwd,
+                file.as_deref(),
+                user_config_dir.as_deref(),
+                &cli.includes,
+                should_merge_user_reviewers,
+            )
+            .map(|()| ExitCode::SUCCESS)
         }
         Command::Transcript { first, second } => {
             let (run, reviewer) = match second {
@@ -385,30 +379,6 @@ pub async fn run() -> Result<ExitCode> {
         Command::UpdateCheck => crate::commands::update_check_worker()
             .await
             .map(|()| ExitCode::SUCCESS),
-    }
-}
-
-/// Select the user-level registry for local discovery.
-///
-/// Personal reviewers are the fallback when the repository has no reviewer
-/// configuration of its own. `--with-user-reviewers` opts into the additive
-/// merge when a repository registry or explicit `--include` layer exists.
-///
-/// # Errors
-///
-/// Returns an error when repository registry discovery cannot inspect a
-/// candidate path.
-fn user_config_for_discovery<'a>(
-    cwd: &Path,
-    user_dir: Option<&'a Path>,
-    includes: &[PathBuf],
-    should_merge_user_reviewers: bool,
-) -> Result<Option<&'a Path>> {
-    let has_repository_config = crate::config::locate_kind(cwd)?.is_some() || !includes.is_empty();
-    if has_repository_config && !should_merge_user_reviewers {
-        Ok(None)
-    } else {
-        Ok(user_dir)
     }
 }
 
@@ -570,6 +540,19 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn validate_file_rejects_user_reviewer_merging() {
+        let error = Cli::try_parse_from([
+            "bastion",
+            "validate",
+            "config/.bastion.yaml",
+            "--with-user-reviewers",
+        ])
+        .expect_err("an explicit file cannot merge the user registry");
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]

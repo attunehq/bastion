@@ -18,10 +18,10 @@ through it.
 | [`src/main.rs`](../../src/main.rs) | Thin binary entrypoint; wires the tokio runtime to `bastion::run`. |
 | [`src/lib.rs`](../../src/lib.rs) | Library root; installs `color_eyre` + `tracing` and dispatches. |
 | [`src/version.rs`](../../src/version.rs) | Exposes the build-derived version string. |
-| [`src/cli.rs`](../../src/cli.rs) | The clap derive command tree and dispatch; maps a `block` aggregate to a non-zero exit and selects the fallback or explicitly merged user-level registry. |
+| [`src/cli.rs`](../../src/cli.rs) | The clap derive command tree and dispatch; maps a `block` aggregate to a non-zero exit and rejects incompatible source and reviewer-selection flags. |
 | [`src/commands/`](../../src/commands/) | One module per subcommand (`review`, `validate`, `read_back`, `codeowners`, `attest`, `update`, `github_report`, `skills`); `mod.rs` re-exports the CLI surface `cli.rs` calls. |
 | [`src/reviewer.rs`](../../src/reviewer.rs) | The declarative reviewer schema (`Reviewer`, `Mode`, `Backend`, `Capabilities`, `RunnerSpec`, `AttestationPolicy`). |
-| [`src/config.rs`](../../src/config.rs) | Registry loading, discovery, and merge. Walks up for a repository `.bastion.yaml` or `.bastion.yml` (with a deprecated `bastion/reviewers.yaml` fallback that warns) and, via `discover_merged`, layers in a user-level registry from the platform config dir (`user_config_dir`, override `BASTION_CONFIG_DIR`). The merge is a set keyed by name: an identical reviewer in both files is deduplicated, and a same-name-different-config collision keeps both with the repo side scoped to `REPO_SCOPE_PREFIX` (`repo:`). Validates name uniqueness and run-store path-component uniqueness over the merged set. |
+| [`src/config.rs`](../../src/config.rs) | Registry loading, discovery, fallback selection, and merge. Walks up for a repository `.bastion.yaml` or `.bastion.yml` (with a deprecated `bastion/reviewers.yaml` fallback that warns) and uses a user-level registry from the platform config dir (`user_config_dir`, override `BASTION_CONFIG_DIR`) when no repository registry exists or the caller opts into merging. The merge is a set keyed by name: an identical reviewer in both files is deduplicated, and a same-name-different-config collision keeps both with the repo side scoped to `REPO_SCOPE_PREFIX` (`repo:`). Validates name uniqueness and run-store path-component uniqueness over the merged set. |
 | [`src/routing.rs`](../../src/routing.rs) | Compiling path triggers and agent-trigger prefilters, then selecting candidates from the changed files. |
 | [`src/verdict.rs`](../../src/verdict.rs) | The structured verdict (`Decision`, `Verdict`, `Finding`, `Usage`, and `Money`, which carries cents but serializes as dollars). |
 | [`src/context.rs`](../../src/context.rs) | The transport-neutral review context (`ReviewContext`): the author's stated intent, the surrounding discussion (`ContextComment` with a generic `Standing`), and a reviewer's prior findings (`PriorFinding`, keyed by a content-derived `FindingId`). A producer fills it; the backends consume it through `render_for`. Everything in it is untrusted input. |
@@ -68,17 +68,18 @@ Following one review top to bottom touches most of the crate:
    resolved into a `Layout` (`paths.rs`), from `--data-dir`/`BASTION_DATA_DIR` or
    the platform default. The user-level config directory is resolved the same way,
    from `--config-dir`/`BASTION_CONFIG_DIR` or the platform default. A purely local
-   review uses it when no repository configuration exists, or when
-   `--with-user-reviewers` explicitly requests a merge. It is withheld from a
-   governed review carrying a GitHub source via `--repo`/`--pr`, so CI never merges
-   ungoverned reviewers.
+   review passes it into config discovery, which uses it when no repository
+   configuration exists or when `--with-user-reviewers` explicitly requests a
+   merge. A governed review carrying a GitHub source via `--repo`/`--pr` rejects
+   that flag and withholds the user directory, so CI never merges ungoverned
+   reviewers.
 2. **Load policy** (`config.rs`). `discover_merged` finds the repository registry by
-   walking up from the cwd for `.bastion.yaml` (or `.bastion.yml`). The CLI passes
-   the user-level registry only as a fallback or when `--with-user-reviewers` asks
-   for the merged set (identical reviewers deduplicated, a
-   same-name-different-config collision keeping both with the repo side scoped to
-   `repo:`). Within each layer,
-   loading first resolves the file layout: `include:`d registry files merge in
+   walking up from the repository root for `.bastion.yaml` (or `.bastion.yml`). The
+   same discovery decides whether the user-level registry is a fallback or whether
+   `--with-user-reviewers` asks for the merged set. Identical reviewers are
+   deduplicated, while a same-name-different-config collision keeps both with the
+   repo side scoped to `repo:`. Within each layer, loading first resolves the file
+   layout: `include:`d registry files merge in
    (recursively, each loaded once), `--include` files join the repository layer,
    and `prompt: {file: ...}` references are inlined, so a `Config` in hand always
    carries flat reviewers with real prompt text. Any one source (a repo registry, a
