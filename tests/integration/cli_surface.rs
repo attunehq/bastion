@@ -300,6 +300,58 @@ fn a_subdirectory_registry_does_not_suppress_personal_fallback() {
     assert!(!stdout.contains("nested"), "stdout:\n{stdout}");
 }
 
+/// Git can resolve a worktree even when the process starts outside it. Reviewer
+/// selection follows that resolved root, so an unrelated cwd cannot make a
+/// repository registry disappear and silently restore personal reviewers.
+#[test]
+fn an_external_cwd_uses_the_worktree_root_for_reviewer_selection() {
+    let Some(fake) = tooling() else { return };
+
+    let repo = TestRepo::new(&registry(&[
+        Reviewer::new("repo-only", "codex", "gate").behavior("pass")
+    ]))
+    .with_user_registry(&registry(&[
+        Reviewer::new("user-only", "codex", "gate").behavior("block")
+    ]));
+    let external_cwd = tempfile::tempdir().unwrap();
+    let git_dir = repo.path().join(".git");
+    let git_env = [
+        ("GIT_DIR", git_dir.to_str().unwrap()),
+        ("GIT_WORK_TREE", repo.path().to_str().unwrap()),
+    ];
+
+    let validation = repo.run_from(fake, external_cwd.path(), &["validate"], &git_env);
+    let validation_stdout = String::from_utf8_lossy(&validation.stdout);
+    assert!(
+        validation.status.success(),
+        "stdout:\n{validation_stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&validation.stderr)
+    );
+    assert!(
+        validation_stdout.contains("repo-only"),
+        "stdout:\n{validation_stdout}"
+    );
+    assert!(!validation_stdout.contains("user-only"));
+
+    let review = repo.run_from(
+        fake,
+        external_cwd.path(),
+        &["review", "--base", "main", "--format", "jsonl"],
+        &git_env,
+    );
+    let review_stdout = String::from_utf8_lossy(&review.stdout);
+    assert!(
+        review.status.success(),
+        "stdout:\n{review_stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&review.stderr)
+    );
+    assert!(
+        review_stdout.contains("repo-only"),
+        "stdout:\n{review_stdout}"
+    );
+    assert!(!review_stdout.contains("user-only"));
+}
+
 /// `--include` adds to the repository layer but does not claim that a repository
 /// registry exists. Personal fallback reviewers still run when it is the only
 /// discovered registry.
