@@ -103,8 +103,36 @@ fn the_legacy_registry_location_still_works_with_a_deprecation_warning() {
     );
 }
 
-/// A user-level registry merges with the repository's through the real binary: a
-/// reviewer the user keeps in their config dir runs locally even when the repo
+/// A repository registry suppresses fallback user-level reviewers by default, so
+/// the local run matches the repository-governed reviewer set without extra model
+/// calls.
+#[test]
+fn a_repository_registry_uses_only_repository_reviewers_by_default() {
+    let Some(fake) = tooling() else { return };
+
+    let repo = TestRepo::new(&registry(&[
+        Reviewer::new("repo-only", "codex", "gate").behavior("pass")
+    ]))
+    .with_user_registry(&registry(&[Reviewer::new(
+        "user-only",
+        "claude-code",
+        "gate",
+    )
+    .behavior("pass")]));
+
+    let run = repo.review(fake);
+
+    assert!(run.exited_zero(), "stderr:\n{}", run.stderr);
+    let (decision, gates, _cost) = run.completed();
+    assert_eq!(decision, Decision::Pass);
+    assert_eq!(gates.total, 1);
+    assert_eq!(run.resolved_count(), 1);
+    assert_eq!(run.resolved("repo-only").0, Decision::Pass);
+}
+
+/// `--with-user-reviewers` merges a user-level registry with the repository's
+/// through the real binary. A reviewer the user keeps in their config dir runs
+/// locally even when the repo
 /// never defined it, an identical reviewer present in both files is deduplicated,
 /// and a same-name reviewer whose config differs survives under the `repo:` scope
 /// alongside the user's. This is the local-only path; CI, with no user config dir,
@@ -130,7 +158,7 @@ fn a_user_registry_merges_with_the_repository_registry() {
             .prompt("user prompt"),
     ]));
 
-    let run = repo.review(fake);
+    let run = repo.review_with_args(fake, &["--with-user-reviewers"]);
 
     assert!(run.exited_zero(), "stderr:\n{}", run.stderr);
     let (decision, gates, _cost) = run.completed();
@@ -150,6 +178,46 @@ fn a_user_registry_merges_with_the_repository_registry() {
 
     let runs = store::list_runs(&repo.layout()).unwrap();
     assert_eq!(runs[0].reviewers, 5);
+}
+
+/// `validate` follows the same fallback and explicit-merge rules as `review`.
+#[test]
+fn validate_merges_user_reviewers_only_when_requested() {
+    let Some(fake) = tooling() else { return };
+
+    let repo = TestRepo::new(&registry(&[Reviewer::new("repo-only", "codex", "gate")]))
+        .with_user_registry(&registry(&[Reviewer::new(
+            "user-only",
+            "claude-code",
+            "advisor",
+        )]));
+
+    let fallback = repo.run(fake, &["validate"], &[]);
+    assert!(
+        fallback.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&fallback.stderr)
+    );
+    let fallback_stdout = String::from_utf8_lossy(&fallback.stdout);
+    assert!(
+        fallback_stdout.contains("1 reviewer(s), 1 gate(s), 0 advisor(s)"),
+        "stdout:\n{fallback_stdout}"
+    );
+    assert!(!fallback_stdout.contains("user-only"));
+
+    let merged = repo.run(fake, &["validate", "--with-user-reviewers"], &[]);
+    assert!(
+        merged.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&merged.stderr)
+    );
+    let merged_stdout = String::from_utf8_lossy(&merged.stdout);
+    assert!(
+        merged_stdout.contains("2 reviewer(s), 1 gate(s), 1 advisor(s)"),
+        "stdout:\n{merged_stdout}"
+    );
+    assert!(merged_stdout.contains("repo-only"));
+    assert!(merged_stdout.contains("user-only"));
 }
 
 /// A repository with no registry of its own still runs the user's personal
@@ -176,6 +244,229 @@ fn a_user_only_registry_runs_when_the_repo_has_none() {
 
     let runs = store::list_runs(&repo.layout()).unwrap();
     assert_eq!(runs[0].reviewers, 1);
+}
+
+/// Discovery and loading start from the same git root. A registry below that root
+/// is not repository policy, even when the command runs from its directory, so the
+/// personal fallback remains available.
+#[test]
+fn a_subdirectory_registry_does_not_suppress_personal_fallback() {
+    let Some(fake) = tooling() else { return };
+
+    let repo = TestRepo::without_registry().with_user_registry(&registry(&[Reviewer::new(
+        "my-personal",
+        "codex",
+        "gate",
+    )
+    .behavior("pass")]));
+    let package = repo.path().join("package");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join(".bastion.yaml"),
+        registry(&[Reviewer::new("nested", "codex", "gate").behavior("block")]),
+    )
+    .unwrap();
+
+    let validation = repo.run_from(fake, &package, &["validate"], &[]);
+    let validation_stdout = String::from_utf8_lossy(&validation.stdout);
+    assert!(
+        validation.status.success(),
+        "stdout:\n{validation_stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&validation.stderr)
+    );
+    assert!(
+        validation_stdout.contains("my-personal"),
+        "stdout:\n{validation_stdout}"
+    );
+    assert!(
+        !validation_stdout.contains("nested"),
+        "stdout:\n{validation_stdout}"
+    );
+
+    let output = repo.run_from(
+        fake,
+        &package,
+        &["review", "--base", "main", "--format", "jsonl"],
+        &[],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("my-personal"), "stdout:\n{stdout}");
+    assert!(!stdout.contains("nested"), "stdout:\n{stdout}");
+}
+
+/// Git can resolve a worktree even when the process starts outside it. Reviewer
+/// selection follows that resolved root, so an unrelated cwd cannot make a
+/// repository registry disappear and silently restore personal reviewers.
+#[test]
+fn an_external_cwd_uses_the_worktree_root_for_reviewer_selection() {
+    let Some(fake) = tooling() else { return };
+
+    let repo = TestRepo::new(&registry(&[
+        Reviewer::new("repo-only", "codex", "gate").behavior("pass")
+    ]))
+    .with_user_registry(&registry(&[
+        Reviewer::new("user-only", "codex", "gate").behavior("block")
+    ]));
+    let external_cwd = tempfile::tempdir().unwrap();
+    let git_dir = repo.path().join(".git");
+    let git_env = [
+        ("GIT_DIR", git_dir.to_str().unwrap()),
+        ("GIT_WORK_TREE", repo.path().to_str().unwrap()),
+    ];
+
+    let validation = repo.run_from(fake, external_cwd.path(), &["validate"], &git_env);
+    let validation_stdout = String::from_utf8_lossy(&validation.stdout);
+    assert!(
+        validation.status.success(),
+        "stdout:\n{validation_stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&validation.stderr)
+    );
+    assert!(
+        validation_stdout.contains("repo-only"),
+        "stdout:\n{validation_stdout}"
+    );
+    assert!(!validation_stdout.contains("user-only"));
+
+    let review = repo.run_from(
+        fake,
+        external_cwd.path(),
+        &["review", "--base", "main", "--format", "jsonl"],
+        &git_env,
+    );
+    let review_stdout = String::from_utf8_lossy(&review.stdout);
+    assert!(
+        review.status.success(),
+        "stdout:\n{review_stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&review.stderr)
+    );
+    assert!(
+        review_stdout.contains("repo-only"),
+        "stdout:\n{review_stdout}"
+    );
+    assert!(!review_stdout.contains("user-only"));
+}
+
+/// `--include` adds to the repository layer but does not claim that a repository
+/// registry exists. Personal fallback reviewers still run when it is the only
+/// discovered registry.
+#[test]
+fn an_include_does_not_suppress_personal_fallback() {
+    let Some(fake) = tooling() else { return };
+
+    let repo = TestRepo::without_registry().with_user_registry(&registry(&[Reviewer::new(
+        "my-personal",
+        "codex",
+        "gate",
+    )
+    .behavior("pass")]));
+    std::fs::write(
+        repo.path().join("extra.yaml"),
+        registry(&[Reviewer::new("included", "codex", "gate").behavior("pass")]),
+    )
+    .unwrap();
+
+    let run = repo.review_with_args(fake, &["--include", "extra.yaml"]);
+
+    assert!(run.exited_zero(), "stderr:\n{}", run.stderr);
+    assert_eq!(run.resolved_count(), 2);
+    assert_eq!(run.resolved("my-personal").0, Decision::Pass);
+    assert_eq!(run.resolved("included").0, Decision::Pass);
+}
+
+/// Explicit user-reviewer merging is incompatible with GitHub-source reviews,
+/// where personal reviewers must never enter the governed gate.
+#[test]
+fn a_github_source_rejects_user_reviewer_merging() {
+    let Some(fake) = tooling() else { return };
+
+    let repo = TestRepo::new(&registry(&[Reviewer::new("repo", "codex", "gate")]));
+    let output = repo.run(
+        fake,
+        &[
+            "review",
+            "--repo",
+            "attunehq/bastion",
+            "--pr",
+            "147",
+            "--with-user-reviewers",
+        ],
+        &[],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains("`--with-user-reviewers` cannot be used with `--repo`/`--pr`"),
+        "stderr:\n{stderr}"
+    );
+}
+
+/// A repository hint without a PR still cannot be combined with personal
+/// reviewers. Reject it rather than silently treating the invocation as local.
+#[test]
+fn a_repo_hint_rejects_user_reviewer_merging() {
+    let Some(fake) = tooling() else { return };
+
+    let repo = TestRepo::new(&registry(&[Reviewer::new("repo", "codex", "gate")]));
+    let output = repo.run(
+        fake,
+        &[
+            "review",
+            "--repo",
+            "attunehq/bastion",
+            "--with-user-reviewers",
+        ],
+        &[],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains("`--with-user-reviewers` cannot be used with `--repo`/`--pr`"),
+        "stderr:\n{stderr}"
+    );
+}
+
+/// Actions exports `GITHUB_REPOSITORY` for every process. That ambient fallback
+/// is not an explicit GitHub-source request when no PR number is present, so it
+/// must not prevent an otherwise local personal-reviewer merge.
+#[test]
+fn an_ambient_github_repository_allows_local_user_reviewer_merging() {
+    let Some(fake) = tooling() else { return };
+
+    let repo = TestRepo::new(&registry(&[
+        Reviewer::new("repo-only", "codex", "gate").behavior("pass")
+    ]))
+    .with_user_registry(&registry(&[
+        Reviewer::new("user-only", "codex", "gate").behavior("pass")
+    ]));
+    let output = repo.run(
+        fake,
+        &[
+            "review",
+            "--base",
+            "main",
+            "--with-user-reviewers",
+            "--format",
+            "jsonl",
+        ],
+        &[("GITHUB_REPOSITORY", "attunehq/bastion")],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("repo-only"), "stdout:\n{stdout}");
+    assert!(stdout.contains("user-only"), "stdout:\n{stdout}");
 }
 
 /// A registry split across files reviews like one file: the root's `include:`

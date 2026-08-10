@@ -54,6 +54,10 @@ pub struct ReviewOptions {
     /// them. Part of the effective repository config, so they move the config
     /// hash that carry and attestation bind.
     pub includes: Vec<std::path::PathBuf>,
+    /// Merge the user-level registry when a repository registry exists. Without
+    /// this opt-in, personal reviewers are a fallback for repositories without a
+    /// registry.
+    pub should_merge_user_reviewers: bool,
 }
 
 /// `bastion review`: route and run the triggered reviewers, gating the result.
@@ -85,11 +89,11 @@ pub struct ReviewOptions {
 /// `cwd` is the directory to resolve the repository and config from: the process
 /// working directory in normal use, but explicit so the handler is testable.
 ///
-/// `user_dir` is the user-level config directory whose reviewers are merged with
-/// the repository's (`None` to skip it). This is how a personal reviewer runs
-/// locally even when the repository does not adopt Bastion in CI; an identical
-/// reviewer in both files is deduplicated and a same-name collision keeps both with
-/// the repo side scoped (see [`Config::discover_merged`]).
+/// `user_dir` is the user-level config directory (`None` to skip it). Personal
+/// reviewers are used as a fallback when the repository has no registry, or are
+/// merged when `options.should_merge_user_reviewers` is set. An identical reviewer
+/// in both files is deduplicated and a same-name collision keeps both with the repo
+/// side scoped (see [`Config::discover_merged`]).
 ///
 /// `options.github` carries the `owner/name` slug and PR number when the review runs
 /// against a pull request, so the reviewers get its description and discussion as
@@ -114,13 +118,18 @@ pub async fn review(
         only,
         fresh,
         includes,
+        should_merge_user_reviewers,
     } = options;
     let base = base.as_str();
     let repo_root = git::repo_root(cwd)?;
     warn_on_stale_skills(&repo_root);
     let branch = git::current_branch(&repo_root)?;
-    let (_sources, repo_attestation, config) =
-        Config::discover_merged_attested(&repo_root, user_dir, &includes)?;
+    let (_sources, repo_attestation, config) = Config::discover_merged_attested(
+        &repo_root,
+        user_dir,
+        &includes,
+        should_merge_user_reviewers,
+    )?;
     // The changeset is defined against the merge base with `base`, never the
     // base branch's tip: a tip that has moved on since this branch forked
     // would put the base's own changes under review and route reviewers at

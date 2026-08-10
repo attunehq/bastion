@@ -79,8 +79,8 @@ executes in parallel, records an agent-trigger skip, replays from a verified
 attestation (CI), or carries its unchanged pass forward from the branch's previous
 run (local or CI). Their terminal outcomes aggregate into one decision: every
 applicable gate must pass, while a semantic skip counts separately from a pass.
-A local run can also merge in personal reviewers from a user-level `.bastion.yaml`,
-so you can run a reviewer locally even where a repo has not adopted Bastion. An
+A local run uses personal reviewers from a user-level `.bastion.yaml` when a repo
+has not adopted Bastion, or merges them with `--with-user-reviewers`. An
 authoring agent loops `bastion review` until it is green, then opens a PR where CI
 executes, skips, replays, or carries the repository's reviewers (the user-level ones are local-only).
 CI usually confirms the result, and can differ when it adds the PR's description and

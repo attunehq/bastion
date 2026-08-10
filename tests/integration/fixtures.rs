@@ -364,10 +364,9 @@ impl TestRepo {
         Self { repo, data, config }
     }
 
-    /// Write a user-level `.bastion.yaml` into this repo's isolated config dir, so a
-    /// `review`/`validate` run layers its reviewers beneath the repository's. This is
-    /// the local-only path: a reviewer a user keeps in their config dir runs even when
-    /// the repository does not adopt Bastion in CI.
+    /// Write a user-level `.bastion.yaml` into this repo's isolated config dir. A
+    /// `review`/`validate` run uses it as a fallback when the repository has no
+    /// registry, or merges it when `--with-user-reviewers` is passed.
     pub(crate) fn with_user_registry(self, yaml: &str) -> Self {
         std::fs::write(self.config.path().join(".bastion.yaml"), yaml).unwrap();
         self
@@ -404,10 +403,21 @@ impl TestRepo {
     /// backends, this repo's private data directory, and any `extra_env` (which
     /// Bastion inherits and propagates to the agent child).
     pub(crate) fn run(&self, fake: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> Output {
+        self.run_from(fake, self.repo.path(), args, extra_env)
+    }
+
+    /// Run `bastion <args>` from a directory inside this repo.
+    pub(crate) fn run_from(
+        &self,
+        fake: &Path,
+        cwd: &Path,
+        args: &[&str],
+        extra_env: &[(&str, &str)],
+    ) -> Output {
         let mut command = Command::new(bastion_bin());
         command
             .args(args)
-            .current_dir(self.repo.path())
+            .current_dir(cwd)
             .env("BASTION_DATA_DIR", self.data.path())
             // Point the user-level config dir at this repo's isolated (empty by
             // default) directory, so the developer's real `~/.config/bastion` never

@@ -26,8 +26,9 @@ prompts, each responsible for exactly one property, run over a changeset. Becaus
 each reviewer owns one concern, it stays at high recall; you cover more ground by
 adding narrow reviewers, never by broadening one. The repository's reviewers run
 locally (fast, pre-PR) and in CI (authoritative), and their verdicts aggregate into
-one merge gate; locally you can also add personal user-level reviewers that CI does
-not run. The human moves from reviewing diffs to authoring, curating, and governing
+one merge gate; locally you can also use personal fallback reviewers, or merge them
+with `--with-user-reviewers`. CI does not run personal reviewers. The human moves
+from reviewing diffs to authoring, curating, and governing
 the reviewers.
 
 The `bastion` CLI is the local surface: an authoring agent loops `bastion review`
