@@ -609,6 +609,7 @@ impl Config {
                     reviewer.name
                 );
             }
+            crate::routing::TriggerMatcher::compile(reviewer)?;
             // A reviewer name becomes a directory component in the run store, mapped
             // to a portable form first (`crate::paths`). Two distinct names that map
             // to the same component, or a degenerate one that escapes or names the
@@ -1101,6 +1102,35 @@ reviewers:
     }
 
     #[test]
+    fn rejects_invalid_path_trigger_pattern_lists() {
+        for (trigger, expected) in [
+            ("[]", "empty path trigger"),
+            ("['!']", "bare `!`"),
+            ("['!src/generated/**']", "at least one positive glob"),
+            ("['src/[unclosed']", "invalid trigger glob"),
+        ] {
+            let yaml = format!(
+                "reviewers:\n  - name: bad\n    trigger: {trigger}\n    mode: gate\n    prompt: p\n"
+            );
+            let err = Config::from_yaml(&yaml, Path::new(".")).unwrap_err();
+            assert!(
+                format!("{err:#}").contains(expected),
+                "trigger {trigger} should report {expected}, got: {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_empty_agent_paths_and_ordered_agent_path_patterns() {
+        for paths in ["[]", "[src/**, '!src/generated/**']"] {
+            let yaml = format!(
+                "reviewers:\n  - name: semantic\n    trigger:\n      kind: agent\n      prompt: decide\n      paths: {paths}\n    mode: gate\n    prompt: p\n"
+            );
+            Config::from_yaml(&yaml, Path::new(".")).expect("valid agent paths");
+        }
+    }
+
+    #[test]
     fn rejects_an_unknown_reviewer_field() {
         // A misspelled or stray key is a mistake, not a no-op: `deny_unknown_fields`
         // turns it into a clear load error rather than silently ignoring it.
@@ -1571,6 +1601,25 @@ reviewer:
         assert_ne!(
             before, after,
             "editing a prompt file edits the effective policy"
+        );
+    }
+
+    #[test]
+    fn effective_hash_binds_trigger_pattern_order_and_polarity() {
+        let included_last = Config::from_yaml(
+            "reviewers:\n  - name: docs\n    trigger: ['!docs/private/**', 'docs/**']\n    mode: gate\n    prompt: p\n",
+            Path::new("."),
+        )
+        .unwrap();
+        let excluded_last = Config::from_yaml(
+            "reviewers:\n  - name: docs\n    trigger: ['docs/**', '!docs/private/**']\n    mode: gate\n    prompt: p\n",
+            Path::new("."),
+        )
+        .unwrap();
+
+        assert_ne!(
+            included_last.effective_hash(),
+            excluded_last.effective_hash()
         );
     }
 

@@ -66,7 +66,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use color_eyre::eyre::{Context, Result};
-use globset::{Glob, GlobSetBuilder};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -74,6 +73,7 @@ use crate::event::{RunEvent, RunId};
 use crate::git;
 use crate::paths::Layout;
 use crate::reviewer::{AttestationPolicy, Reviewer};
+use crate::routing::TriggerMatcher;
 use crate::store;
 use crate::verdict::Decision;
 
@@ -178,27 +178,15 @@ fn untracked_descriptor(repo_root: &Path, path: &str) -> std::io::Result<String>
 ///
 /// # Errors
 ///
-/// Returns an error if a trigger glob fails to compile (the router would have
-/// rejected it first in practice), a git query fails, or an untracked matched
-/// file cannot be read.
+/// Returns an error if the trigger matcher cannot compile, a git query fails,
+/// or an untracked matched file cannot be read.
 pub fn scope_digest(
     repo_root: &Path,
     merge_base: &str,
     reviewer: &Reviewer,
     changed: &[String],
 ) -> Result<String> {
-    let mut builder = GlobSetBuilder::new();
-    for pattern in reviewer.trigger.paths() {
-        builder.add(Glob::new(pattern).wrap_err_with(|| {
-            format!(
-                "reviewer '{}' has an invalid trigger glob: {pattern}",
-                reviewer.name
-            )
-        })?);
-    }
-    let globs = builder
-        .build()
-        .wrap_err_with(|| format!("building trigger matcher for reviewer '{}'", reviewer.name))?;
+    let matcher = TriggerMatcher::compile(reviewer)?;
 
     // Agent-trigger paths only decide whether the routing call is worth making.
     // Once admitted, that call sees the full changeset, so a carried verdict must
@@ -207,7 +195,7 @@ pub fn scope_digest(
     let mut files: Vec<&str> = changed
         .iter()
         .map(String::as_str)
-        .filter(|path| scope_all || globs.is_match(path))
+        .filter(|path| scope_all || matcher.is_match(path))
         .collect();
     files.sort_unstable();
 
@@ -487,6 +475,34 @@ mod tests {
         let changed = git::changed_files(dir, &merge_base).unwrap();
         let after_src_edit = scope_digest(dir, &merge_base, &src, &changed).unwrap();
         assert_ne!(first, after_src_edit);
+    }
+
+    #[test]
+    fn digest_scope_applies_ordered_trigger_exclusions() {
+        let tmp = repo();
+        let dir = tmp.path();
+        std::fs::create_dir_all(dir.join("docs/audit-reports")).unwrap();
+        std::fs::write(dir.join("docs/audit-reports/old.md"), "old\n").unwrap();
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-m", "add audit report"]);
+        git(dir, &["branch", "-f", "base", "HEAD"]);
+
+        std::fs::write(dir.join("docs/guide.md"), "guide, edited\n").unwrap();
+        std::fs::write(dir.join("docs/audit-reports/old.md"), "old, edited\n").unwrap();
+        let merge_base = git::merge_base(dir, "base").unwrap();
+        let changed = git::changed_files(dir, &merge_base).unwrap();
+        let docs = reviewer("docs", &["docs/**", "!docs/audit-reports/**"]);
+        let first = scope_digest(dir, &merge_base, &docs, &changed).unwrap();
+
+        std::fs::write(dir.join("docs/audit-reports/old.md"), "old, edited again\n").unwrap();
+        let changed = git::changed_files(dir, &merge_base).unwrap();
+        let after_excluded_edit = scope_digest(dir, &merge_base, &docs, &changed).unwrap();
+        assert_eq!(first, after_excluded_edit);
+
+        std::fs::write(dir.join("docs/guide.md"), "guide, edited again\n").unwrap();
+        let changed = git::changed_files(dir, &merge_base).unwrap();
+        let after_included_edit = scope_digest(dir, &merge_base, &docs, &changed).unwrap();
+        assert_ne!(first, after_included_edit);
     }
 
     #[test]

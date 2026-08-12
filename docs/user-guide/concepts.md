@@ -36,12 +36,14 @@ Two properties matter most:
 ## The trigger and the changeset
 
 A reviewer's **trigger** decides whether the reviewer applies to a changeset.
-The usual form is a list of path globs; the reviewer runs when at least one
-changed file matches. A docs-only change then wakes the docs reviewers and
+The usual form is an ordered list of path globs; the reviewer runs when at least
+one changed file is included. A leading `!` excludes a path, and the last
+matching pattern wins. A docs-only change then wakes the docs reviewers and
 nothing else.
 
 ```yaml
 trigger: [src/server/**, src/client/**]   # runs when server or client code changed
+trigger: ["docs/**", "!docs/audit-reports/**"]   # skips audit snapshots
 ```
 
 For a concern that paths cannot identify narrowly, `kind: agent` asks a cheaper

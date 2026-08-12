@@ -181,6 +181,22 @@ mod tests {
     }
 
     #[test]
+    fn validate_reports_a_malformed_trigger_glob() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".bastion.yaml");
+        std::fs::write(
+            &path,
+            "reviewers:\n  - name: bad\n    trigger: ['src/[unclosed']\n    mode: gate\n    prompt: p\n",
+        )
+        .unwrap();
+        let err = validate(tmp.path(), Some(&path), None, &[], false).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("invalid trigger glob"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
     fn validate_discovers_from_the_directory_when_no_file_is_given() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(
