@@ -173,9 +173,11 @@ reviewers:
       If it fails, block the PR and explain; otherwise, approve it.
 ```
 
-`trigger` is a sum type. A sequence is the path-only form. The tagged `agent`
-form uses optional `paths` as an AND prefilter, then runs its own backend profile
-over the actual changeset. With no paths it considers every non-empty changeset.
+`trigger` is a sum type. A sequence is the path-only form. Its patterns are
+ordered: a leading `!` excludes a match, and the last matching pattern wins. The
+tagged `agent` form uses optional `paths` with the same rules as an AND
+prefilter, then runs its own backend profile over the actual changeset. With no
+paths it considers every non-empty changeset.
 The routing prompt is inline text. Registry defaults fill an omitted trigger
 model and effort, while the trigger backend remains independent from the full
 reviewer's backend.

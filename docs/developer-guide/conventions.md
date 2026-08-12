@@ -37,8 +37,10 @@ subprocess output, agent responses) is parsed *once*, at the edge, into a precis
 type that makes invalid states unrepresentable, rather than carried around
 stringly-typed and re-checked at each use. Examples in the codebase:
 
-- Raw trigger strings on a `Reviewer` are compiled into a glob matcher *once* by
-  [`routing.rs`](../../src/routing.rs); the compiled form is a distinct type.
+- Raw trigger strings on a `Reviewer` are checked during config loading and
+  compiled through the shared `TriggerMatcher` in
+  [`routing.rs`](../../src/routing.rs). Routing and carry therefore use the same
+  ordered inclusion and exclusion policy.
 - Durations and the data directory are parsed at the CLI/`paths` boundary, not
   re-parsed downstream.
 - A backend parses the agent's envelope into a `Verdict` at the boundary; nothing

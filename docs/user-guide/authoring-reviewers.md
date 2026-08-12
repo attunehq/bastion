@@ -260,18 +260,24 @@ A unique identifier. It is also the reviewer's check-run name in CI
 
 ### `trigger`
 
-A path trigger is a list of globs matched against the changed files. The reviewer
-runs if any changed file matches any glob. Globs use the usual `**` (any depth)
-and `*` (one segment) syntax:
+A path trigger is an ordered list of globs matched against the changed files.
+The reviewer runs when at least one changed file is included. A leading `!`
+excludes a match, and the last matching pattern wins, so a later positive
+pattern can include a path again. Globs use the usual `**` (any depth) and `*`
+(one segment) syntax:
 
 ```yaml
 trigger: [src/**/*.rs]                       # all Rust under src, any depth
 trigger: [src/server/**, src/client/**]      # either subtree
 trigger: [src/**/*.rs, docs/**/*.md, ".bastion.yaml"]   # multiple kinds
+trigger: ["docs/**/*.md", "!docs/audit-reports/**"]    # docs except snapshots
+trigger: ["docs/**", "!docs/generated/**", docs/generated/index.md] # include one again
 ```
 
 Quote a glob if YAML would otherwise mis-parse it (a bare leading `*`, for
-instance).
+instance). Quote every exclusion because YAML treats a bare leading `!` as a
+tag. A path trigger must contain at least one positive pattern. Empty and
+exclusion-only lists are invalid.
 
 When paths cannot express the concern without waking an expensive reviewer on
 most changes, use an agent trigger:
@@ -295,8 +301,9 @@ reviewers:
       ...
 ```
 
-`paths` is an optional cheap prefilter. With it, both conditions must hold: a
-changed path matches and the trigger agent decides `run`. Without it, Bastion
+`paths` is an optional cheap prefilter and uses the same ordered inclusion and
+exclusion rules. With it, both conditions must hold: a changed path is included
+and the trigger agent decides `run`. Without it, Bastion
 asks the trigger agent on every non-empty changeset. The trigger agent receives
 the actual changeset but not the author's description or PR discussion, so a
 claim about relevance cannot suppress review. It runs with no capabilities,

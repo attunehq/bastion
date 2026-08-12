@@ -241,7 +241,7 @@ pub struct PromptFile {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Trigger {
-    /// Run whenever any changed path matches one of these globs.
+    /// Run when a changed path is included by these ordered glob patterns.
     Paths(Vec<String>),
     /// Use an agent decision after an optional path prefilter.
     Agent(AgentTrigger),
@@ -303,8 +303,9 @@ pub struct AgentTrigger {
         skip_serializing_if = "Option::is_none"
     )]
     pub timeout: Option<Duration>,
-    /// Optional cheap prefilter. The agent runs only when one of these globs
-    /// matches; an empty list considers every non-empty changeset.
+    /// Optional ordered path prefilter. A leading `!` excludes a match and the
+    /// last matching pattern wins. An empty list considers every non-empty
+    /// changeset.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<String>,
 }
@@ -319,9 +320,9 @@ pub enum AgentTriggerKind {
 
 /// A single reviewer definition, as parsed from the registry file.
 ///
-/// Trigger globs are kept as raw strings here; they are compiled into a matcher
-/// by [`crate::routing`] (parse-don't-validate: the compiled form is a distinct
-/// type produced once, at the boundary).
+/// Trigger globs are kept as raw strings here for stable serialization and
+/// hashing. Config loading checks them through [`crate::routing`], whose shared
+/// matcher also keeps routing and carry scoping consistent.
 ///
 /// The `P` parameter is the prompt representation: [`PromptSource`] straight out
 /// of the YAML (inline text or a file reference), `String` once loading has

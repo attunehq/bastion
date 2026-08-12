@@ -5,9 +5,9 @@
 //! triggers use their optional paths only as a cheap prefilter; the runner makes
 //! the semantic decision over the actual changeset.
 //!
-//! Trigger paths are stored as strings on [`Reviewer`]; here they are compiled
-//! once into a [`Router`] (parse-don't-validate), so a malformed glob is an error
-//! at compile time rather than a silent non-match at routing time.
+//! Trigger paths are stored as ordered strings on [`Reviewer`]. A leading `!`
+//! excludes a path, and the last matching pattern wins. [`TriggerMatcher`]
+//! compiles that policy once for routing and is also shared with carry scoping.
 
 use color_eyre::eyre::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -21,7 +21,84 @@ pub struct Router<'a> {
 
 struct Entry<'a> {
     reviewer: &'a Reviewer,
+    matcher: TriggerMatcher,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PatternEffect {
+    Include,
+    Exclude,
+}
+
+/// A compiled ordered trigger matcher.
+///
+/// Every pattern keeps its position in the [`GlobSet`]. Matching indices are
+/// therefore enough to apply the effect of the last matching pattern without
+/// changing Bastion's existing glob grammar.
+pub(crate) struct TriggerMatcher {
     globs: GlobSet,
+    effects: Vec<PatternEffect>,
+}
+
+impl TriggerMatcher {
+    /// Compile one reviewer's path trigger or agent path prefilter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an empty path-only trigger, a bare exclusion, a
+    /// non-empty list with no positive pattern, or a malformed glob.
+    pub(crate) fn compile(reviewer: &Reviewer) -> Result<Self> {
+        let patterns = reviewer.trigger.paths();
+        let agent_without_paths = reviewer.trigger.agent().is_some() && patterns.is_empty();
+        if patterns.is_empty() && !agent_without_paths {
+            color_eyre::eyre::bail!(
+                "reviewer '{}' has an empty path trigger; add at least one positive glob",
+                reviewer.name
+            );
+        }
+
+        let mut builder = GlobSetBuilder::new();
+        let mut effects = Vec::with_capacity(patterns.len());
+        for raw in patterns {
+            let (effect, pattern) = match raw.strip_prefix('!') {
+                Some("") => color_eyre::eyre::bail!(
+                    "reviewer '{}' has a bare `!` trigger pattern; add a glob after `!`",
+                    reviewer.name
+                ),
+                Some(pattern) => (PatternEffect::Exclude, pattern),
+                None => (PatternEffect::Include, raw.as_str()),
+            };
+            let glob = Glob::new(pattern).wrap_err_with(|| {
+                format!(
+                    "reviewer '{}' has an invalid trigger glob: {raw}",
+                    reviewer.name
+                )
+            })?;
+            builder.add(glob);
+            effects.push(effect);
+        }
+
+        if !patterns.is_empty() && !effects.contains(&PatternEffect::Include) {
+            color_eyre::eyre::bail!(
+                "reviewer '{}' trigger must contain at least one positive glob",
+                reviewer.name
+            );
+        }
+
+        let globs = builder.build().wrap_err_with(|| {
+            format!("building trigger matcher for reviewer '{}'", reviewer.name)
+        })?;
+        Ok(Self { globs, effects })
+    }
+
+    /// Return whether `path` is included after applying the last matching rule.
+    #[must_use]
+    pub(crate) fn is_match(&self, path: &str) -> bool {
+        self.globs
+            .matches(path)
+            .last()
+            .is_some_and(|index| self.effects[*index] == PatternEffect::Include)
+    }
 }
 
 impl<'a> Router<'a> {
@@ -34,29 +111,17 @@ impl<'a> Router<'a> {
     pub fn compile(reviewers: &'a [Reviewer]) -> Result<Self> {
         let mut entries = Vec::with_capacity(reviewers.len());
         for reviewer in reviewers {
-            let mut builder = GlobSetBuilder::new();
-            for pattern in reviewer.trigger.paths() {
-                let glob = Glob::new(pattern).wrap_err_with(|| {
-                    format!(
-                        "reviewer '{}' has an invalid trigger glob: {pattern}",
-                        reviewer.name
-                    )
-                })?;
-                builder.add(glob);
-            }
-            let globs = builder.build().wrap_err_with(|| {
-                format!("building trigger matcher for reviewer '{}'", reviewer.name)
-            })?;
-            entries.push(Entry { reviewer, globs });
+            let matcher = TriggerMatcher::compile(reviewer)?;
+            entries.push(Entry { reviewer, matcher });
         }
         Ok(Self { entries })
     }
 
     /// Return the reviewers triggered by `changed`, in registry order.
     ///
-    /// A path trigger is a candidate when one of its globs matches. An agent
-    /// trigger with paths uses the same rule; without paths, it is a candidate
-    /// for every non-empty changeset.
+    /// A path trigger is a candidate when one changed path is included by its
+    /// ordered patterns. Agent-trigger paths use the same rule; without paths,
+    /// the agent is a candidate for every non-empty changeset.
     #[must_use]
     pub fn matched<S: AsRef<str>>(&self, changed: &[S]) -> Vec<&'a Reviewer> {
         self.entries
@@ -68,7 +133,7 @@ impl<'a> Router<'a> {
                         Trigger::Agent(agent) if agent.paths.is_empty()
                     ) || changed
                         .iter()
-                        .any(|path| entry.globs.is_match(path.as_ref())))
+                        .any(|path| entry.matcher.is_match(path.as_ref())))
             })
             .map(|entry| entry.reviewer)
             .collect()
@@ -138,11 +203,59 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_path_trigger_matches_nothing() {
+    fn an_empty_path_trigger_is_rejected() {
         let reviewers = [reviewer("empty", &[])];
-        let router = Router::compile(&reviewers).expect("compiles");
-        assert!(router.matched::<&str>(&[]).is_empty());
-        assert!(router.matched(&["src/lib.rs"]).is_empty());
+        let error = Router::compile(&reviewers).err().expect("must fail");
+        assert!(error.to_string().contains("empty path trigger"));
+    }
+
+    #[test]
+    fn ordered_patterns_exclude_and_reinclude_paths() {
+        let reviewers = [reviewer(
+            "docs",
+            &[
+                "docs/**/*.md",
+                "!docs/audit-reports/**",
+                "docs/audit-reports/current.md",
+            ],
+        )];
+        let router = Router::compile(&reviewers).unwrap();
+
+        assert_eq!(router.matched(&["docs/guide.md"]).len(), 1);
+        assert!(router.matched(&["docs/audit-reports/old.md"]).is_empty());
+        assert_eq!(router.matched(&["docs/audit-reports/current.md"]).len(), 1);
+    }
+
+    #[test]
+    fn later_pattern_wins_and_another_changed_path_can_trigger() {
+        let excluded_last = [reviewer("docs", &["docs/**", "!docs/private/**"])];
+        let included_last = [reviewer("docs", &["!docs/private/**", "docs/**"])];
+        let excluded_router = Router::compile(&excluded_last).unwrap();
+        let included_router = Router::compile(&included_last).unwrap();
+
+        assert!(
+            excluded_router
+                .matched(&["docs/private/secret.md"])
+                .is_empty()
+        );
+        assert_eq!(
+            included_router.matched(&["docs/private/secret.md"]).len(),
+            1
+        );
+        assert_eq!(
+            excluded_router
+                .matched(&["docs/private/secret.md", "docs/public.md"])
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn character_class_negation_remains_glob_syntax() {
+        let reviewers = [reviewer("not-a", &["docs/[!a]*/**"])];
+        let router = Router::compile(&reviewers).unwrap();
+        assert_eq!(router.matched(&["docs/foo/x.md"]).len(), 1);
+        assert!(router.matched(&["docs/audit/x.md"]).is_empty());
     }
 
     #[test]
@@ -179,6 +292,24 @@ mod tests {
         let router = Router::compile(&reviewers).expect("compiles");
         assert!(router.matched(&["docs/guide.md"]).is_empty());
         assert_eq!(router.matched(&["src/lib.rs"]).len(), 1);
+    }
+
+    #[test]
+    fn agent_trigger_paths_support_exclusion() {
+        let mut semantic = reviewer("semantic", &[]);
+        semantic.trigger = Trigger::Agent(crate::reviewer::AgentTrigger {
+            kind: crate::reviewer::AgentTriggerKind::Agent,
+            prompt: "decide".into(),
+            backend: crate::reviewer::Backend::Codex,
+            model: None,
+            effort: None,
+            timeout: None,
+            paths: vec!["src/**".into(), "!src/generated/**".into()],
+        });
+        let reviewers = [semantic];
+        let router = Router::compile(&reviewers).unwrap();
+        assert_eq!(router.matched(&["src/lib.rs"]).len(), 1);
+        assert!(router.matched(&["src/generated/schema.rs"]).is_empty());
     }
 
     fn shipped_registry() -> Config {

@@ -91,8 +91,9 @@ Following one review top to bottom touches most of the crate:
    from `--base` (tracked edits *and* untracked files, committed or not) plus the
    current branch and repo root.
 4. **Route candidates** (`routing.rs`). Path triggers and optional agent-trigger
-   prefilters are compiled and matched against the changed files. An agent trigger
-   with no paths is a candidate for every non-empty changeset. The resulting
+   prefilters compile into ordered matchers. A leading `!` excludes a path, and
+   the last matching pattern wins. An agent trigger with no paths is a candidate
+   for every non-empty changeset. The resulting
    candidates will execute, replay, carry, or resolve to a semantic skip. An
    explicit `--reviewer` selection then narrows that set (an unknown or untriggered
    name errors here), and a selection that excludes a triggered reviewer marks the
