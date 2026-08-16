@@ -42,10 +42,10 @@ fn all_gates_pass_across_both_backends() {
 
 /// Model and effort reach each backend's argv end to end, resolved through the real
 /// binary: an explicit per-reviewer value, a value inherited from the registry
-/// `defaults` block, the Claude selectors, the Codex ones, and Pi's
-/// `--model`/`--thinking`. The fake agent fails its contract (non-zero exit) if a
-/// selector is missing, which would fail the gate closed; a clean `pass` across all
-/// four proves the flags arrived.
+/// `defaults` block, the Claude selectors, the Codex ones, Pi's
+/// `--model`/`--thinking`, and Grok Build's `--model`/`--reasoning-effort`. The fake
+/// agent fails its contract (non-zero exit) if a selector is missing, which would
+/// fail the gate closed; a clean `pass` across all five proves the flags arrived.
 #[test]
 fn model_and_effort_reach_each_backend_through_the_real_binary() {
     let Some(fake) = tooling() else { return };
@@ -82,6 +82,13 @@ fn model_and_effort_reach_each_backend_through_the_real_binary() {
                 .behavior("pass")
                 .env("FAKE_EXPECT_MODEL", "openai-codex/gpt-5.5")
                 .env("FAKE_EXPECT_EFFORT", "xhigh"),
+            // The Grok Build selectors (`--model`/`--reasoning-effort`).
+            Reviewer::new("grok-explicit", "grok", "gate")
+                .model("grok-4.6")
+                .effort("xhigh")
+                .behavior("pass")
+                .env("FAKE_EXPECT_MODEL", "grok-4.6")
+                .env("FAKE_EXPECT_EFFORT", "xhigh"),
         ],
     ));
     let run = repo.review(fake);
@@ -89,8 +96,8 @@ fn model_and_effort_reach_each_backend_through_the_real_binary() {
     assert!(run.exited_zero(), "stderr:\n{}", run.stderr);
     let (decision, gates, _cost) = run.completed();
     assert_eq!(decision, Decision::Pass);
-    assert_eq!(gates.total, 4);
-    assert_eq!(gates.passed, 4);
+    assert_eq!(gates.total, 5);
+    assert_eq!(gates.passed, 5);
 }
 
 /// A single blocking gate makes the binary exit non-zero (so an agent loop and CI
@@ -251,16 +258,18 @@ fn the_reprompt_recovery_path_works_end_to_end() {
         Reviewer::new("codex-recover", "codex", "gate").behavior("reprompt-recover"),
         Reviewer::new("claude-recover", "claude-code", "gate").behavior("reprompt-recover"),
         Reviewer::new("pi-recover", "pi", "gate").behavior("reprompt-recover"),
+        Reviewer::new("grok-recover", "grok", "gate").behavior("reprompt-recover"),
     ]));
     let run = repo.review(fake);
 
     assert!(run.exited_zero(), "stderr:\n{}", run.stderr);
     let (decision, gates, _cost) = run.completed();
     assert_eq!(decision, Decision::Pass);
-    assert_eq!(gates.passed, 3);
+    assert_eq!(gates.passed, 4);
     assert_eq!(run.resolved("codex-recover").0, Decision::Pass);
     assert_eq!(run.resolved("claude-recover").0, Decision::Pass);
     assert_eq!(run.resolved("pi-recover").0, Decision::Pass);
+    assert_eq!(run.resolved("grok-recover").0, Decision::Pass);
 }
 
 /// A gate that never produces a parseable verdict, even after the reprompt, fails
@@ -328,5 +337,31 @@ fn the_pi_backend_runs_end_to_end() {
             .iter()
             .any(|f| f.detail.contains("simulated blocking finding")),
         "expected the pi block finding to surface; findings: {findings:?}"
+    );
+}
+
+/// The Grok Build backend runs a reviewer end to end through the real subprocess
+/// path via the `grok -p --output-format json --json-schema` protocol the fake agent
+/// emulates.
+#[test]
+fn the_grok_backend_runs_end_to_end() {
+    let Some(fake) = tooling() else { return };
+
+    let repo = TestRepo::new(&registry(&[
+        Reviewer::new("grok-pass", "grok", "gate").behavior("pass"),
+        Reviewer::new("grok-block", "grok", "gate").behavior("block"),
+    ]));
+    let run = repo.review(fake);
+
+    assert_eq!(run.code, Some(1));
+    assert_eq!(run.completed().0, Decision::Block);
+    assert_eq!(run.resolved("grok-pass").0, Decision::Pass);
+    let (verdict, _summary, findings, _usage) = run.resolved("grok-block");
+    assert_eq!(verdict, Decision::Block);
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.detail.contains("simulated blocking finding")),
+        "expected the grok block finding to surface; findings: {findings:?}"
     );
 }

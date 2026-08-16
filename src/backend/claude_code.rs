@@ -33,33 +33,6 @@ pub const DEFAULT_PROGRAM: &str = "claude";
 /// rather than following whatever `claude` would otherwise pick.
 const DEFAULT_MODEL: &str = "claude-opus-4-8";
 
-/// The JSON Schema Bastion asks `claude` to constrain its final output to. It is
-/// the wire form of [`Verdict`]: `verdict`, `summary`, and `findings`.
-const VERDICT_SCHEMA: &str = r#"{
-  "type": "object",
-  "additionalProperties": false,
-  "required": ["verdict", "summary"],
-  "properties": {
-    "verdict": { "type": "string", "enum": ["pass", "block"] },
-    "summary": { "type": "string" },
-    "findings": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["kind", "path", "line_start", "line_end", "detail"],
-        "properties": {
-          "kind": { "type": "string", "enum": ["blocking", "optional"] },
-          "path": { "type": "string" },
-          "line_start": { "type": "integer", "minimum": 0 },
-          "line_end": { "type": "integer", "minimum": 0 },
-          "detail": { "type": "string" }
-        }
-      }
-    }
-  }
-}"#;
-
 /// The Claude Code agent backend.
 ///
 /// Generic over the [`CommandRunner`] so production wires a real subprocess while
@@ -104,7 +77,7 @@ impl<R: CommandRunner> ClaudeCodeBackend<R> {
         spec.arg("--output-format")
             .arg("json")
             .arg("--json-schema")
-            .arg(VERDICT_SCHEMA)
+            .arg(super::VERDICT_JSON_SCHEMA)
             // Reviewers run unattended over a trusted checkout (see the threat
             // model in docs/developer-guide/design.md); skip interactive permission prompts so the
             // headless run does not wedge.
@@ -187,7 +160,7 @@ impl<R: CommandRunner> Backend for ClaudeCodeBackend<R> {
                     .arg("--resume")
                     .arg(&session)
                     .arg("-p")
-                    .arg(REPROMPT);
+                    .arg(super::JSON_REPROMPT);
                 let second = self.run_turn(&reprompt).await?;
 
                 let mut transcript = transcript;
@@ -213,27 +186,10 @@ impl<R: CommandRunner> Backend for ClaudeCodeBackend<R> {
     }
 }
 
-/// The reprompt sent on the resumed session when the first turn's output did not
-/// conform to the verdict schema.
-const REPROMPT: &str = "Your previous response did not include a valid structured verdict. \
-     Do not perform any further review work. Reply with ONLY the structured output for the \
-     review you already performed, conforming exactly to the requested JSON schema: a top-level \
-     `verdict` of \"pass\" or \"block\", a `summary` string, and an optional `findings` array. \
-     A `block` must include at least one finding with kind \"blocking\".";
-
-/// The structured-output instruction closing every `claude` review prompt, pinning
-/// the reviewer's judgment to the backend's native JSON verdict schema.
-const JSON_SCHEMA_INSTRUCTION: &str = "\
-When you have finished reviewing, return your judgment as structured output \
-conforming to the requested JSON schema: a top-level `verdict` of \"pass\" or \"block\", \
-a human-friendly `summary`, and a `findings` array locating specific comments. Mark a \
-finding `blocking` if it is a reason to block, or `optional` if it is a non-blocking \
-suggestion. If you block, include a blocking finding for each issue you are blocking on.";
-
 /// Build the prompt handed to `claude`: the [shared review body](super::review_prompt)
 /// closed with this backend's native-JSON-schema instruction.
 fn build_prompt(request: &ReviewRequest<'_>) -> String {
-    super::review_prompt(request, JSON_SCHEMA_INSTRUCTION)
+    super::review_prompt(request, super::JSON_SCHEMA_INSTRUCTION)
 }
 
 /// The parsed `claude --output-format json` result envelope plus the raw text.
@@ -263,7 +219,7 @@ impl Envelope {
                 self.result
                     .result
                     .as_deref()
-                    .and_then(parse_verdict_from_text)
+                    .and_then(super::parse_verdict_from_text)
             })?;
 
         // A reviewer that blocks must explain itself with a blocking finding;
@@ -364,7 +320,7 @@ fn parse_envelope(output: &CommandOutput) -> Result<Envelope> {
         format!(
             "claude output was not valid JSON (exit {}): {}",
             exit(),
-            truncate(raw, 400)
+            super::truncate(raw, 400)
         )
     })?;
 
@@ -376,7 +332,7 @@ fn parse_envelope(output: &CommandOutput) -> Result<Envelope> {
         bail!(
             "claude exited unsuccessfully (exit {}): {}",
             exit(),
-            truncate(&output.stderr, 400)
+            super::truncate(&output.stderr, 400)
         );
     }
     if result.is_error.unwrap_or(false) {
@@ -392,23 +348,6 @@ fn parse_envelope(output: &CommandOutput) -> Result<Envelope> {
         result,
         session_id,
     })
-}
-
-/// Parse a [`Verdict`] from a free-form `result` string, tolerating a fenced or
-/// prose-wrapped JSON object by extracting the outermost `{...}`.
-fn parse_verdict_from_text(text: &str) -> Option<Verdict> {
-    let trimmed = text.trim();
-    if let Ok(verdict) = serde_json::from_str::<Verdict>(trimmed) {
-        return Some(verdict);
-    }
-    // Fall back to the first balanced-looking object: from the first `{` to the
-    // last `}`. This rescues output wrapped in a code fence or a sentence.
-    let start = trimmed.find('{')?;
-    let end = trimmed.rfind('}')?;
-    if end <= start {
-        return None;
-    }
-    serde_json::from_str::<Verdict>(&trimmed[start..=end]).ok()
 }
 
 /// Combine the usage reported by the first turn and the resumed reprompt turn.
@@ -431,18 +370,6 @@ fn combine_session_usage(first: Option<Usage>, second: Option<Usage>) -> Option<
             cost_usd: Money::from_cents(a.cost_usd.cents().max(b.cost_usd.cents())),
         }),
     }
-}
-
-/// Truncate `s` to at most `max` bytes (on a char boundary) for error messages.
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.to_string();
-    }
-    let mut end = max;
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}...", &s[..end])
 }
 
 #[cfg(test)]

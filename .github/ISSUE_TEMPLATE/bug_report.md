@@ -17,7 +17,7 @@ assignees: ""
 - OS:
 - Bastion version or commit (`bastion --version`):
 - Surface: local CLI or GitHub Actions
-- Backend, if relevant: claude-code, codex, pi
+- Backend, if relevant: claude-code, codex, pi, grok
 
 ## Logs or output
 

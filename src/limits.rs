@@ -2,7 +2,7 @@
 //! single `bastion review` may launch.
 //!
 //! Bastion fans a changeset out to several reviewers, each of which shells out to
-//! an agent CLI (Codex, Claude Code, Pi). Nothing in the base design bounds the
+//! an agent CLI (Codex, Claude Code, Pi, Grok Build). Nothing in the base design bounds the
 //! *total* cost of that fan-out: a reviewer that fails to start is retried, a
 //! transient spawn or auth failure can turn into a respawn loop, and a run that is
 //! quietly broken keeps launching agents until something external notices. One

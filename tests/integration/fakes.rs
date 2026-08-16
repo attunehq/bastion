@@ -1,7 +1,8 @@
 //! The compiled fakes and the detect-and-skip tooling guards.
 //!
 //! These stand in for the heavyweight external programs the real backends shell
-//! out to: a deterministic, contract-checking fake agent for claude/codex/pi, and a
+//! out to: a deterministic, contract-checking fake agent for claude/codex/pi/grok,
+//! and a
 //! fake container engine for docker/podman. Both are compiled once with `rustc`
 //! and reused for the whole test process; scenarios that need a toolchain we
 //! cannot guarantee detect-and-skip through [`tooling`] / [`container_tooling`].
@@ -11,15 +12,16 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
 // ---------------------------------------------------------------------------
-// The fake agent: a deterministic, contract-checking stand-in for claude/codex.
+// The fake agent: a deterministic, contract-checking stand-in for the agent CLIs.
 // ---------------------------------------------------------------------------
 
-/// Source for a tiny native program that emulates the three agent CLIs.
+/// Source for a tiny native program that emulates the four agent CLIs.
 ///
 /// It detects which protocol it is being driven as from its argv (Codex is
-/// invoked with an `exec` subcommand; Pi with `--mode`; Claude with
-/// `--output-format`), detects a reprompt turn (Codex `resume` / Pi `--session` /
-/// Claude `--resume`), validates the invocation
+/// invoked with an `exec` subcommand; Pi with `--mode`; Grok Build with
+/// `--reasoning-effort`; Claude with `--output-format` and none of those), detects
+/// a reprompt turn (Codex `resume` / Pi `--session` / Claude and Grok `--resume`),
+/// validates the invocation
 /// against the contract each backend promises, and then chooses its output from
 /// the `FAKE_BEHAVIOR` environment variable Bastion propagates from the reviewer:
 ///
@@ -63,6 +65,9 @@ fn main() {
     // Pi is driven in print mode with `--mode json`; neither Codex nor Claude uses
     // `--mode`, so it is the unambiguous discriminator.
     let is_pi = has(&args, "--mode");
+    // Grok Build's headless flags mirror Claude's (`--output-format`, `--json-schema`,
+    // `-p`, `--resume`); its effort flag is the discriminator.
+    let is_grok = has(&args, "--reasoning-effort");
     let is_reprompt =
         has(&args, "resume") || has(&args, "--resume") || has(&args, "--session");
 
@@ -118,6 +123,15 @@ fn main() {
         }
         if is_reprompt && !has(&args, "pi-fake") {
             fail("pi: reprompt did not resume the reported session id `pi-fake`");
+        }
+    } else if is_grok {
+        for flag in ["--output-format", "json", "--json-schema", "--permission-mode", "bypassPermissions", "-p"] {
+            if !has(&args, flag) {
+                fail(&format!("grok: missing `{flag}`"));
+            }
+        }
+        if is_reprompt && !has(&args, "g-fake") {
+            fail("grok: reprompt did not resume the reported session id `g-fake`");
         }
     } else {
         for flag in ["--output-format", "--json-schema", "--permission-mode", "bypassPermissions", "-p"] {
@@ -217,9 +231,54 @@ fn main() {
         emit_codex(effective, &summary, &dollars, tin, tout, cache);
     } else if is_pi {
         emit_pi(effective, &summary, &dollars, tin, tout, cache);
+    } else if is_grok {
+        emit_grok(effective, &summary, &dollars, tin, tout, cache);
     } else {
         emit_claude(effective, &summary, &dollars, tin, tout, cache);
     }
+}
+
+fn emit_grok(behavior: &str, summary: &str, dollars: &str, tin: u64, tout: u64, cache: u64) {
+    // Grok Build's envelope is Claude-shaped with camelCase keys: `sessionId`,
+    // `structuredOutput`, `text`, plus `usage` and `total_cost_usd`.
+    let mut body = String::new();
+    match behavior {
+        "malformed" => {
+            body.push_str(r#"{"sessionId":"g-fake","text":"I reviewed it but I forgot the schema."}"#);
+        }
+        "block" => {
+            body.push_str(r#"{"sessionId":"g-fake","total_cost_usd":"#);
+            body.push_str(dollars);
+            body.push_str(r#","usage":{"input_tokens":"#);
+            body.push_str(&tin.to_string());
+            body.push_str(r#","output_tokens":"#);
+            body.push_str(&tout.to_string());
+            body.push_str(r#","cache_read_input_tokens":"#);
+            body.push_str(&cache.to_string());
+            body.push_str(r#"},"structuredOutput":{"verdict":"block","summary":""#);
+            body.push_str(summary);
+            body.push_str(r#"","findings":[{"kind":"blocking","path":"src/extra.rs","line_start":1,"line_end":1,"detail":"simulated blocking finding"}]}}"#);
+        }
+        "inconsistent" => {
+            body.push_str(r#"{"sessionId":"g-fake","structuredOutput":{"verdict":"block","summary":""#);
+            body.push_str(summary);
+            body.push_str(r#"","findings":[]}}"#);
+        }
+        _ => {
+            body.push_str(r#"{"sessionId":"g-fake","total_cost_usd":"#);
+            body.push_str(dollars);
+            body.push_str(r#","usage":{"input_tokens":"#);
+            body.push_str(&tin.to_string());
+            body.push_str(r#","output_tokens":"#);
+            body.push_str(&tout.to_string());
+            body.push_str(r#","cache_read_input_tokens":"#);
+            body.push_str(&cache.to_string());
+            body.push_str(r#"},"structuredOutput":{"verdict":"pass","summary":""#);
+            body.push_str(summary);
+            body.push_str(r#"","findings":[]}}"#);
+        }
+    }
+    print!("{}", body);
 }
 
 fn emit_pi(behavior: &str, summary: &str, dollars: &str, tin: u64, tout: u64, cache: u64) {
