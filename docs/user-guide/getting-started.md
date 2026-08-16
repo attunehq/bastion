@@ -141,7 +141,8 @@ grok --version      # for the Grok Build backend
 ```
 
 If the binary lives elsewhere or you want to point at a wrapper, set
-`BASTION_CLAUDE_BIN`, `BASTION_CODEX_BIN`, or `BASTION_PI_BIN` to its path.
+`BASTION_CLAUDE_BIN`, `BASTION_CODEX_BIN`, `BASTION_PI_BIN`, or `BASTION_GROK_BIN` to
+its path.
 
 That covers the default, **native** path. If you author a reviewer with a
 [`runner`](./authoring-reviewers.md#runner-and-capabilities), that reviewer runs its

@@ -236,7 +236,9 @@ so a reviewer can use whatever vocabulary its backend accepts (Claude Code's
 `--effort` takes `low`/`medium`/`high`/`xhigh`/`max`; Codex's
 `model_reasoning_effort` takes `minimal`/`low`/`medium`/`high`; Pi's `--thinking`
 takes `off`/`minimal`/`low`/`medium`/`high`/`xhigh`; Grok Build's
-`--reasoning-effort` takes `low`/`medium`/`high`/`xhigh`). The shared
+`--reasoning-effort` takes what its current models expose: `low`/`medium`/`high`/`xhigh`
+on `grok-4.6`, and its docs also list `none`/`minimal`/`max` and per-model ids). The
+shared
 `low`/`medium`/`high` levels are portable; the backend-specific ones are not, and a
 mismatch is the backend's problem, not a load error (Grok Build rejects an unknown
 level with a non-zero exit, which a gate fails closed on).

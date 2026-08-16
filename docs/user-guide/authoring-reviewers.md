@@ -396,8 +396,10 @@ control (Claude Code's `--effort`, Codex's `model_reasoning_effort`, Pi's
 `--thinking`, Grok Build's `--reasoning-effort`). Like `model`, the value is opaque:
 use whatever vocabulary your backend accepts. Claude Code takes `low`, `medium`,
 `high`, `xhigh`, or `max`; Codex takes `minimal`, `low`, `medium`, or `high`; Pi
-takes `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`; Grok Build takes `low`,
-`medium`, `high`, or `xhigh`. The shared `low`/`medium`/`high` levels work on any
+takes `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`; Grok Build takes
+whatever levels its current models expose (`low`, `medium`, `high`, and `xhigh` on
+`grok-4.6`; its docs also list `none`, `minimal`, `max`, and per-model menu ids). The
+shared `low`/`medium`/`high` levels work on any
 backend; the backend-specific ones do not, so a value that does not match the
 reviewer's backend is the backend's problem (Claude Code, for instance, warns and
 falls back to its own default; Grok Build exits with an error, which fails a gate

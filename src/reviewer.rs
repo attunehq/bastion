@@ -132,8 +132,9 @@ impl std::fmt::Display for ModelId {
 /// Kept opaque, like [`ModelId`]: Bastion does not parse or remap the value, so a
 /// reviewer can use whatever vocabulary its backend accepts. Claude Code takes
 /// `low`/`medium`/`high`/`xhigh`/`max`; Codex takes `minimal`/`low`/`medium`/`high`;
-/// Pi takes `off`/`minimal`/`low`/`medium`/`high`/`xhigh`; Grok Build takes
-/// `low`/`medium`/`high`/`xhigh`. The shared `low`/`medium`/`high` levels are
+/// Pi takes `off`/`minimal`/`low`/`medium`/`high`/`xhigh`; Grok Build takes what its
+/// models expose (`low`/`medium`/`high`/`xhigh` on `grok-4.6`, with `none`/`minimal`/
+/// `max` documented). The shared `low`/`medium`/`high` levels are
 /// portable across all four; the backend-specific ones are not. Absent, the house
 /// default [`DEFAULT_EFFORT`] applies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

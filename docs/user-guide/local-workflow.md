@@ -387,7 +387,8 @@ runs and seals, but the seal records that the tree was dirty, and `bastion attes
 refuses that run outright and tells you to commit the final content, re-run the
 review, and attest that run instead. `bastion attest` also refuses a run recorded
 while any backend or container override was set (`BASTION_CLAUDE_BIN`,
-`BASTION_CODEX_BIN`, `BASTION_PI_BIN`, `BASTION_CONTAINER_ENGINE`): such a run
+`BASTION_CODEX_BIN`, `BASTION_PI_BIN`, `BASTION_GROK_BIN`, `BASTION_CONTAINER_ENGINE`):
+such a run
 exercised a stubbed reviewer, not a real review, so it cannot be attested either.
 Re-run `bastion review` without those variables set, then attest that run. A
 partial run (`bastion review --reviewer`) is refused too: its verdict speaks only
