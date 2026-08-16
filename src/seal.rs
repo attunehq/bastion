@@ -135,10 +135,10 @@ pub fn embedded_secret() -> &'static [u8] {
 }
 
 /// Whether any of the test seams were active in the current process
-/// environment: the four backend program overrides
+/// environment: the five backend program overrides
 /// ([`crate::backend::claude_code::PROGRAM_ENV`],
 /// [`crate::backend::codex::PROGRAM_ENV`], [`crate::backend::pi::PROGRAM_ENV`],
-/// [`crate::backend::grok::PROGRAM_ENV`])
+/// [`crate::backend::grok::PROGRAM_ENV`], [`crate::backend::muse::PROGRAM_ENV`])
 /// or the container-engine override
 /// ([`crate::backend::container::ENGINE_ENV`]).
 ///
@@ -161,6 +161,7 @@ pub fn seams_active_from(lookup: impl Fn(&str) -> bool) -> bool {
         crate::backend::codex::PROGRAM_ENV,
         crate::backend::pi::PROGRAM_ENV,
         crate::backend::grok::PROGRAM_ENV,
+        crate::backend::muse::PROGRAM_ENV,
         crate::backend::container::ENGINE_ENV,
     ]
     .into_iter()
@@ -513,6 +514,9 @@ mod tests {
         ));
         assert!(seams_active_from(
             |name| name == crate::backend::grok::PROGRAM_ENV
+        ));
+        assert!(seams_active_from(
+            |name| name == crate::backend::muse::PROGRAM_ENV
         ));
         assert!(seams_active_from(
             |name| name == crate::backend::container::ENGINE_ENV

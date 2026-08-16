@@ -16,13 +16,14 @@ use crate::verdict::{Finding, FindingKind};
 /// correctly refuses for a blocking mutex.
 static SEAM_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// The five env vars [`crate::seal::seams_active`] reads, gathered in one
+/// The six env vars [`crate::seal::seams_active`] reads, gathered in one
 /// place so a test can force them all to a known state.
-const SEAM_ENV_VARS: [&str; 5] = [
+const SEAM_ENV_VARS: [&str; 6] = [
     crate::backend::claude_code::PROGRAM_ENV,
     crate::backend::codex::PROGRAM_ENV,
     crate::backend::pi::PROGRAM_ENV,
     crate::backend::grok::PROGRAM_ENV,
+    crate::backend::muse::PROGRAM_ENV,
     crate::backend::container::ENGINE_ENV,
 ];
 
@@ -34,7 +35,7 @@ const SEAM_ENV_VARS: [&str; 5] = [
 /// whose outcome depends on it (directly, by asserting `seal.seams`, or
 /// indirectly, by sealing a run and reading it back) must not merely assume
 /// the ambient environment is clean: a developer or CI sandbox that already
-/// has `BASTION_CODEX_BIN` (or any of the other four) set would otherwise
+/// has `BASTION_CODEX_BIN` (or any of the other five) set would otherwise
 /// flip `seams_active()` to `true` out from under the test, exactly the
 /// failure this guard exists to prevent. Construct it only while already
 /// holding [`SEAM_ENV_LOCK`]: mutating process env from a parallel test

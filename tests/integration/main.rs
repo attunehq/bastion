@@ -6,11 +6,11 @@
 //! `CARGO_BIN_EXE_bastion`) as a black box, each scenario in its own isolated
 //! environment -- a throwaway `git` repository, a private `BASTION_DATA_DIR`, and
 //! a compiled fake agent standing in for the heavyweight Claude Code / Codex / Pi /
-//! Grok Build subprocesses the real backends shell out to.
+//! Grok Build / Muse Code subprocesses the real backends shell out to.
 //!
 //! The fake agent ([`fakes::FAKE_AGENT_SRC`]) is compiled once with `rustc` and
 //! pointed at through `BASTION_CLAUDE_BIN` / `BASTION_CODEX_BIN` / `BASTION_PI_BIN` /
-//! `BASTION_GROK_BIN`,
+//! `BASTION_GROK_BIN` / `BASTION_MUSE_BIN`,
 //! so the binary takes
 //! the genuine subprocess path: real spawn, real stdin/argv, real stdout capture, real
 //! parse, real fail-closed/fail-open aggregation, real persistence. The fake reads

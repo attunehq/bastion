@@ -24,6 +24,7 @@ stays pure orchestration.
 | [`codex.rs`](../../src/backend/codex.rs) | The Codex backend. |
 | [`pi.rs`](../../src/backend/pi.rs) | The Pi backend. |
 | [`grok.rs`](../../src/backend/grok.rs) | The Grok Build backend. |
+| [`muse.rs`](../../src/backend/muse.rs) | The Muse Code backend. |
 | [`container/`](../../src/backend/container/) | The container runner, split by concern: `plan.rs` (`ExecutionPlan` and image resolution), `runner.rs` (the `CommandRunner` decorator), `credentials.rs`, and `teardown.rs`. See [Containers](./containers.md). |
 
 ## The trait
@@ -98,18 +99,23 @@ match request.reviewer.backend {
         Program::InContainer => GrokBackend::with_program(runner, grok::DEFAULT_PROGRAM)
             .review(request).await,
     },
+    Backend::Muse => match program {
+        Program::HostDefault => MuseBackend::new(runner).review(request).await,
+        Program::InContainer => MuseBackend::with_program(runner, muse::DEFAULT_PROGRAM)
+            .review(request).await,
+    },
 }
 ```
 
-All four named backends are wired; the match is exhaustive with a real arm each,
+All five named backends are wired; the match is exhaustive with a real arm each,
 and `Any` defaults to Claude Code until routing by availability/subscription exists.
 A backend still **fails closed** when it cannot produce a valid, consistent verdict:
 it returns an error (never a fabricated pass) and the runner turns that into a block
 for a gate. The only difference between the native and container paths is how the
 program is resolved, the `program` branch above: natively `new` takes it from the
 host (`BASTION_CLAUDE_BIN` / `BASTION_CODEX_BIN` / `BASTION_PI_BIN` / `BASTION_GROK_BIN`
-/ `PATH`), while in a container `with_program` pins the bare default name (`claude` /
-`codex` / `pi` / `grok`) so
+/ `BASTION_MUSE_BIN` / `PATH`), while in a container `with_program` pins the bare
+default name (`claude` / `codex` / `pi` / `grok` / `muse`) so
 it resolves on the image's `PATH` rather than a host path that means nothing inside
 the image.
 
@@ -123,8 +129,8 @@ tested against a *fake executable* with no real agent, network, or
 cost, while still exercising the real argument-building, env-injection, output
 parsing, and retry logic.
 
-The `BASTION_CLAUDE_BIN`/`BASTION_CODEX_BIN`/`BASTION_PI_BIN`/`BASTION_GROK_BIN`
-overrides that point a backend at a fake executable are recorded in the run seal as an active test seam
+The `BASTION_CLAUDE_BIN`/`BASTION_CODEX_BIN`/`BASTION_PI_BIN`/`BASTION_GROK_BIN`/
+`BASTION_MUSE_BIN` overrides that point a backend at a fake executable are recorded in the run seal as an active test seam
 (`src/seal.rs`); a run sealed with one active cannot be attested (see
 [Attestation](./attestation.md)).
 
@@ -212,9 +218,9 @@ about what is honored, so the code does not over-promise:
 | Field | Status in this build |
 | --- | --- |
 | `prompt`, `trigger`, `mode`, `name` | Fully honored. |
-| `backend` | Honored (`claude-code`, `codex`, `pi`, `grok`; `any` -> Claude Code). |
-| `model` | **Honored.** Forwarded to the backend's model selector (`--model` for Claude Code, Pi, and Grok Build, `-m` for Codex). Backend-specific, so the registry rejects a `model` (own or inherited) under `backend: any`. Pi's `--model` takes a `provider/id` form (e.g. `openai-codex/gpt-5.5`) that selects the provider too (Pi's bare default provider is `google`), so a Pi model carries its provider in the string. Absent, Claude Code defaults to `claude-opus-4-8`; Codex, Pi, and Grok Build resolve their own. |
-| `effort` | **Honored.** An opaque level forwarded verbatim to each backend's native control (Claude Code's `--effort`, Codex's `model_reasoning_effort`, Pi's `--thinking`, Grok Build's `--reasoning-effort`; see below). Default `high`. |
+| `backend` | Honored (`claude-code`, `codex`, `pi`, `grok`, `muse`; `any` -> Claude Code). |
+| `model` | **Honored.** Forwarded to the backend's model selector (`--model` for Claude Code, Pi, Grok Build, and Muse Code, `-m` for Codex). Backend-specific, so the registry rejects a `model` (own or inherited) under `backend: any`. Pi's `--model` takes a `provider/id` form (e.g. `openai-codex/gpt-5.5`) that selects the provider too (Pi's bare default provider is `google`), so a Pi model carries its provider in the string. Absent, Claude Code defaults to `claude-opus-4-8`; Codex, Pi, Grok Build, and Muse Code resolve their own. |
+| `effort` | **Honored.** An opaque level forwarded verbatim to each backend's native control (Claude Code's `--effort`, Codex's `model_reasoning_effort`, Pi's `--thinking`, Grok Build's and Muse Code's `--reasoning-effort`; see below). Default `high`. |
 | `defaults` (registry-wide `model`/`effort`) | **Honored.** Folded into each reviewer at load time (a reviewer's own field wins); resolution happens once, at registry load, so the persisted run record carries the effective values. |
 | `timeout` | Honored by the runner. |
 | `inputs` | Honored, interpolated into the prompt. |
@@ -237,11 +243,12 @@ so a reviewer can use whatever vocabulary its backend accepts (Claude Code's
 `model_reasoning_effort` takes `minimal`/`low`/`medium`/`high`; Pi's `--thinking`
 takes `off`/`minimal`/`low`/`medium`/`high`/`xhigh`; Grok Build's
 `--reasoning-effort` takes what its current models expose: `low`/`medium`/`high`/`xhigh`
-on `grok-4.6`, and its docs also list `none`/`minimal`/`max` and per-model ids). The
-shared
+on `grok-4.6`, and its docs also list `none`/`minimal`/`max` and per-model ids);
+Muse Code's `--reasoning-effort` takes `minimal`/`low`/`medium`/`high`/`xhigh`/`ultra`).
+The shared
 `low`/`medium`/`high` levels are portable; the backend-specific ones are not, and a
-mismatch is the backend's problem, not a load error (Grok Build rejects an unknown
-level with a non-zero exit, which a gate fails closed on).
+mismatch is the backend's problem, not a load error (Grok Build and Muse Code reject an
+unknown level with a non-zero exit, which a gate fails closed on).
 
 `model` differs from `effort` in one respect: because a model id almost never
 overlaps across backends, a `model` under `backend: any` is a load error
@@ -257,7 +264,11 @@ multi-provider, so the provider rides inside the model string using Pi's native
 under Pi's default provider (`google`), so a Pi reviewer's `model` should name its
 provider. Grok Build follows the Codex/Pi shape too: it always sends
 `--reasoning-effort` (default `high`) and sends `--model` only when a model is
-pinned; `grok models` lists the ids the CLI accepts.
+pinned; `grok models` lists the ids the CLI accepts. Muse Code does the same: it
+always sends `--reasoning-effort` (default `high`) and `--model` only when pinned
+(`muse-spark-1.2` or `muse-spark-1.2-contributor`; unpinned, the CLI's configured
+default applies). Muse's `--json` stream carries no token or cost accounting, so a
+Muse reviewer reports no usage and contributes nothing to a run's totals.
 
 The unprovisioned opt-ins **fail closed** rather than silently degrading: a gate that
 declares a tier it cannot get must block, never run degraded and report a pass (see
@@ -281,13 +292,13 @@ and the [user-facing status](../user-guide/README.md#status).
    `EXHAUSTIVE_FINDINGS_INSTRUCTION` so the new backend feeds the review context and
    enumerates every finding in one pass like the others. If the CLI has no native
    structured-output enforcement, reuse the shared fenced-YAML `SCHEMA_INSTRUCTION`,
-   `REPROMPT_SUFFIX`, and `extract_verdict` (as the Codex and Pi backends do) rather
+   `REPROMPT_SUFFIX`, and `extract_verdict` (as the Codex, Pi, and Muse Code backends do) rather
    than re-implementing verdict-block parsing. If it enforces a JSON schema natively,
    reuse `VERDICT_JSON_SCHEMA`, `JSON_SCHEMA_INSTRUCTION`, `JSON_REPROMPT`, and
    `parse_verdict_from_text` (as Claude Code and Grok Build do).
 3. Wire the variant into `dispatch` in [`mod.rs`](../../src/backend/mod.rs).
 4. Test it against a fake `CommandRunner`, following `claude_code.rs` / `codex.rs` /
-   `pi.rs` / `grok.rs`: assert the args and env you build, and the parsing of a
+   `pi.rs` / `grok.rs` / `muse.rs`: assert the args and env you build, and the parsing of a
    representative envelope, including the malformed-output retry path. Then teach the
    integration fake agent (`tests/integration/fakes.rs`) the new CLI's protocol and
    add its `BASTION_<NAME>_BIN` seam to `seal::seams_active_from`.
@@ -299,8 +310,8 @@ fake executable instead.
 ## The verdict round-trip
 
 Backends capture the agent's structured output, then validate it against the
-verdict schema: Claude Code and Grok Build via a JSON schema (`--json-schema`); Codex
-and Pi via a requested fenced YAML verdict block parsed from the final message (the shared
+verdict schema: Claude Code and Grok Build via a JSON schema (`--json-schema`); Codex,
+Pi, and Muse Code via a requested fenced YAML verdict block parsed from the final message (the shared
 `SCHEMA_INSTRUCTION` + `extract_verdict`). If the agent does not produce complying
 output, the backend re-runs the *same session* (resumed by its session/thread id)
 with a turn that re-states the schema and asks for just the structured output of the

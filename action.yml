@@ -11,8 +11,8 @@
 #      fails without one); the head commit, not the synthetic merge commit, is
 #      what attestation replay binds to.
 #   2. Install and authenticate the backend CLI the repository's reviewers pin
-#      (claude, codex, pi, or grok), exactly as a contributor would locally. The
-#      action never touches backend credentials.
+#      (claude, codex, pi, grok, or muse), exactly as a contributor would locally.
+#      The action never touches backend credentials.
 #
 # The action then installs a published bastion release, fetches the attestation
 # notes ref, restores the branch's prior run (prior-finding recall and

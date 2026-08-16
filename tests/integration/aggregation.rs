@@ -89,6 +89,14 @@ fn model_and_effort_reach_each_backend_through_the_real_binary() {
                 .behavior("pass")
                 .env("FAKE_EXPECT_MODEL", "grok-4.6")
                 .env("FAKE_EXPECT_EFFORT", "xhigh"),
+            // The Muse Code selectors (`--model`/`--reasoning-effort`); `ultra` is
+            // a Muse-specific level forwarded verbatim.
+            Reviewer::new("muse-explicit", "muse", "gate")
+                .model("muse-spark-1.2")
+                .effort("ultra")
+                .behavior("pass")
+                .env("FAKE_EXPECT_MODEL", "muse-spark-1.2")
+                .env("FAKE_EXPECT_EFFORT", "ultra"),
         ],
     ));
     let run = repo.review(fake);
@@ -96,8 +104,8 @@ fn model_and_effort_reach_each_backend_through_the_real_binary() {
     assert!(run.exited_zero(), "stderr:\n{}", run.stderr);
     let (decision, gates, _cost) = run.completed();
     assert_eq!(decision, Decision::Pass);
-    assert_eq!(gates.total, 5);
-    assert_eq!(gates.passed, 5);
+    assert_eq!(gates.total, 6);
+    assert_eq!(gates.passed, 6);
 }
 
 /// A single blocking gate makes the binary exit non-zero (so an agent loop and CI
@@ -249,7 +257,7 @@ fn a_timed_out_advisor_is_skipped_not_blocked() {
     assert_eq!(gates.total, 1);
 }
 
-/// The single-reprompt recovery path works end to end on all three backends.
+/// The single-reprompt recovery path works end to end on every backend.
 #[test]
 fn the_reprompt_recovery_path_works_end_to_end() {
     let Some(fake) = tooling() else { return };
@@ -259,17 +267,19 @@ fn the_reprompt_recovery_path_works_end_to_end() {
         Reviewer::new("claude-recover", "claude-code", "gate").behavior("reprompt-recover"),
         Reviewer::new("pi-recover", "pi", "gate").behavior("reprompt-recover"),
         Reviewer::new("grok-recover", "grok", "gate").behavior("reprompt-recover"),
+        Reviewer::new("muse-recover", "muse", "gate").behavior("reprompt-recover"),
     ]));
     let run = repo.review(fake);
 
     assert!(run.exited_zero(), "stderr:\n{}", run.stderr);
     let (decision, gates, _cost) = run.completed();
     assert_eq!(decision, Decision::Pass);
-    assert_eq!(gates.passed, 4);
+    assert_eq!(gates.passed, 5);
     assert_eq!(run.resolved("codex-recover").0, Decision::Pass);
     assert_eq!(run.resolved("claude-recover").0, Decision::Pass);
     assert_eq!(run.resolved("pi-recover").0, Decision::Pass);
     assert_eq!(run.resolved("grok-recover").0, Decision::Pass);
+    assert_eq!(run.resolved("muse-recover").0, Decision::Pass);
 }
 
 /// A gate that never produces a parseable verdict, even after the reprompt, fails
@@ -364,4 +374,31 @@ fn the_grok_backend_runs_end_to_end() {
             .any(|f| f.detail.contains("simulated blocking finding")),
         "expected the grok block finding to surface; findings: {findings:?}"
     );
+}
+
+/// The Muse Code backend runs a reviewer end to end through the real subprocess
+/// path via the `muse exec --json --yolo` protocol the fake agent emulates.
+#[test]
+fn the_muse_backend_runs_end_to_end() {
+    let Some(fake) = tooling() else { return };
+
+    let repo = TestRepo::new(&registry(&[
+        Reviewer::new("muse-pass", "muse", "gate").behavior("pass"),
+        Reviewer::new("muse-block", "muse", "gate").behavior("block"),
+    ]));
+    let run = repo.review(fake);
+
+    assert_eq!(run.code, Some(1));
+    assert_eq!(run.completed().0, Decision::Block);
+    assert_eq!(run.resolved("muse-pass").0, Decision::Pass);
+    let (verdict, _summary, findings, usage) = run.resolved("muse-block");
+    assert_eq!(verdict, Decision::Block);
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.detail.contains("simulated blocking finding")),
+        "expected the muse block finding to surface; findings: {findings:?}"
+    );
+    // Muse's stream carries no usage, so none is reported.
+    assert!(usage.is_none(), "muse reported usage: {usage:?}");
 }

@@ -55,6 +55,8 @@ pub enum Backend {
     Pi,
     /// xAI's Grok Build CLI.
     Grok,
+    /// Meta's Muse Code CLI (the harness for the Muse Spark models).
+    Muse,
 }
 
 impl Backend {
@@ -67,6 +69,7 @@ impl Backend {
             Backend::Codex => "codex",
             Backend::Pi => "pi",
             Backend::Grok => "grok",
+            Backend::Muse => "muse",
         }
     }
 }
@@ -99,7 +102,8 @@ impl AttestationPolicy {
 }
 
 /// A backend-specific model identifier, forwarded verbatim to the backend's model
-/// selector (`--model` for Claude Code, Pi, and Grok Build, `-m` for Codex).
+/// selector (`--model` for Claude Code, Pi, Grok Build, and Muse Code, `-m` for
+/// Codex).
 ///
 /// Kept opaque on purpose: a model id means something only to the backend it
 /// names (an alias like `opus`, a full id like `gpt-5`, or Pi's provider-bearing
@@ -127,16 +131,17 @@ impl std::fmt::Display for ModelId {
 
 /// A reasoning-effort level, forwarded verbatim to the backend's effort control
 /// (`--effort` for Claude Code, `model_reasoning_effort` for Codex, `--thinking`
-/// for Pi, `--reasoning-effort` for Grok Build).
+/// for Pi, `--reasoning-effort` for Grok Build and Muse Code).
 ///
 /// Kept opaque, like [`ModelId`]: Bastion does not parse or remap the value, so a
 /// reviewer can use whatever vocabulary its backend accepts. Claude Code takes
 /// `low`/`medium`/`high`/`xhigh`/`max`; Codex takes `minimal`/`low`/`medium`/`high`;
 /// Pi takes `off`/`minimal`/`low`/`medium`/`high`/`xhigh`; Grok Build takes what its
 /// models expose (`low`/`medium`/`high`/`xhigh` on `grok-4.6`, with `none`/`minimal`/
-/// `max` documented). The shared `low`/`medium`/`high` levels are
-/// portable across all four; the backend-specific ones are not. Absent, the house
-/// default [`DEFAULT_EFFORT`] applies.
+/// `max` documented); Muse Code takes `minimal`/`low`/`medium`/`high`/`xhigh`/
+/// `ultra`. The shared `low`/`medium`/`high` levels are portable across all five;
+/// the backend-specific ones are not. Absent, the house default [`DEFAULT_EFFORT`]
+/// applies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Effort(String);
@@ -157,7 +162,7 @@ impl std::fmt::Display for Effort {
 
 /// Bastion's house default reasoning effort, applied when a reviewer (and the
 /// registry default) set none. `high` is accepted by every effort-aware backend
-/// (Claude Code, Codex, Pi, and Grok Build).
+/// (Claude Code, Codex, Pi, Grok Build, and Muse Code).
 pub const DEFAULT_EFFORT: &str = "high";
 
 /// Capabilities a reviewer opts into. Least privilege is the default: an empty
@@ -605,6 +610,7 @@ prompt: p
         );
         assert_eq!(Backend::Pi.as_str(), "pi");
         assert_eq!(Backend::Grok.as_str(), "grok");
+        assert_eq!(Backend::Muse.as_str(), "muse");
         assert_eq!(Backend::default(), Backend::Any);
     }
 

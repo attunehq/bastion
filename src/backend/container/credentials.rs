@@ -14,6 +14,7 @@ const CREDENTIAL_VARS: &[&str] = &[
     "OPENAI_BASE_URL",
     "CODEX_API_KEY",
     "XAI_API_KEY",
+    "META_API_KEY",
 ];
 
 /// The provider credential variable names present (and non-empty) in Bastion's
@@ -83,6 +84,7 @@ mod tests {
                 "OPENAI_BASE_URL",
                 "CODEX_API_KEY",
                 "XAI_API_KEY",
+                "META_API_KEY",
             ]
         );
     }

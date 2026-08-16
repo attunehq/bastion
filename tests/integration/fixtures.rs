@@ -427,6 +427,7 @@ impl TestRepo {
             .env("BASTION_CODEX_BIN", fake)
             .env("BASTION_PI_BIN", fake)
             .env("BASTION_GROK_BIN", fake)
+            .env("BASTION_MUSE_BIN", fake)
             // Keep stdout pure JSONL; route library logging away from the stream.
             .env("RUST_LOG", "error")
             .stdin(Stdio::null());
@@ -561,6 +562,7 @@ impl TestRepo {
             .env_remove("BASTION_CODEX_BIN")
             .env_remove("BASTION_PI_BIN")
             .env_remove("BASTION_GROK_BIN")
+            .env_remove("BASTION_MUSE_BIN")
             .env("PATH", &path)
             .env("RUST_LOG", "error")
             .stdin(Stdio::null());

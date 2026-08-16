@@ -91,8 +91,8 @@ registry, not by reading every diff.
 
 Bastion is experimental and still partial. The routing, runner, verdict
 aggregation, and on-disk run store are implemented and tested, and the Claude Code,
-Codex, Pi, and Grok Build backends execute reviewers for real, natively or inside a container
-when a reviewer declares a `runner` and opts into `capabilities.network: true`. The
+Codex, Pi, Grok Build, and Muse Code backends execute reviewers for real, natively
+or inside a container when a reviewer declares a `runner` and opts into `capabilities.network: true`. The
 remaining capability fields (`mcp` and `skills`)
 are accepted but not provisioned, so a reviewer that opts into one fails closed
 rather than running without it. `network: true` grants a containerized reviewer
