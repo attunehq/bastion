@@ -15,6 +15,7 @@ pub mod command;
 pub mod container;
 pub mod governor;
 pub mod grok;
+pub mod muse;
 pub mod pi;
 
 use std::collections::BTreeMap;
@@ -34,6 +35,7 @@ use self::command::{CommandRunner, SystemCommandRunner};
 use self::container::{ContainerEngine, ContainerRunner, ExecutionPlan, credential_passthrough};
 use self::governor::{GovernedRunner, SpawnGovernor};
 use self::grok::GrokBackend;
+use self::muse::MuseBackend;
 use self::pi::PiBackend;
 
 /// Why an agent call is being made, which controls review-only prompt material.
@@ -231,6 +233,14 @@ async fn run_backend<R: CommandRunner>(
             Program::HostDefault => GrokBackend::new(runner).review(request).await,
             Program::InContainer => {
                 GrokBackend::with_program(runner, grok::DEFAULT_PROGRAM)
+                    .review(request)
+                    .await
+            }
+        },
+        reviewer::Backend::Muse => match program {
+            Program::HostDefault => MuseBackend::new(runner).review(request).await,
+            Program::InContainer => {
+                MuseBackend::with_program(runner, muse::DEFAULT_PROGRAM)
                     .review(request)
                     .await
             }
@@ -479,7 +489,8 @@ pub(super) fn truncate(s: &str, max: usize) -> String {
 
 /// The instruction appended to every review prompt pinning the verdict schema, for
 /// backends that have no native structured-output enforcement and instead ask the
-/// agent to end its final message with a fenced YAML verdict block (Codex, Pi).
+/// agent to end its final message with a fenced YAML verdict block (Codex, Pi,
+/// Muse Code).
 pub(super) const SCHEMA_INSTRUCTION: &str = "\
 When you are done reviewing, end your final message with the structured verdict \
 and nothing after it, as a fenced YAML code block matching exactly this schema:\n\
@@ -504,7 +515,8 @@ for the review you already completed, and nothing else.";
 /// The text of the reprompt turn for a fenced-YAML backend whose first message
 /// lacked a conforming verdict. A resumable session already holds the review, so the
 /// turn is just [`REPROMPT_SUFFIX`]; a fresh session has no memory of the prompt, so
-/// the full `prompt` is re-sent ahead of the suffix. Shared by Codex and Pi.
+/// the full `prompt` is re-sent ahead of the suffix. Shared by Codex, Pi, and Muse
+/// Code.
 pub(super) fn reprompt_text(prompt: &str, resumable: bool) -> String {
     if resumable {
         REPROMPT_SUFFIX.to_string()
@@ -515,7 +527,8 @@ pub(super) fn reprompt_text(prompt: &str, resumable: bool) -> String {
 
 /// Join an earlier session's transcript ahead of the `current` one, for when a
 /// verdict was recovered on a reprompt and both turns should be preserved. An empty
-/// or absent prior transcript collapses to just `current`. Shared by Codex and Pi.
+/// or absent prior transcript collapses to just `current`. Shared by Codex, Pi, Grok
+/// Build, and Muse Code.
 pub(super) fn stitch_transcript(prior: Option<&str>, current: String) -> String {
     match prior {
         Some(prior) if !prior.is_empty() => format!("{}\n{}", prior.trim_end(), current),
@@ -529,7 +542,7 @@ pub(super) fn stitch_transcript(prior: Option<&str>, current: String) -> String 
 /// YAML (a superset of JSON, so JSON verdicts parse too). A verdict that parses
 /// but is inconsistent (e.g. a `block` with no blocking finding) is rejected so
 /// the caller fails closed rather than trusting a malformed gate decision. Shared
-/// by the fenced-YAML backends (Codex, Pi) so they read an agent's final message
+/// by the fenced-YAML backends (Codex, Pi, Muse Code) so they read an agent's final message
 /// identically.
 pub(super) fn extract_verdict(message: &str) -> Option<Verdict> {
     for candidate in verdict_candidates(message) {

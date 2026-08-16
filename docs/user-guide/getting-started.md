@@ -10,7 +10,7 @@ order: 2
 
 This chapter gets you from nothing to a working review loop. It assumes you have a
 git repository and one of the supported agent backends installed (the Claude Code,
-Codex, Pi, or Grok Build CLI).
+Codex, Pi, Grok Build, or Muse Code CLI).
 
 A little vocabulary shows up here in passing: *reviewer*, *gate*, *advisor*,
 *verdict*, *findings*. The inline definitions are enough to follow along; the next
@@ -121,16 +121,18 @@ auth come along for free. Install and sign in to one of:
   Pi runs against whatever provider you have configured it with locally, unless a
   reviewer pins a `model` (Pi's `provider/id` form, which selects the provider too).
 - **[Grok Build](https://x.ai/cli)** (`grok`): pin it with `backend: grok`.
+- **Muse Code** (`muse`): pin it with `backend: muse`.
 
 A **subscription** is fine; you do not need an API key. Because Bastion just runs
 the CLI, whatever you signed in with works: a ChatGPT subscription through `codex`,
 a Claude subscription through `claude`, and so on. The CLI reads its own auth file
-(`~/.codex/auth.json`, `~/.claude`, `~/.grok/auth.json`) and refreshes its token itself. Getting that same
+(`~/.codex/auth.json`, `~/.claude`, `~/.grok/auth.json`, `~/.config/muse/auth.json`) and
+refreshes its token itself. Getting that same
 subscription to bill the right person in CI is its own step, covered in
 [Continuous integration](./continuous-integration.md#authentication--billing).
 
 Bastion invokes the backend as a plain executable on your `PATH` (`claude`,
-`codex`, `pi`, or `grok`), so confirm the one you intend to use is installed and
+`codex`, `pi`, `grok`, or `muse`), so confirm the one you intend to use is installed and
 authenticated before running a review:
 
 ```sh
@@ -138,11 +140,12 @@ claude --version    # for the Claude Code backend
 codex --version     # for the Codex backend
 pi --version        # for the Pi backend
 grok --version      # for the Grok Build backend
+muse --version      # for the Muse Code backend
 ```
 
 If the binary lives elsewhere or you want to point at a wrapper, set
-`BASTION_CLAUDE_BIN`, `BASTION_CODEX_BIN`, `BASTION_PI_BIN`, or `BASTION_GROK_BIN` to
-its path.
+`BASTION_CLAUDE_BIN`, `BASTION_CODEX_BIN`, `BASTION_PI_BIN`, `BASTION_GROK_BIN`, or
+`BASTION_MUSE_BIN` to its path.
 
 That covers the default, **native** path. If you author a reviewer with a
 [`runner`](./authoring-reviewers.md#runner-and-capabilities), that reviewer runs its
@@ -150,7 +153,7 @@ backend inside a container instead (and must opt into `capabilities.network: tru
 without it the reviewer is rejected before it runs, so a gate blocks and an advisor is
 skipped), so it needs a container engine on the host rather than the backend CLI: Bastion shells out to `docker` by default (set
 `BASTION_CONTAINER_ENGINE` to use another, for example `podman`), and the backend CLI
-(`claude` / `codex` / `pi` / `grok`) must be present inside the image. A fixed set of provider
+(`claude` / `codex` / `pi` / `grok` / `muse`) must be present inside the image. A fixed set of provider
 credential variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and the like) is forwarded
 from your environment into the container by name so the in-container agent can
 authenticate; host CLI auth that lives in a file (`~/.claude`, `~/.codex/auth.json`) is
@@ -319,8 +322,8 @@ The most common first-run snags and what they mean:
   re-run. See [Authoring reviewers](./authoring-reviewers.md).
 - **The review blocks immediately with "did not produce a verdict".** A gate failed
   closed, usually because the backend binary is missing or unauthenticated. Re-check
-  `claude --version` / `codex --version` / `pi --version` / `grok --version` and that you are signed
-  in (step 2).
+  `claude --version` / `codex --version` / `pi --version` / `grok --version` /
+  `muse --version` and that you are signed in (step 2).
 - **No reviewers ran (a trivial pass).** Nothing in your changeset matched any
   reviewer's `trigger`. Confirm you actually changed a file the globs cover, and
   that `--base` points at the right branch.

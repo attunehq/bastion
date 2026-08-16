@@ -21,10 +21,10 @@ These are not style preferences; breaking one is a correctness bug.
   *returned* a clean pass. This invariant lives in
   [`runner/`](../../src/runner/) and is the single most important property to
   preserve; the `fail-closed-gates` reviewer in the registry guards it.
-- **A backend that cannot verdict reviews nothing.** All four backends
-  (`claude-code`, `codex`, `pi`, `grok`) are wired, but any of them returns an error rather
-  than fabricating a pass when it cannot produce a valid, consistent verdict; the
-  runner turns that into a fail-closed block for a gate. See
+- **A backend that cannot verdict reviews nothing.** All five backends
+  (`claude-code`, `codex`, `pi`, `grok`, `muse`) are wired, but any of them returns
+  an error rather than fabricating a pass when it cannot produce a valid,
+  consistent verdict; the runner turns that into a fail-closed block for a gate. See
   [Backends](./backends.md#dispatch).
 - **Don't preserve backwards compatibility by default.** If the clean solution
   means changing a schema, renaming a concept, or rewriting call sites, do it and

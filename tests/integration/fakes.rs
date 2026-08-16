@@ -67,19 +67,28 @@ fn main() {
     let is_pi = has(&args, "--mode");
     // Grok Build's headless flags mirror Claude's (`--output-format`, `--json-schema`,
     // `-p`, `--resume`); its effort flag is the discriminator.
-    let is_grok = has(&args, "--reasoning-effort");
-    let is_reprompt =
-        has(&args, "resume") || has(&args, "--resume") || has(&args, "--session");
+    // Muse Code is driven as `muse exec --json`; `exec` alone would collide with
+    // Codex, so the `--yolo` unattended flag is the discriminator, checked first.
+    let is_muse = has(&args, "--yolo");
+    let is_codex = !is_muse && is_codex;
+    let is_grok = !is_muse && has(&args, "--reasoning-effort");
+    let is_reprompt = has(&args, "resume")
+        || has(&args, "--resume")
+        || has(&args, "--session")
+        || has(&args, "--session-id");
 
     // Drain stdin so a parent piping a prompt over it never blocks on a full pipe.
     let mut stdin = String::new();
     let _ = std::io::stdin().read_to_string(&mut stdin);
 
     // The prompt is delivered over stdin by Codex (the trailing `-`) and Pi (print
-    // mode reads the task from stdin), and over argv by Claude (`-p <prompt>`).
-    // Recover whichever applies so the contract checks can confirm it arrived.
+    // mode reads the task from stdin), as the trailing positional by Muse, and over
+    // argv by Claude and Grok (`-p <prompt>`). Recover whichever applies so the
+    // contract checks can confirm it arrived.
     let prompt = if is_codex || is_pi {
         stdin.clone()
+    } else if is_muse {
+        args.last().cloned().unwrap_or_default()
     } else {
         let mut found = String::new();
         let mut iter = args.iter();
@@ -123,6 +132,15 @@ fn main() {
         }
         if is_reprompt && !has(&args, "pi-fake") {
             fail("pi: reprompt did not resume the reported session id `pi-fake`");
+        }
+    } else if is_muse {
+        for flag in ["exec", "--json", "--yolo", "--reasoning-effort"] {
+            if !has(&args, flag) {
+                fail(&format!("muse: missing `{flag}`"));
+            }
+        }
+        if is_reprompt && !has(&args, "m-fake") {
+            fail("muse: reprompt did not resume the reported session id `m-fake`");
         }
     } else if is_grok {
         for flag in ["--output-format", "json", "--json-schema", "--permission-mode", "bypassPermissions", "-p"] {
@@ -233,9 +251,49 @@ fn main() {
         emit_pi(effective, &summary, &dollars, tin, tout, cache);
     } else if is_grok {
         emit_grok(effective, &summary, &dollars, tin, tout, cache);
+    } else if is_muse {
+        emit_muse(effective, &summary);
     } else {
         emit_claude(effective, &summary, &dollars, tin, tout, cache);
     }
+}
+
+fn emit_muse(behavior: &str, summary: &str) {
+    // Muse's `exec --json` stream is a sequence of records, each stamped with the
+    // session stream (whose id the backend resumes by on a reprompt) and a
+    // `payload_type`. The verdict travels as the `text` of the `run.terminal.completed`
+    // record, a fenced YAML block. The stream carries no usage. The `\n` are JSON
+    // string escapes that serde_json decodes into real newlines on parse.
+    let mut text = String::new();
+    match behavior {
+        "block" => {
+            text.push_str(r#"```yaml\nverdict: block\nsummary: "#);
+            text.push_str(summary);
+            text.push_str(r#"\nfindings:\n  - kind: blocking\n    path: src/extra.rs\n    line_start: 1\n    line_end: 1\n    detail: simulated blocking finding\n```"#);
+        }
+        "inconsistent" => {
+            text.push_str(r#"```yaml\nverdict: block\nsummary: "#);
+            text.push_str(summary);
+            text.push_str(r#"\nfindings: []\n```"#);
+        }
+        "malformed" => {
+            text.push_str("I looked at the changeset but I will not give a verdict.");
+        }
+        _ => {
+            text.push_str(r#"```yaml\nverdict: pass\nsummary: "#);
+            text.push_str(summary);
+            text.push_str(r#"\nfindings: []\n```"#);
+        }
+    }
+    println!(
+        "{}",
+        r#"{"schema_version":1,"stream":{"kind":"session","id":"m-fake"},"record_type":"event","payload_type":"run.lifecycle.started","payload":{"kind":"run_started"}}"#
+    );
+    let mut line = String::new();
+    line.push_str(r#"{"schema_version":1,"stream":{"kind":"session","id":"m-fake"},"record_type":"event","payload_type":"run.terminal.completed","payload":{"kind":"run_terminal","terminal":"completed","reason":null,"text":""#);
+    line.push_str(&text);
+    line.push_str(r#""}}"#);
+    println!("{}", line);
 }
 
 fn emit_grok(behavior: &str, summary: &str, dollars: &str, tin: u64, tout: u64, cache: u64) {

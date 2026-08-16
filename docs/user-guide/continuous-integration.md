@@ -131,7 +131,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
 
       # Your half of the contract: install and authenticate the backend CLI the
-      # repository's reviewers pin (claude, codex, pi, or grok), billed to the PR
+      # repository's reviewers pin (claude, codex, pi, grok, or muse), billed to the PR
       # author. The concrete per-author auth step is in "Authentication &
       # billing" below; drop it in here. Then stand up anything your reviewers
       # consume (a preview env, a database).
@@ -259,9 +259,10 @@ jobs:
         run: git fetch origin +refs/notes/bastion:refs/notes/bastion || true
 
       # 1. Install a published bastion release (not built from the PR).
-      # 2. For native reviewers: install your backend CLI (claude, codex, pi, or grok) on
-      #    the runner and authenticate it as the PR author. The concrete per-author
-      #    auth step is in "Authentication & billing" below; drop it in here. For
+      # 2. For native reviewers: install your backend CLI (claude, codex, pi, grok,
+      #    or muse) on the runner and authenticate it as the PR author. The
+      #    concrete per-author auth step is in "Authentication & billing" below;
+      #    drop it in here. For
       #    reviewers with a `runner`: ensure a container engine is on the runner
       #    (docker by default, or set BASTION_CONTAINER_ENGINE) and that the backend
       #    CLI and its auth live inside the image; the provider credential variables
@@ -531,6 +532,7 @@ looks before `bastion review` runs. The pattern is the same for every backend:
    | `pi`          | `pi` auth flow     | `~/.pi/agent/auth.json`                         |
    | `claude-code` | `claude` sign-in   | `~/.claude` (OAuth token)                       |
    | `grok`        | `grok login`       | `~/.grok/auth.json` (or `XAI_API_KEY` for API billing) |
+   | `muse`        | `muse login`       | `~/.config/muse/auth.json` (or `META_API_KEY` for API billing) |
 
    For a ChatGPT or Claude **subscription**, this file holds an OAuth credential (an
    access token plus a refresh token); the CLI refreshes the short-lived access

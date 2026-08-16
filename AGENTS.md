@@ -12,9 +12,9 @@ gate. The human sits at the policy layer, authoring and governing reviewers.
 
 **This crate is past the walking-skeleton stage but still partial.** The data and
 routing layers are real and tested; the parallel, timeout-bounded runner
-(`src/runner/`) and all four agent backends (Claude Code, Codex, Pi, and Grok
-Build, under `src/backend/`) are implemented and execute reviewers for real over an injectable
-subprocess seam. Keep that boundary honest: a backend that cannot produce a valid
+(`src/runner/`) and all five agent backends (Claude Code, Codex, Pi, Grok Build, and
+Muse Code, under `src/backend/`) are implemented and execute reviewers for real over
+an injectable subprocess seam. Keep that boundary honest: a backend that cannot produce a valid
 verdict returns an error, never a fabricated pass, and gates fail closed on it.
 
 ## Threat model and trust boundary

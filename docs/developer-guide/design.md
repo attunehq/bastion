@@ -154,8 +154,8 @@ reviewers:
     trigger: ["src/**"]
     mode: gate
     backend: claude-code                     # pinned by user preference. optional; `any` by default.
-    model: claude-opus-4-8                   # backend-specific model id. optional; requires a pinned backend. defaults to the backend's own (Opus 4.8 on Claude Code; Grok Build resolves its own, e.g. grok-4.6). on Pi the id carries its provider as `provider/id` (e.g. openai-codex/gpt-5.5), since Pi's bare default provider is google.
-    effort: xhigh                            # opaque effort level, forwarded to the backend (Claude Code: low|medium|high|xhigh|max; Codex: minimal|low|medium|high; Pi `--thinking`: off|minimal|low|medium|high|xhigh; Grok Build `--reasoning-effort`: low|medium|high|xhigh). optional; `high` by default.
+    model: claude-opus-4-8                   # backend-specific model id. optional; requires a pinned backend. defaults to the backend's own (Opus 4.8 on Claude Code; Grok Build resolves its own, e.g. grok-4.6; Muse Code uses whatever `muse` has configured, e.g. muse-spark-1.2). on Pi the id carries its provider as `provider/id` (e.g. openai-codex/gpt-5.5), since Pi's bare default provider is google.
+    effort: xhigh                            # opaque effort level, forwarded to the backend (Claude Code: low|medium|high|xhigh|max; Codex: minimal|low|medium|high; Pi `--thinking`: off|minimal|low|medium|high|xhigh; Grok Build `--reasoning-effort`: low|medium|high|xhigh; Muse Code `--reasoning-effort`: minimal|low|medium|high|xhigh|ultra). optional; `high` by default.
     timeout: 15m
     runner:
       dockerfile: ./.bastion/e2e.Dockerfile   # builds a hermetic image with tools installed. optional within `runner`; if absent, falls back to `image`. (Omit the whole `runner` block to run native; a `runner` with neither source fails closed.)
@@ -236,7 +236,7 @@ This is the same data type regardless of transport. The local loop and the GitHu
 
 ### Agent backends
 
-Bastion supports Claude Code, Codex, Pi, and Grok Build as first-class harnesses.
+Bastion supports Claude Code, Codex, Pi, Grok Build, and Muse Code as first-class harnesses.
 
 Instead of running its own agent loops, Bastion supports existing tooling as backends. The runner translates the reviewer's execution profile into the backend's native config, and Bastion's CI workflow calls the backend's CLI to run the review. This keeps Bastion simple and lets it leverage the strengths of each backend, as well as supporting subscription-based usage that requires users to run on a specific backend.
 

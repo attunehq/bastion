@@ -11,9 +11,9 @@ Bastion on your project, you are in the wrong place: read the
 Bastion is a Rust 2024 application (a single binary, `bastion`), not a library for
 crates.io. It runs single-concern reviewers as fitness functions over a changeset,
 both locally (the CLI) and in CI. The data and routing layers are real and tested;
-the parallel, timeout-bounded runner and all four agent backends (Claude Code,
-Codex, Pi, and Grok Build) execute reviewers for real over an injectable subprocess seam. Keep
-that boundary honest: a backend that cannot produce a valid verdict must error
+the parallel, timeout-bounded runner and all five agent backends (Claude Code,
+Codex, Pi, Grok Build, and Muse Code) execute reviewers for real over an injectable
+subprocess seam. Keep that boundary honest: a backend that cannot produce a valid verdict must error
 rather than fabricate a pass, and gates must fail closed on it.
 
 ## Contents
