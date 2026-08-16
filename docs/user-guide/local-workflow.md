@@ -240,8 +240,8 @@ usage, including trigger calls that skipped the full reviewer. A resolved review
 usage is top-level on `reviewer.resolved`; trigger usage is nested under `trigger`
 on either terminal reviewer event. `cache_read` is the input tokens served from the
 provider's prompt cache (cache hits); each backend names it differently natively
-(Claude's `cache_read_input_tokens`, Codex's `cached_input_tokens`, Pi's
-`cacheRead`) and Bastion normalizes them to one field. It is 0 when a backend
+(Claude's and Grok Build's `cache_read_input_tokens`, Codex's `cached_input_tokens`,
+Pi's `cacheRead`) and Bastion normalizes them to one field. It is 0 when a backend
 reports no cache usage.
 
 ## What is streamed vs. what is saved

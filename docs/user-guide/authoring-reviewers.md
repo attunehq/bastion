@@ -350,7 +350,7 @@ until you need them.
 ### `backend`
 
 Which agent harness runs the reviewer. Default `any` (resolves to Claude Code).
-Pin `claude-code`, `codex`, or `pi` to force a specific harness, usually
+Pin `claude-code`, `codex`, `pi`, or `grok` to force a specific harness, usually
 because a subscription's terms require it, or because one model is better at a
 given concern.
 
@@ -365,7 +365,7 @@ backend: codex
 ### `model`
 
 The specific model the backend should use, for example `claude-opus-4-8` on Claude
-Code or `gpt-5` on Codex. A model id is **backend-specific**, so pinning one
+Code, `gpt-5` on Codex, or `grok-4.6` on Grok Build. A model id is **backend-specific**, so pinning one
 requires a pinned `backend`: a `model` under `backend: any` is rejected when the
 registry loads, since Bastion cannot know which backend the id is meant for.
 
@@ -385,21 +385,23 @@ model: openai-codex/gpt-5.5
 ```
 
 Omit it to take the backend's default. On Claude Code that default is **Opus 4.8**;
-on Codex and Pi it is whatever the harness itself resolves (for Pi, its configured
-default provider and model). To set a model once for the whole registry rather than
+on Codex, Pi, and Grok Build it is whatever the harness itself resolves (for Pi, its
+configured default provider and model; for Grok Build, `grok models` shows it). To set a model once for the whole registry rather than
 per reviewer, use the [`defaults`](#registry-wide-defaults) block.
 
 ### `effort`
 
 The reasoning-effort level, forwarded verbatim to the active backend's effort
 control (Claude Code's `--effort`, Codex's `model_reasoning_effort`, Pi's
-`--thinking`). Like `model`, the value is opaque: use whatever vocabulary your
-backend accepts. Claude Code takes `low`, `medium`, `high`, `xhigh`, or `max`; Codex
-takes `minimal`, `low`, `medium`, or `high`; Pi takes `off`, `minimal`, `low`,
+`--thinking`, Grok Build's `--reasoning-effort`). Like `model`, the value is opaque:
+use whatever vocabulary your backend accepts. Claude Code takes `low`, `medium`,
+`high`, `xhigh`, or `max`; Codex takes `minimal`, `low`, `medium`, or `high`; Pi
+takes `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`; Grok Build takes `low`,
 `medium`, `high`, or `xhigh`. The shared `low`/`medium`/`high` levels work on any
 backend; the backend-specific ones do not, so a value that does not match the
 reviewer's backend is the backend's problem (Claude Code, for instance, warns and
-falls back to its own default).
+falls back to its own default; Grok Build exits with an error, which fails a gate
+closed).
 
 ```yaml
 effort: high
@@ -530,7 +532,8 @@ environment beyond the least-privilege default. Where these stand:
   can reference files anywhere in the repo. An `image` reference beginning with `-`
   fails closed, since the engine would read it as a command-line option rather than an
   image name. The selected backend's executable must exist inside the image on `PATH`
-  (`claude` for `claude-code`, `codex` for `codex`, `pi` for `pi`). This lets a
+  (`claude` for `claude-code`, `codex` for `codex`, `pi` for `pi`, `grok` for `grok`).
+  This lets a
   reviewer carry tools or a pinned toolchain the host does not have.
 - **`capabilities.network: true` is required to run a container; the default
   `network: false` fails closed.** `network: true` gives a containerized reviewer

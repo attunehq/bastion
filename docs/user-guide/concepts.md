@@ -161,6 +161,7 @@ shells out to its CLI, reusing your local auth and billing.
 - `codex`: OpenAI's Codex CLI.
 - `pi`: the Pi CLI; uses whatever provider you have configured it with locally,
   unless a reviewer pins a `model` (Pi's `provider/id` form selects the provider too).
+- `grok`: xAI's Grok Build CLI.
 
 You pin a backend when a subscription's terms require a specific harness, or when
 one model is better at a given concern. See
@@ -168,7 +169,7 @@ one model is better at a given concern. See
 billing, [Continuous integration](./continuous-integration.md#authentication--billing).
 
 By default the backend CLI runs **natively** on the host, using the `claude`,
-`codex`, or `pi` already on your `PATH` and the auth and billing that CLI is
+`codex`, `pi`, or `grok` already on your `PATH` and the auth and billing that CLI is
 configured with.
 A reviewer that declares a [`runner`](./authoring-reviewers.md#runner-and-capabilities)
 instead runs that same backend **inside a container** (which requires
@@ -177,14 +178,14 @@ gate blocks and an advisor is skipped): Bastion invokes the container engine on 
 host, and the backend CLI resolves inside the image. A fixed set of
 model-provider credential variables (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
 `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`,
-`OPENAI_BASE_URL`, `CODEX_API_KEY`) is forwarded from Bastion's environment into the
+`OPENAI_BASE_URL`, `CODEX_API_KEY`, `XAI_API_KEY`) is forwarded from Bastion's environment into the
 container by name, so the in-container agent can still reach its provider; an image
 can also bake in its own auth. If the reviewer's own `env` sets one of those names,
 that value wins and the host's is not also forwarded, so the reviewer can pin a
 specific credential. Nothing else from your host environment crosses that boundary. To
 give the in-container agent another value, set it as a literal in the reviewer's `env`,
-which is forwarded in alongside the credentials. The fixed set covers the Anthropic
-and OpenAI variables only, so a containerized Pi reviewer on another provider
+which is forwarded in alongside the credentials. The fixed set covers the Anthropic,
+OpenAI, and xAI variables only, so a containerized Pi reviewer on another provider
 authenticates from auth baked into its image or from a credential written into its
 `env`.
 

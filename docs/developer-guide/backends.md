@@ -17,12 +17,13 @@ stays pure orchestration.
 
 | File | Role |
 | --- | --- |
-| [`mod.rs`](../../src/backend/mod.rs) | The `Backend` trait, `ReviewRequest`/`ReviewOutcome`, `MockBackend`, `dispatch`, and the shared prompt/helpers (`changeset_preamble`, `EXHAUSTIVE_FINDINGS_INSTRUCTION`, `context_segment`, `interpolate`, `money_from_dollars`). |
+| [`mod.rs`](../../src/backend/mod.rs) | The `Backend` trait, `ReviewRequest`/`ReviewOutcome`, `MockBackend`, `dispatch`, and the shared prompt/helpers (`changeset_preamble`, `EXHAUSTIVE_FINDINGS_INSTRUCTION`, `context_segment`, `interpolate`, `money_from_dollars`, plus the JSON-schema set `VERDICT_JSON_SCHEMA`/`JSON_SCHEMA_INSTRUCTION`/`JSON_REPROMPT` and the fenced-YAML set `SCHEMA_INSTRUCTION`/`REPROMPT_SUFFIX`/`extract_verdict`). |
 | [`command.rs`](../../src/backend/command.rs) | The `CommandRunner` subprocess seam: `CommandSpec` and `SystemCommandRunner`, plus a fake runner for tests. |
 | [`governor.rs`](../../src/backend/governor.rs) | The spawn governor: `GovernedRunner` (a `CommandRunner` decorator) and `SpawnGovernor`, the per-run spend caps enforced at the seam. See [The spawn governor](#the-spawn-governor). |
 | [`claude_code.rs`](../../src/backend/claude_code.rs) | The Claude Code backend. |
 | [`codex.rs`](../../src/backend/codex.rs) | The Codex backend. |
 | [`pi.rs`](../../src/backend/pi.rs) | The Pi backend. |
+| [`grok.rs`](../../src/backend/grok.rs) | The Grok Build backend. |
 | [`container/`](../../src/backend/container/) | The container runner, split by concern: `plan.rs` (`ExecutionPlan` and image resolution), `runner.rs` (the `CommandRunner` decorator), `credentials.rs`, and `teardown.rs`. See [Containers](./containers.md). |
 
 ## The trait
@@ -92,17 +93,23 @@ match request.reviewer.backend {
         Program::InContainer => PiBackend::with_program(runner, pi::DEFAULT_PROGRAM)
             .review(request).await,
     },
+    Backend::Grok => match program {
+        Program::HostDefault => GrokBackend::new(runner).review(request).await,
+        Program::InContainer => GrokBackend::with_program(runner, grok::DEFAULT_PROGRAM)
+            .review(request).await,
+    },
 }
 ```
 
-All three named backends are wired; the match is exhaustive with a real arm each,
+All four named backends are wired; the match is exhaustive with a real arm each,
 and `Any` defaults to Claude Code until routing by availability/subscription exists.
 A backend still **fails closed** when it cannot produce a valid, consistent verdict:
 it returns an error (never a fabricated pass) and the runner turns that into a block
 for a gate. The only difference between the native and container paths is how the
 program is resolved, the `program` branch above: natively `new` takes it from the
-host (`BASTION_CLAUDE_BIN` / `BASTION_CODEX_BIN` / `BASTION_PI_BIN` / `PATH`), while in
-a container `with_program` pins the bare default name (`claude` / `codex` / `pi`) so
+host (`BASTION_CLAUDE_BIN` / `BASTION_CODEX_BIN` / `BASTION_PI_BIN` / `BASTION_GROK_BIN`
+/ `PATH`), while in a container `with_program` pins the bare default name (`claude` /
+`codex` / `pi` / `grok`) so
 it resolves on the image's `PATH` rather than a host path that means nothing inside
 the image.
 
@@ -111,13 +118,13 @@ the image.
 Backends never call `std::process::Command` directly. They build a `CommandSpec`
 (program, args, working directory, environment) and hand it to a `CommandRunner`.
 Production uses `SystemCommandRunner`; tests inject a fake that records the specs it
-was given and returns canned stdout. This is what lets `claude_code.rs` and
-`codex.rs` be tested against a *fake executable* with no real agent, network, or
+was given and returns canned stdout. This is what lets every backend module be
+tested against a *fake executable* with no real agent, network, or
 cost, while still exercising the real argument-building, env-injection, output
 parsing, and retry logic.
 
-The `BASTION_CLAUDE_BIN`/`BASTION_CODEX_BIN`/`BASTION_PI_BIN` overrides that point a
-backend at a fake executable are recorded in the run seal as an active test seam
+The `BASTION_CLAUDE_BIN`/`BASTION_CODEX_BIN`/`BASTION_PI_BIN`/`BASTION_GROK_BIN`
+overrides that point a backend at a fake executable are recorded in the run seal as an active test seam
 (`src/seal.rs`); a run sealed with one active cannot be attested (see
 [Attestation](./attestation.md)).
 
@@ -205,9 +212,9 @@ about what is honored, so the code does not over-promise:
 | Field | Status in this build |
 | --- | --- |
 | `prompt`, `trigger`, `mode`, `name` | Fully honored. |
-| `backend` | Honored (`claude-code`, `codex`, `pi`; `any` -> Claude Code). |
-| `model` | **Honored.** Forwarded to the backend's model selector (`--model` for Claude Code, `-m` for Codex, `--model` for Pi). Backend-specific, so the registry rejects a `model` (own or inherited) under `backend: any`. Pi's `--model` takes a `provider/id` form (e.g. `openai-codex/gpt-5.5`) that selects the provider too (Pi's bare default provider is `google`), so a Pi model carries its provider in the string. Absent, Claude Code defaults to `claude-opus-4-8`; Codex and Pi resolve their own. |
-| `effort` | **Honored.** An opaque level forwarded verbatim to each backend's native control (Claude Code's `--effort`, Codex's `model_reasoning_effort`, Pi's `--thinking`; see below). Default `high`. |
+| `backend` | Honored (`claude-code`, `codex`, `pi`, `grok`; `any` -> Claude Code). |
+| `model` | **Honored.** Forwarded to the backend's model selector (`--model` for Claude Code, Pi, and Grok Build, `-m` for Codex). Backend-specific, so the registry rejects a `model` (own or inherited) under `backend: any`. Pi's `--model` takes a `provider/id` form (e.g. `openai-codex/gpt-5.5`) that selects the provider too (Pi's bare default provider is `google`), so a Pi model carries its provider in the string. Absent, Claude Code defaults to `claude-opus-4-8`; Codex, Pi, and Grok Build resolve their own. |
+| `effort` | **Honored.** An opaque level forwarded verbatim to each backend's native control (Claude Code's `--effort`, Codex's `model_reasoning_effort`, Pi's `--thinking`, Grok Build's `--reasoning-effort`; see below). Default `high`. |
 | `defaults` (registry-wide `model`/`effort`) | **Honored.** Folded into each reviewer at load time (a reviewer's own field wins); resolution happens once, at registry load, so the persisted run record carries the effective values. |
 | `timeout` | Honored by the runner. |
 | `inputs` | Honored, interpolated into the prompt. |
@@ -228,9 +235,11 @@ Both are passed through **opaquely**: Bastion does not parse or remap either val
 so a reviewer can use whatever vocabulary its backend accepts (Claude Code's
 `--effort` takes `low`/`medium`/`high`/`xhigh`/`max`; Codex's
 `model_reasoning_effort` takes `minimal`/`low`/`medium`/`high`; Pi's `--thinking`
-takes `off`/`minimal`/`low`/`medium`/`high`/`xhigh`). The shared
+takes `off`/`minimal`/`low`/`medium`/`high`/`xhigh`; Grok Build's
+`--reasoning-effort` takes `low`/`medium`/`high`/`xhigh`). The shared
 `low`/`medium`/`high` levels are portable; the backend-specific ones are not, and a
-mismatch is the backend's problem, not a load error.
+mismatch is the backend's problem, not a load error (Grok Build rejects an unknown
+level with a non-zero exit, which a gate fails closed on).
 
 `model` differs from `effort` in one respect: because a model id almost never
 overlaps across backends, a `model` under `backend: any` is a load error
@@ -244,7 +253,9 @@ otherwise it falls back to its configured default provider/model. Pi is
 multi-provider, so the provider rides inside the model string using Pi's native
 `provider/id` form (e.g. `openai-codex/gpt-5.5`): a bare model id would resolve
 under Pi's default provider (`google`), so a Pi reviewer's `model` should name its
-provider.
+provider. Grok Build follows the Codex/Pi shape too: it always sends
+`--reasoning-effort` (default `high`) and sends `--model` only when a model is
+pinned; `grok models` lists the ids the CLI accepts.
 
 The unprovisioned opt-ins **fail closed** rather than silently degrading: a gate that
 declares a tier it cannot get must block, never run degraded and report a pass (see
@@ -269,11 +280,15 @@ and the [user-facing status](../user-guide/README.md#status).
    enumerates every finding in one pass like the others. If the CLI has no native
    structured-output enforcement, reuse the shared fenced-YAML `SCHEMA_INSTRUCTION`,
    `REPROMPT_SUFFIX`, and `extract_verdict` (as the Codex and Pi backends do) rather
-   than re-implementing verdict-block parsing.
+   than re-implementing verdict-block parsing. If it enforces a JSON schema natively,
+   reuse `VERDICT_JSON_SCHEMA`, `JSON_SCHEMA_INSTRUCTION`, `JSON_REPROMPT`, and
+   `parse_verdict_from_text` (as Claude Code and Grok Build do).
 3. Wire the variant into `dispatch` in [`mod.rs`](../../src/backend/mod.rs).
 4. Test it against a fake `CommandRunner`, following `claude_code.rs` / `codex.rs` /
-   `pi.rs`: assert the args and env you build, and the parsing of a representative
-   envelope, including the malformed-output retry path.
+   `pi.rs` / `grok.rs`: assert the args and env you build, and the parsing of a
+   representative envelope, including the malformed-output retry path. Then teach the
+   integration fake agent (`tests/integration/fakes.rs`) the new CLI's protocol and
+   add its `BASTION_<NAME>_BIN` seam to `seal::seams_active_from`.
 
 `MockBackend` is *not* the template for a new backend; it is a deterministic
 always-pass double for testing the runner without any agent. Real backends drive a
@@ -282,8 +297,8 @@ fake executable instead.
 ## The verdict round-trip
 
 Backends capture the agent's structured output, then validate it against the
-verdict schema: Claude Code via a JSON schema (`--json-schema`); Codex and Pi via a
-requested fenced YAML verdict block parsed from the final message (the shared
+verdict schema: Claude Code and Grok Build via a JSON schema (`--json-schema`); Codex
+and Pi via a requested fenced YAML verdict block parsed from the final message (the shared
 `SCHEMA_INSTRUCTION` + `extract_verdict`). If the agent does not produce complying
 output, the backend re-runs the *same session* (resumed by its session/thread id)
 with a turn that re-states the schema and asks for just the structured output of the

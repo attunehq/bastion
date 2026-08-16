@@ -7,7 +7,7 @@
 //!
 //! This crate is the local surface described in `docs/developer-guide/local-surface.md`. The data and
 //! routing layers, the parallel [`runner`], and the agent backends (Claude Code,
-//! Codex, and Pi) are real and tested, each implementing the stable
+//! Codex, Pi, and Grok Build) are real and tested, each implementing the stable
 //! [`backend::Backend`] trait.
 //!
 //! The module layout follows the domain rather than file kind:

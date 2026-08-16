@@ -14,6 +14,7 @@ pub mod codex;
 pub mod command;
 pub mod container;
 pub mod governor;
+pub mod grok;
 pub mod pi;
 
 use std::collections::BTreeMap;
@@ -32,6 +33,7 @@ use self::codex::CodexBackend;
 use self::command::{CommandRunner, SystemCommandRunner};
 use self::container::{ContainerEngine, ContainerRunner, ExecutionPlan, credential_passthrough};
 use self::governor::{GovernedRunner, SpawnGovernor};
+use self::grok::GrokBackend;
 use self::pi::PiBackend;
 
 /// Why an agent call is being made, which controls review-only prompt material.
@@ -86,7 +88,7 @@ pub struct ReviewOutcome {
 ///
 /// Implementors translate the reviewer's execution profile into their native
 /// configuration and capture the agent's structured output. The trait is kept
-/// deliberately small and stable: sibling backends (Codex, Pi) implement the same
+/// deliberately small and stable: sibling backends (Codex, Pi, Grok Build) implement the same
 /// signature, and [`dispatch`] selects between them by [`reviewer::Backend`].
 #[allow(
     async_fn_in_trait,
@@ -221,6 +223,14 @@ async fn run_backend<R: CommandRunner>(
             Program::HostDefault => PiBackend::new(runner).review(request).await,
             Program::InContainer => {
                 PiBackend::with_program(runner, pi::DEFAULT_PROGRAM)
+                    .review(request)
+                    .await
+            }
+        },
+        reviewer::Backend::Grok => match program {
+            Program::HostDefault => GrokBackend::new(runner).review(request).await,
+            Program::InContainer => {
+                GrokBackend::with_program(runner, grok::DEFAULT_PROGRAM)
                     .review(request)
                     .await
             }
@@ -389,6 +399,82 @@ fn money_from_dollars(dollars: f64) -> Money {
     )]
     let cents = (dollars * 100.0).round() as u64;
     Money::from_cents(cents)
+}
+
+/// The JSON Schema handed to a backend with native structured-output enforcement
+/// (Claude Code's and Grok Build's `--json-schema`) to constrain its final output.
+/// It is the wire form of [`Verdict`]: `verdict`, `summary`, and `findings`.
+pub(super) const VERDICT_JSON_SCHEMA: &str = r#"{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "summary"],
+  "properties": {
+    "verdict": { "type": "string", "enum": ["pass", "block"] },
+    "summary": { "type": "string" },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "path", "line_start", "line_end", "detail"],
+        "properties": {
+          "kind": { "type": "string", "enum": ["blocking", "optional"] },
+          "path": { "type": "string" },
+          "line_start": { "type": "integer", "minimum": 0 },
+          "line_end": { "type": "integer", "minimum": 0 },
+          "detail": { "type": "string" }
+        }
+      }
+    }
+  }
+}"#;
+
+/// The structured-output instruction closing every review prompt on a JSON-schema
+/// backend (Claude Code, Grok Build), pinning the reviewer's judgment to the native
+/// JSON verdict schema.
+pub(super) const JSON_SCHEMA_INSTRUCTION: &str = "\
+When you have finished reviewing, return your judgment as structured output \
+conforming to the requested JSON schema: a top-level `verdict` of \"pass\" or \"block\", \
+a human-friendly `summary`, and a `findings` array locating specific comments. Mark a \
+finding `blocking` if it is a reason to block, or `optional` if it is a non-blocking \
+suggestion. If you block, include a blocking finding for each issue you are blocking on.";
+
+/// The reprompt sent on a resumed JSON-schema session when the first turn's output
+/// did not conform to the verdict schema.
+pub(super) const JSON_REPROMPT: &str = "Your previous response did not include a valid structured verdict. \
+     Do not perform any further review work. Reply with ONLY the structured output for the \
+     review you already performed, conforming exactly to the requested JSON schema: a top-level \
+     `verdict` of \"pass\" or \"block\", a `summary` string, and an optional `findings` array. \
+     A `block` must include at least one finding with kind \"blocking\".";
+
+/// Parse a [`Verdict`] from a free-form result string, tolerating a fenced or
+/// prose-wrapped JSON object by extracting the outermost `{...}`. The fallback for
+/// a JSON-schema backend whose envelope carries no validated structured output.
+pub(super) fn parse_verdict_from_text(text: &str) -> Option<Verdict> {
+    let trimmed = text.trim();
+    if let Ok(verdict) = serde_json::from_str::<Verdict>(trimmed) {
+        return Some(verdict);
+    }
+    // Fall back to the first balanced-looking object: from the first `{` to the
+    // last `}`. This rescues output wrapped in a code fence or a sentence.
+    let start = trimmed.find('{')?;
+    let end = trimmed.rfind('}')?;
+    if end <= start {
+        return None;
+    }
+    serde_json::from_str::<Verdict>(&trimmed[start..=end]).ok()
+}
+
+/// Truncate `s` to at most `max` bytes (on a char boundary) for error messages.
+pub(super) fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &s[..end])
 }
 
 /// The instruction appended to every review prompt pinning the verdict schema, for
