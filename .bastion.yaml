@@ -60,13 +60,13 @@ attestations: true
 
 # Registry-wide defaults, inherited by every reviewer that does not set the field
 # itself (an explicit field on a reviewer wins). Every reviewer below pins
-# `backend: codex`, which satisfies the rule that an inherited model needs a
-# pinned backend (a model under `backend: any` is a load error). The Codex backend
-# forwards `model` as `-m` and `effort` as `model_reasoning_effort`. Both
-# reviewers use Terra at high effort. See
+# `backend: muse`, which satisfies the rule that an inherited model needs a
+# pinned backend (a model under `backend: any` is a load error). The Muse Code
+# backend forwards `model` as `--model` and `effort` as `--reasoning-effort`. Both
+# reviewers use Muse Spark 1.2 in contributor mode at high effort. See
 # docs/user-guide/authoring-reviewers.md#registry-wide-defaults.
 defaults:
-  model: gpt-5.6-terra
+  model: muse-spark-1.2-contributor
   effort: high
 
 # A broad concern can replace its path list with a semantic trigger. `paths` is
@@ -75,8 +75,8 @@ defaults:
 # trigger:
 #   kind: agent
 #   prompt: Run only when this changeset affects the concern.
-#   backend: codex
-#   model: gpt-5.6-luna
+#   backend: muse
+#   model: muse-spark-1.2-contributor
 #   effort: high
 #   paths: [src/**/*.rs]
 
@@ -103,7 +103,7 @@ reviewers:
         src/attest/**,
       ]
     mode: gate
-    backend: codex
+    backend: muse
     prompt: |
       Bastion's core safety invariant is that gates fail closed, advisors fail
       open, and every verdict is internally consistent. That invariant is
@@ -162,7 +162,7 @@ reviewers:
         docs/user-guide/**,
       ]
     mode: gate
-    backend: codex
+    backend: muse
     prompt: |
       The user guide under docs/user-guide is the end-user documentation for
       Bastion: it describes the CLI a user runs and the policy they author

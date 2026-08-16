@@ -52,17 +52,17 @@ jobs:
     # here because the mint step's `if:` can read `env` but not `secrets`.
     env:
       HAS_BASTION_APP: ${{ secrets.BASTION_APP_ID != '' && secrets.BASTION_APP_PRIVATE_KEY != '' }}
-    # The Codex (ChatGPT) subscription credentials live in an Actions secret, and
-    # GitHub does not share secrets with workflows triggered by fork PRs. We also
-    # will not run an agentic backend over untrusted code. So this runs for
-    # same-repo PRs only; a maintainer reviews a fork PR by pushing its branch to a
-    # trusted branch in this repo.
+    # The Muse API key lives in an Actions secret, and GitHub does not share
+    # secrets with workflows triggered by fork PRs. We also will not run an
+    # agentic backend over untrusted code. So this runs for same-repo PRs only; a
+    # maintainer reviews a fork PR by pushing its branch to a trusted branch in
+    # this repo.
     if: github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - uses: actions/checkout@v7
         with:
           # Full history so the base branch resolves for the changeset diff and so
-          # the Codex reviewer can run `git diff <base>` over the working tree.
+          # the reviewer can run `git diff <base>` over the working tree.
           fetch-depth: 0
           # The PR head, not the default merge commit: the review diffs the PR head
           # against the base, mirroring what the author's local `bastion review` saw.
@@ -70,63 +70,21 @@ jobs:
           # author attested; the merge-commit view would never match it.
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 20
-
       # The backend CLI is the consumer's half of the action's contract: install
       # and authenticate it before the action runs, exactly as a contributor
-      # would locally. Installed globally so `codex` resolves by name on PATH
-      # with no BASTION_CODEX_BIN override: a backend-path override marks the
-      # run's seal with a test seam, and a seam-tainted seal is disqualified
-      # from being carried forward on the next push (and from attestation).
-      - name: Install the Codex CLI
+      # would locally. The Muse launcher goes on PATH as `muse` so it resolves by
+      # name with no BASTION_MUSE_BIN override: a backend-path override marks the
+      # run's seal with a test seam, and a seam-tainted seal is disqualified from
+      # being carried forward on the next push (and from attestation). The
+      # launcher fetches the pinned CLI binary on first run.
+      - name: Install the Muse Code CLI
         run: |
           set -euo pipefail
-          npm install -g @openai/codex
-
-      - name: Authenticate Codex as the PR author
-        env:
-          # Bastion bills each PR's reviews to its author's own ChatGPT subscription
-          # through Codex (docs/developer-guide/github-adapter.md, "Authentication &
-          # billing"). The author's GitHub login maps to a `CODEX_AUTH_<LOGIN>`
-          # secret holding the contents of that person's `~/.codex/auth.json`; Codex
-          # refreshes the access token from the stored refresh token at run time.
-          # To onboard a contributor, add their secret and a `case` arm below.
-          # The mapping lives here, in a CODEOWNERS-protected workflow, so changing
-          # who may spend a subscription is itself a reviewed change. An unmapped
-          # author fails closed (the gate blocks) rather than silently billing
-          # someone else.
-          #
-          # Bot authors (dependabot[bot]) have no subscription of their own, so
-          # their PRs bill to a maintainer who has opted in to sponsor them: a
-          # ToS-compliant arrangement where the maintainer governing the bot powers
-          # the review of its changes. Note that GitHub serves secrets to
-          # Dependabot-triggered runs from the separate *Dependabot* secret store,
-          # not the Actions store, so any CODEX_AUTH_<LOGIN> a bot arm references must
-          # also be set as a Dependabot secret (gh secret set --app dependabot) or it
-          # arrives empty and the gate blocks.
-          AUTHOR: ${{ github.event.pull_request.user.login }}
-          CODEX_AUTH_JSSBLCK: ${{ secrets.CODEX_AUTH_JSSBLCK }}
-        run: |
-          set -euo pipefail
-          author="$(printf '%s' "$AUTHOR" | tr '[:upper:]' '[:lower:]')"
-          # Quote bracketed bot logins; unquoted, case reads [bot] as a glob class.
-          case "$author" in
-            jssblck) cred="$CODEX_AUTH_JSSBLCK" ;;
-            'dependabot[bot]') cred="$CODEX_AUTH_JSSBLCK" ;;
-            *)
-              echo "::error::No Codex subscription is mapped for PR author '$AUTHOR'. Add a CODEX_AUTH_<LOGIN> secret and a case arm in .github/workflows/bastion.yml." >&2
-              exit 1
-              ;;
-          esac
-          if [ -z "$cred" ]; then
-            echo "::error::Codex credential for '$AUTHOR' is mapped but its secret is empty; set the matching CODEX_AUTH_<LOGIN> repository secret." >&2
-            exit 1
-          fi
-          mkdir -p "$HOME/.codex"
-          printf '%s' "$cred" > "$HOME/.codex/auth.json"
-          chmod 600 "$HOME/.codex/auth.json"
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL https://api.meta.ai/muse-launcher.sh -o "$HOME/.local/bin/muse"
+          chmod +x "$HOME/.local/bin/muse"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/muse" --version
 
       - name: Mint a dedicated app token for reporting
         id: app-token
@@ -151,5 +109,11 @@ jobs:
       # order, so the comment and checks land even when the gate blocks.
       - name: Review and report
         uses: ./
+        # Muse Code authenticates from META_API_KEY (API billing) when set, so the
+        # reviewers bill to the repository's key rather than a contributor's
+        # account. The key lives in the META_AI_API_KEY Actions secret; a missing
+        # or empty key makes every gate fail closed rather than silently pass.
+        env:
+          META_API_KEY: ${{ secrets.META_AI_API_KEY }}
         with:
           report-token: ${{ steps.app-token.outputs.token || github.token }}
