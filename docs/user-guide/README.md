@@ -76,8 +76,8 @@ You declare **reviewers** (focused agent prompts, one concern each) in
 and a **mode** (`gate` blocks the merge, `advisor` only comments). `bastion review`
 finds the reviewer candidates for your working-tree changes. Each candidate
 executes in parallel, records an agent-trigger skip, replays from a verified
-attestation (CI), or carries its unchanged pass forward from the branch's previous
-run (local or CI). Their terminal outcomes aggregate into one decision: every
+attestation (CI), or carries its unchanged pass from the newest prior run on the
+branch that resolved that reviewer (local or CI). Their terminal outcomes aggregate into one decision: every
 applicable gate must pass, while a semantic skip counts separately from a pass.
 A local run uses personal reviewers from a user-level `.bastion.yaml` when a repo
 has not adopted Bastion, or merges them with `--with-user-reviewers`. An

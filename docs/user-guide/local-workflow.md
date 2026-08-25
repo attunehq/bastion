@@ -11,7 +11,8 @@ order: 5
 
 The local CLI applies the same reviewers and decisions CI enforces: CI executes them
 fresh, records an agent-trigger skip, replays an attested local outcome, or carries
-an unchanged reviewer forward from the branch's previous CI run. So a green local loop usually means a PR that CI
+an unchanged reviewer from the newest prior CI run on the branch that resolved
+that reviewer. So a green local loop usually means a PR that CI
 confirms. Two things can make a local run differ: CI feeds reviewers the PR's
 description and discussion that a default local run lacks, and a local run can merge
 in personal reviewers with `--with-user-reviewers`, which CI never sees (see
@@ -101,11 +102,12 @@ CI carries too. A workflow that persists and restores the run store across pushe
 (the example workflow in
 [Continuous integration](./continuous-integration.md#the-workflow) includes the
 restore and upload steps that do this) lets a push carry an unchanged reviewer
-forward from the branch's previous CI run, the same way your local loop does and on
-the same verified-seal condition. This is separate
-from [attestation replay](#attesting-a-run-for-ci): replay reuses your signed local
-run so CI need not re-execute it at all, while carry reuses CI's own prior run when a
-later push leaves a reviewer's scoped content untouched.
+from the newest prior CI run on the branch that resolved that reviewer, the same
+way your local loop does and on the same verified-seal condition. This is
+separate from [attestation replay](#attesting-a-run-for-ci): replay reuses your
+signed local run so CI need not re-execute it at all, while carry walks CI's
+own prior runs newest first when a later push leaves a reviewer's scoped
+content untouched.
 
 ### Running a subset by hand
 
@@ -174,10 +176,10 @@ The event types:
 
 | Event | Meaning |
 | --- | --- |
-| `run.started` | The run began; lists the reviewer candidates in the plan. Each executes, semantically skips, replays from a verified attestation, or carries from the branch's previous run. Under `--reviewer` the list holds only the selected reviewers, and the event carries `partial: true` when that selection excludes a candidate. |
-| `reviewer.started` | One reviewer candidate began resolving: dispatched to its trigger or reviewer backend, reconstructed from a verified attestation bundle, or carried from the branch's previous run. |
+| `run.started` | The run began; lists the reviewer candidates in the plan. Each executes, semantically skips, replays from a verified attestation, or carries from the newest prior run on the branch that resolved that reviewer. Under `--reviewer` the list holds only the selected reviewers, and the event carries `partial: true` when that selection excludes a candidate. |
+| `reviewer.started` | One reviewer candidate began resolving: dispatched to its trigger or reviewer backend, reconstructed from a verified attestation bundle, or carried from the newest prior run on the branch that resolved that reviewer. |
 | `reviewer.finished` | One fresh reviewer task stopped executing. `completed` and `total` count only the fresh tasks because replayed and carried reviewers dispatch no backend. This event is progress only. The final outcome follows after post-run scope-digest checks. |
-| `reviewer.resolved` | One reviewer was finalized; carries its `verdict`, `summary`, `findings`, `usage` (present only when the backend reported it; a Muse Code reviewer never does), and a `has_transcript` flag. An agent-triggered reviewer that ran also carries its preceding `trigger` decision and, when its backend reported it, usage. Carries `replayed: true` when the terminal outcome came from a verified attestation, and `carried: true` when the verdict was carried forward from the branch's previous run instead of a fresh execution. A reviewer that produced a real verdict this run is also stamped with `scope_digest`, a hash of everything the verdict was keyed to; a later run carries a prior pass only when its own digest is identical. |
+| `reviewer.resolved` | One reviewer was finalized; carries its `verdict`, `summary`, `findings`, `usage` (present only when the backend reported it; a Muse Code reviewer never does), and a `has_transcript` flag. An agent-triggered reviewer that ran also carries its preceding `trigger` decision and, when its backend reported it, usage. Carries `replayed: true` when the terminal outcome came from a verified attestation, and `carried: true` when the verdict was carried from the newest prior run on the branch that resolved that reviewer instead of a fresh execution. A reviewer that produced a real verdict this run is also stamped with `scope_digest`, a hash of everything the verdict was keyed to; a later run carries a prior pass only when its own digest is identical. |
 | `reviewer.skipped` | An agent trigger decided that its full reviewer did not apply. Carries the trigger backend, decision, reason, usage (when the backend reported it), duration, and transcript availability without recording a pass verdict. It can also carry `replayed: true` when CI restored the terminal outcome from an attestation. |
 | `run.completed` | The aggregate decision and gate tally, including `gates.skipped`, plus the run's wall-clock `duration_ms` and usage totals summed across trigger and full-reviewer calls. Carries `partial: true` (as does `run.started`) when `--reviewer` narrowed the run. |
 | `run.attested` | A signed local run was replayed; carries the replayed `reviewers`, the attesting `public_key`, and `attested_at`. |
@@ -357,7 +359,8 @@ reviewer typically reaches a host service over the container network rather than
 Every reviewer is an agent invocation, so a project running Bastion both locally
 and in CI can pay for each review roughly twice: once in your loop, once again when
 CI confirms it. Incremental carry recovers some of that across CI pushes (an
-unchanged reviewer carries from the branch's previous CI run), but the first CI run
+unchanged reviewer carries from the newest prior CI run on the branch that
+resolved that reviewer), but the first CI run
 of a changeset has nothing to carry from. If your repository has set
 `attestations: true` in its registry
 (see [Continuous integration](./continuous-integration.md#attesting-a-run-so-ci-can-replay-it)),
