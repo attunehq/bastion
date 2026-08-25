@@ -104,7 +104,7 @@ Bastion persists every run under a per-user data directory, resolved by platform
 - macOS: `~/Library/Application Support/bastion`.
 - Windows: `%APPDATA%\bastion`.
 
-Each run gets a directory keyed by its run id, holding the full event stream and a subdirectory per reviewer:
+Each run gets a directory keyed by its run id, holding the full event stream and a subdirectory per reviewer. Full runs at one HEAD reuse `r-<short-sha>` and overwrite the previous full run. A partial `--reviewer` run uses `r-<short-sha>-partial` so it cannot overwrite that full record (carry still needs it):
 
 ```
 <data-dir>/

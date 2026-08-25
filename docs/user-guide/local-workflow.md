@@ -321,6 +321,10 @@ variable, handy for scratch runs you do not want in your real history. The layou
     latest                       # a plain file holding the most recent run id
 ```
 
+Full runs at one commit reuse `r-<short-sha>` and overwrite the previous full
+run. A `--reviewer` partial is stored as `r-<short-sha>-partial` so it cannot
+overwrite that full record.
+
 `run.jsonl` is the same event stream whether a human or an agent triggered the
 run, so any run can be replayed or inspected after the fact. Runs accumulate:
 `bastion review` does not prune, so history grows until you run `bastion clean`,

@@ -324,6 +324,21 @@ fn a_later_partial_run_does_not_hide_an_earlier_carry_eligible_pass() {
         "stderr:\n{}",
         String::from_utf8_lossy(&targeted.stderr)
     );
+    let runs = store::list_runs(&repo.layout()).unwrap();
+    assert_eq!(
+        runs.len(),
+        2,
+        "a partial run must not overwrite the last full run at the same HEAD"
+    );
+    assert!(
+        runs.iter()
+            .any(|run| run.partial && run.run.as_str().ends_with("-partial")),
+        "partial runs persist under a distinct -partial id; got: {runs:?}"
+    );
+    assert!(
+        runs.iter().any(|run| !run.partial),
+        "the earlier full run must still be in the store"
+    );
 
     let finish = repo.review_with_args(fake, &["--with-user-reviewers"]);
     assert!(finish.exited_zero(), "stderr:\n{}", finish.stderr);

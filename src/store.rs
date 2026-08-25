@@ -176,7 +176,9 @@ pub fn list_runs(layout: &Layout) -> Result<Vec<RunSummary>> {
 /// carry *before* the runner persists the current run, so the current run is not
 /// yet in the store. That includes a previous invocation at the same `HEAD` (a
 /// local rerun on a dirty working tree reuses the same run id and overwrites it
-/// only at the end, so consulting it first is correct).
+/// only at the end, so consulting it first is correct). A partial `--reviewer`
+/// run uses a distinct id (`r-<sha>-partial`) so it does not overwrite the
+/// last full run at that HEAD.
 #[must_use]
 pub fn runs_on_branch(layout: &Layout, branch: &str) -> Vec<(RunSummary, Vec<RunEvent>)> {
     let Ok(runs) = collect_runs(layout) else {
