@@ -593,6 +593,18 @@ mod tests {
         assert_ne!(a, b, "editing the reviewer must invalidate its carry");
     }
 
+    /// Inputs for [`persist_run`]: one resolved reviewer on a branch.
+    struct PersistSpec<'a> {
+        run_id: &'a str,
+        branch: &'a str,
+        name: &'a str,
+        digest: &'a str,
+        verdict: Decision,
+        seal: Option<&'a [u8]>,
+        dirty_seal: bool,
+        partial: bool,
+    }
+
     /// A prior run on `branch` with one resolved pass for `name` carrying
     /// `digest`, persisted (and optionally sealed) into `layout`.
     fn persist_prior_run(
@@ -601,35 +613,37 @@ mod tests {
         branch: &str,
         name: &str,
         digest: &str,
-        seal_it: Option<&[u8]>,
+        seal: Option<&[u8]>,
         dirty_seal: bool,
     ) -> RunId {
         persist_run(
             layout,
+            PersistSpec {
+                run_id,
+                branch,
+                name,
+                digest,
+                verdict: Decision::Pass,
+                seal,
+                dirty_seal,
+                partial: false,
+            },
+        )
+    }
+
+    /// Persist one resolved reviewer. A `partial` spec stays unsealed even
+    /// when `seal` is `Some`.
+    fn persist_run(layout: &Layout, spec: PersistSpec<'_>) -> RunId {
+        let PersistSpec {
             run_id,
             branch,
             name,
             digest,
-            Decision::Pass,
-            seal_it,
+            verdict,
+            seal: seal_it,
             dirty_seal,
-            false,
-        )
-    }
-
-    /// Persist one resolved reviewer on `branch`. `partial` marks a
-    /// `--reviewer` run; those stay unsealed even when `seal_it` is `Some`.
-    fn persist_run(
-        layout: &Layout,
-        run_id: &str,
-        branch: &str,
-        name: &str,
-        digest: &str,
-        verdict: Decision,
-        seal_it: Option<&[u8]>,
-        dirty_seal: bool,
-        partial: bool,
-    ) -> RunId {
+            partial,
+        } = spec;
         let run = RunId(run_id.into());
         let passed = verdict == Decision::Pass;
         let resolved = RunEvent::ReviewerResolved {
@@ -1148,14 +1162,16 @@ mod tests {
         );
         persist_run(
             &layout,
-            "r-2",
-            "feat",
-            "g2",
-            "digest-other",
-            Decision::Pass,
-            None,
-            false,
-            true,
+            PersistSpec {
+                run_id: "r-2",
+                branch: "feat",
+                name: "g2",
+                digest: "digest-other",
+                verdict: Decision::Pass,
+                seal: None,
+                dirty_seal: false,
+                partial: true,
+            },
         );
         let g1 = reviewer("g1", &["src/**"]);
         let repo_set: BTreeSet<String> = ["g1".to_string()].into_iter().collect();
@@ -1187,14 +1203,16 @@ mod tests {
         );
         persist_run(
             &layout,
-            "r-2",
-            "feat",
-            "g1",
-            "digest-1",
-            Decision::Block,
-            None,
-            false,
-            false,
+            PersistSpec {
+                run_id: "r-2",
+                branch: "feat",
+                name: "g1",
+                digest: "digest-1",
+                verdict: Decision::Block,
+                seal: None,
+                dirty_seal: false,
+                partial: false,
+            },
         );
         let g1 = reviewer("g1", &["src/**"]);
         let repo_set: BTreeSet<String> = ["g1".to_string()].into_iter().collect();
