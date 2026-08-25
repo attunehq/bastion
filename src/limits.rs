@@ -15,7 +15,8 @@
 //! through, so the count includes reprompts and launches that die immediately, not
 //! just the ones that produce a verdict. The defaults are conservative: they leave
 //! a healthy full run untouched while turning a respawn storm into a loud, fast
-//! abort.
+//! abort. The caps reset on each invocation; the bundled `using-bastion` skill
+//! is the cross-invocation bound for unattended agents.
 
 use serde::Deserialize;
 

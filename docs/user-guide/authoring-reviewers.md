@@ -249,6 +249,11 @@ the block only if your fan-out is genuinely larger than the defaults allow, or i
 you want tighter caps than the defaults. Like `attestations:`, only the root
 registry file may set `limits:`.
 
+These caps reset on every `bastion review` invocation. The bundled
+`using-bastion` skill is what stops an unattended agent from accumulating that
+spend across invocations (three full reviews, then hand remaining findings to
+the human).
+
 ## The required fields
 
 Four fields are mandatory. A reviewer with just these is complete and runnable.

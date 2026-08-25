@@ -5,9 +5,10 @@ description: >-
   .bastion.yaml exists, or `bastion` is on PATH). First decide whether to run the
   gate locally at all: each reviewer is a paid agent, and running the same
   changeset locally and in CI spends the tokens twice. Covers that decision, the
-  local loop (`bastion review --format jsonl`, read findings, fix, reach green),
-  attesting a green run so CI replays it instead of re-reviewing, and the rule
-  that reviewers are governed policy you must not edit just to pass a gate.
+  bounded local loop (`bastion review --format jsonl`, read findings, fix, stop
+  after three full reviews), attesting a green run so CI replays it instead of
+  re-reviewing, and the rule that reviewers are governed policy you must not
+  edit just to pass a gate.
 ---
 
 <!-- BASTION_SKILL_PROVENANCE -->
@@ -78,9 +79,24 @@ instead, and in case 4 you have already fallen back to CI.
 ## The loop
 
 When you are running locally (case 1 or 2), run the review, read what blocks, fix
-it, run again, until it passes. In case 1, sync with the base branch before the
-final run, since that is the run you will attest ("Sync with the base branch
-first", below, has the steps and the reason):
+it, and run again. Stop at the first of these:
+
+- `run.completed.verdict` is `pass` (exit zero). Then attest (case 1) and open
+  the PR.
+- This is the third full `bastion review` invocation in this session and the
+  gate is still blocked. Do not start a fourth. Report the remaining findings
+  to the human and stop.
+- The command itself fails to run (it cannot spawn a backend, it times out, it
+  crashes). That is case 4.
+
+Three full reviews is enough for a productive incremental loop. A fourth is
+the runaway this skill exists to prevent: the per-run launch cap resets on
+every invocation, so looping without a session bound can spend without limit
+while every individual run looks healthy.
+
+In case 1, sync with the base branch before the final run, since that is the
+run you will attest ("Sync with the base branch first", below, has the steps
+and the reason):
 
 ```sh
 bastion review --base <branch> --format jsonl
@@ -95,6 +111,9 @@ bastion review --base <branch> --format jsonl
 
 If this command itself fails to run (it cannot spawn a backend, it times out, it
 crashes), that is case 4: stop and fall back to CI rather than retrying locally.
+Do not pass `--fresh`, a new `--data-dir`, or `--reviewer` unless a later
+section of this skill says to. Those flags are how a cheap incremental loop
+turns into a full-price one.
 
 ## Reading the stream
 
@@ -119,20 +138,24 @@ need to open anything else.
 2. Parse stdout one line at a time as JSON.
 3. For every `reviewer.resolved` with `verdict: "block"`, fix the code its
    `findings` point at.
-4. Re-run. Loop until `run.completed.verdict` is `pass` (exit zero).
-5. Then attest (case 1) and open your PR.
+4. Re-run. Stop when `run.completed.verdict` is `pass` (exit zero), or after
+   three full invocations, whichever comes first.
+5. Then attest (case 1) and open your PR. If you stopped blocked, do not
+   attest and do not keep paying for another local run.
 
 Do not open transcripts to do this. The findings already say what to change.
 
 ## Re-runs are incremental by default
 
-A re-run on the same branch does not re-execute every reviewer. A reviewer whose
-previous run passed, and whose triggered files are unchanged since then, has its
-pass carried forward: the stream marks it `"carried": true`, it spends no tokens,
-and it still counts in the gate tally. Reviewers whose triggered files your fix
-touched (which always includes the ones that blocked, since you just changed the
-code they flagged) execute fresh. So the loop above is already the cheap loop;
-let it work.
+A re-run on the same branch does not re-execute every reviewer. Carry walks the
+branch's prior runs, newest first, and for each reviewer uses the newest run
+that actually resolved it. A reviewer whose newest resolution is a pass, and
+whose triggered files are unchanged since then, has its pass carried forward:
+the stream marks it `"carried": true`, it spends no tokens, and it still
+counts in the gate tally. Reviewers whose triggered files your fix touched
+(which always includes the ones that blocked, since you just changed the code
+they flagged) execute fresh. So the loop above is already the cheap loop; let
+it work.
 
 The carry keys to your changeset (the trigger-scoped diff against the merge
 base), not to the base branch's position. The base moving under you, or a rebase
@@ -141,16 +164,26 @@ conflict resolution, upstream edits inside a hunk's context lines); a rebase
 over unrelated upstream changes carries every pass through. Do not treat a
 rebase as a reason to expect, or budget for, a full re-review.
 
-- Pass `--fresh` to re-execute everything (say, after changing something a
-  reviewer's trigger does not cover but you believe it should judge).
-- Pass `--reviewer <name>` (repeatable; alias `--only`) to run a hand-picked
-  subset of the triggered reviewers. Naming a reviewer bypasses its agent
-  trigger and runs the full review. The run is then marked **partial**
-  (`"partial": true` on `run.started` and `run.completed`): its green speaks
-  only for the reviewers that ran, it cannot be attested, and it does not
-  replace a full green. Use it to iterate on one stubborn reviewer, then finish
-  with a normal `bastion review` (the unchanged passes carry, so the final full
-  run is still cheap). An unknown or untriggered name is an error, not a no-op.
+Do not opt out of that cheap path unless the human asked:
+
+- Do not pass `--fresh`. It re-executes every reviewer, including ones whose
+  pass would have carried, and is how a productive loop turns into a full-price
+  one.
+- Do not pass `--data-dir` or set `BASTION_DATA_DIR` to "start over". A new
+  data directory has no prior runs, so nothing carries and every reviewer
+  executes.
+- Do not pass `--reviewer` as the default loop. Use it only for one stubborn
+  reviewer after a full run has already blocked on it, then finish with one
+  ordinary `bastion review`. Count that finishing full run toward the three.
+  Naming a reviewer bypasses its agent trigger and runs the full review. The
+  run is then marked **partial** (`"partial": true` on `run.started` and
+  `run.completed`): its green speaks only for the reviewers that ran, it
+  cannot be attested, and it does not replace a full green. A later partial
+  run does not hide earlier sealed passes for reviewers it did not run, so
+  those unchanged passes still carry on the finishing full run. The named
+  reviewer itself executes fresh there: a partial run is never sealed, so a
+  repository reviewer's pass from the partial cannot carry. An unknown or
+  untriggered name is an error, not a no-op.
 
 ## Attesting a green run
 
@@ -283,3 +316,6 @@ to explain away per change.
   you open the PR, and in case 1 attest so CI replays rather than re-reviews. Do not
   run locally on top of a CI gate that will re-review anyway, and do not loop on a
   failing local run; both just multiply the spend.
+- **Stop after three full reviews.** The per-run launch cap does not accumulate
+  across invocations. A fourth full `bastion review` in the same session is
+  unbounded spend; stop and hand the remaining findings to the human.

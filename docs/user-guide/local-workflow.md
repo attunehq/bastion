@@ -21,7 +21,10 @@ covers the loop in depth.
 ## The loop
 
 The intended use is a tight loop: run the review, read what blocks, fix it, run
-again, until green.
+again. A person watching the CLI can keep going until green. An agent following
+the bundled `using-bastion` skill stops after three full `bastion review`
+invocations if the gate is still blocked, because each invocation's launch cap
+resets and an unbounded loop can spend without a stopping point.
 
 ```sh
 bastion review --base main
@@ -64,10 +67,10 @@ its scoped content is unchanged and otherwise executing fresh (see
 ### Re-runs are incremental
 
 The loop's dominant cost would otherwise be re-executing reviewers that already
-passed. So on a re-run of the same branch, a reviewer whose previous verdict was a
-pass, and whose *scope digest* is unchanged since that run, is *carried*: its
-prior verdict counts in the gate tally, the stream marks it `"carried": true`, and
-no agent runs and no tokens are spent on it. The digest covers everything the
+passed. So on a re-run of the same branch, a reviewer whose newest prior verdict
+on that branch was a pass, and whose *scope digest* is unchanged since that run,
+is *carried*: its prior verdict counts in the gate tally, the stream marks it
+`"carried": true`, and no agent runs and no tokens are spent on it. The digest covers everything the
 verdict was keyed to: the reviewer's own definition, the path-matched diff for
 a path trigger or the entire changeset for an agent trigger, the commit
 messages that touched the same files, and the content of untracked files in
@@ -116,10 +119,12 @@ events carry `"partial": true`, the human output and `bastion runs` say so, and
 the run cannot be attested. (Naming every triggered reviewer is a full run: the
 selection reduced nothing, so nothing is marked.) A partial green speaks only
 for the reviewers that ran. Finish with a plain `bastion review`: only a full run
-seals a real green. Carry spares any reviewer whose scoped content has not moved
-since an eligible prior run, but not from the partial run itself: a partial run is
-never sealed, so the repository's own reviewers re-execute rather than carry from
-it.
+seals a real green. Carry walks the branch's prior runs newest first and, for
+each reviewer, uses the newest run that resolved it. A later partial run does
+not hide earlier sealed passes for reviewers it did not run, so those unchanged
+passes still carry on the finishing full run. The named reviewer itself
+executes fresh there: a partial run is never sealed, so a repository reviewer's
+pass from the partial cannot carry.
 
 The CI workflow passes `--repo`/`--pr` so reviewers see the PR's stated intent and discussion. Locally you rarely need them: with no PR, intent comes from your branch's commit messages (`base..HEAD`), and each reviewer's prior findings come from the run store. When you do pass them, Bastion builds its GitHub REST client from `GITHUB_TOKEN` and `GITHUB_API_URL` (the latter defaults to the public API and points at a GitHub Enterprise host when set). Discussion gathering reads the first 100 conversation comments and the first 100 review comments and does not paginate, so later comments on a very long thread are not included. Gathering PR context is read-only and best effort, so an API or token failure never fails the review; it just drops back to the local context.
 
@@ -200,8 +205,9 @@ If you are an agent driving the loop, this is the whole contract:
 5. The aggregate decision is `run.completed.verdict`. The process also exits
    non-zero on `block`, so you can branch on the exit code alone if you only need
    pass/fail.
-6. Fix what blocked and re-run. Loop until `run.completed.verdict` is `pass` (exit
-   zero), then open your PR.
+6. Fix what blocked and re-run. Stop when `run.completed.verdict` is `pass` (exit
+   zero), or after three full invocations, whichever comes first. Then open your
+   PR. If you stopped blocked, do not keep paying for another local run.
 
 This contract is exactly what `bastion skills install` checks into your repo as the
 `using-bastion` agent skill, so your agents follow it without being told each time.

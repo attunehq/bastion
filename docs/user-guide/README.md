@@ -81,7 +81,7 @@ run (local or CI). Their terminal outcomes aggregate into one decision: every
 applicable gate must pass, while a semantic skip counts separately from a pass.
 A local run uses personal reviewers from a user-level `.bastion.yaml` when a repo
 has not adopted Bastion, or merges them with `--with-user-reviewers`. An
-authoring agent loops `bastion review` until it is green, then opens a PR where CI
+authoring agent loops `bastion review` to a green gate (the bundled skill stops after three full reviews), then opens a PR where CI
 executes, skips, replays, or carries the repository's reviewers (the user-level ones are local-only).
 CI usually confirms the result, and can differ when it adds the PR's description and
 discussion to the reviewers' context. Humans stay in the loop by owning the reviewer
