@@ -162,33 +162,47 @@ pub fn list_runs(layout: &Layout) -> Result<Vec<RunSummary>> {
         .collect())
 }
 
+/// Prior runs recorded on `branch`, newest first (the same order
+/// [`collect_runs`] already uses).
+///
+/// A review resolves this once and shares it: prior-findings recall
+/// ([`findings_from_events`]) wants only the newest run, while carry planning
+/// ([`crate::carry::plan`]) walks the list per reviewer so a later partial or
+/// unsealed run cannot hide an earlier eligible pass for a reviewer it did not
+/// resolve. Empty when the branch has no prior run (or the run history cannot
+/// be read).
+///
+/// This does not exclude any run id. A review assembles its context and plans
+/// carry *before* the runner persists the current run, so the current run is not
+/// yet in the store. That includes a previous invocation at the same `HEAD` (a
+/// local rerun on a dirty working tree reuses the same run id and overwrites it
+/// only at the end, so consulting it first is correct).
+#[must_use]
+pub fn runs_on_branch(layout: &Layout, branch: &str) -> Vec<(RunSummary, Vec<RunEvent>)> {
+    let Ok(runs) = collect_runs(layout) else {
+        return Vec::new();
+    };
+    let mut matched = Vec::new();
+    for (id, _) in runs {
+        let events = read_run(layout, &id).unwrap_or_default();
+        let summary = summarize_events(&id, &events);
+        if summary.branch.as_deref() == Some(branch) {
+            matched.push((summary, events));
+        }
+    }
+    matched
+}
+
 /// The most recent persisted run recorded on `branch`, with its full event
 /// stream and one-line [`RunSummary`], or `None` when the branch has no prior
 /// run (or the run history cannot be read).
 ///
-/// [`collect_runs`] is already most-recent-first, so this stops at the first run
-/// whose recorded branch matches and never reads the older runs behind it: the
-/// single most-recent match is all either consumer wants. A review resolves this
-/// once and threads it into both the prior-findings recall
-/// ([`findings_from_events`]) and carry planning ([`crate::carry::plan`]), which
-/// would otherwise each rescan and reparse the whole run history independently.
-///
-/// This does not exclude any run id. A review assembles its context and plans
-/// carry *before* the runner persists the current run, so the current run is not
-/// yet in the store; the most-recent prior run is exactly what both want,
-/// including a previous invocation at the same `HEAD` (a local rerun on a dirty
-/// working tree reuses the same run id and overwrites it only at the end, so
-/// consulting it first is correct).
+/// This is the first entry of [`runs_on_branch`]. Call that when a review needs
+/// the whole newest-first list; call this when only the newest run is required
+/// (prior-findings recall, tests).
 #[must_use]
 pub fn latest_run_on_branch(layout: &Layout, branch: &str) -> Option<(RunSummary, Vec<RunEvent>)> {
-    for (id, _) in collect_runs(layout).ok()? {
-        let events = read_run(layout, &id).unwrap_or_default();
-        let summary = summarize_events(&id, &events);
-        if summary.branch.as_deref() == Some(branch) {
-            return Some((summary, events));
-        }
-    }
-    None
+    runs_on_branch(layout, branch).into_iter().next()
 }
 
 /// Prune persisted runs, keeping the `keep` most recent and/or removing any
@@ -229,9 +243,9 @@ pub fn prune(
 ///
 /// The synthetic fail-closed crash finding (an empty path) is skipped: "the
 /// reviewer failed to complete" is not a substantive prior finding to
-/// re-evaluate. The caller passes the events of the branch's latest run
-/// ([`latest_run_on_branch`]); an absent prior run recalls nothing, so recall
-/// never fails a review.
+/// re-evaluate. The caller passes the events of the branch's latest run (the
+/// first entry of [`runs_on_branch`]); an absent prior run recalls nothing, so
+/// recall never fails a review.
 #[must_use]
 pub fn findings_from_events(events: &[RunEvent]) -> Vec<PriorFinding> {
     let mut findings = Vec::new();
@@ -697,5 +711,42 @@ mod tests {
 
         // A branch with no run resolves to nothing.
         assert!(latest_run_on_branch(&layout, "brand-new").is_none());
+    }
+
+    #[test]
+    fn runs_on_branch_lists_matching_runs_newest_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = Layout::with_root(tmp.path().to_path_buf());
+        write_run(&layout, &RunId("r-1".into()), &sample_events("r-1")).unwrap();
+        write_run(&layout, &RunId("r-2".into()), &sample_events("r-2")).unwrap();
+        write_run(
+            &layout,
+            &RunId("r-other".into()),
+            &run_with_findings(
+                "r-other",
+                "feat/y",
+                "perf",
+                vec![crate::verdict::Finding {
+                    kind: crate::verdict::FindingKind::Blocking,
+                    path: "src/p.rs".into(),
+                    line_start: 1,
+                    line_end: 1,
+                    detail: "elsewhere".into(),
+                }],
+            ),
+        )
+        .unwrap();
+
+        let runs = runs_on_branch(&layout, "feat/x");
+        let ids: Vec<&str> = runs.iter().map(|(s, _)| s.run.as_str()).collect();
+        assert_eq!(ids, ["r-2", "r-1"], "newest first, other branches omitted");
+        assert_eq!(
+            latest_run_on_branch(&layout, "feat/x")
+                .expect("a prior run")
+                .0
+                .run
+                .as_str(),
+            "r-2"
+        );
     }
 }

@@ -23,7 +23,8 @@
 //! - [`limits`]: the per-run spend caps that bound a review's agent fan-out, so a
 //!   broken or respawning run fails loud and fast instead of multiplying cost.
 //! - [`carry`]: incremental re-review, carrying a prior pass forward when a
-//!   reviewer's trigger-scoped diff is unchanged since the branch's last run.
+//!   reviewer's trigger-scoped diff is unchanged since its newest resolution
+//!   on the branch.
 //! - [`seal`]: the run seal, an HMAC over everything a verdict depends on, that
 //!   makes a persisted run tamper-evident (`docs/developer-guide/attestation.md`).
 //! - [`attest`]: `bastion attest`, which turns a sealed run into a signed git-note

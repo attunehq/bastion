@@ -281,6 +281,65 @@ fn selecting_every_reviewer_is_full_and_a_selection_never_carries() {
     assert_eq!(gates.total, 2);
 }
 
+/// A later `--reviewer` partial becomes the newest run, but it only resolved
+/// the named reviewer. The finishing full run must still carry an earlier
+/// eligible pass for a reviewer the partial never ran. The suite's seams
+/// disqualify repository reviewers, so the carry-eligible one is user-level.
+#[test]
+fn a_later_partial_run_does_not_hide_an_earlier_carry_eligible_pass() {
+    let Some(fake) = tooling() else { return };
+
+    let repo = TestRepo::new(&registry(&[Reviewer::new(
+        "src-gate",
+        "claude-code",
+        "gate",
+    )
+    .behavior("pass")]))
+    .with_user_registry(&registry(&[Reviewer::new("docs-gate", "codex", "gate")
+        .trigger("docs/**")
+        .behavior("pass")]));
+    std::fs::create_dir_all(repo.path().join("docs")).unwrap();
+    std::fs::write(repo.path().join("docs/note.md"), "first draft\n").unwrap();
+
+    let first = repo.review_with_args(fake, &["--with-user-reviewers"]);
+    assert!(first.exited_zero(), "stderr:\n{}", first.stderr);
+    assert!(!first.carried("docs-gate"));
+
+    let targeted = repo.run(
+        fake,
+        &[
+            "review",
+            "--base",
+            "main",
+            "--with-user-reviewers",
+            "--reviewer",
+            "src-gate",
+            "--format",
+            "jsonl",
+        ],
+        &[],
+    );
+    assert!(
+        targeted.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&targeted.stderr)
+    );
+
+    let finish = repo.review_with_args(fake, &["--with-user-reviewers"]);
+    assert!(finish.exited_zero(), "stderr:\n{}", finish.stderr);
+    assert!(
+        finish.carried("docs-gate"),
+        "a later partial must not hide an earlier eligible pass; stderr:\n{}",
+        finish.stderr
+    );
+    let (_, _, _, usage) = finish.resolved("docs-gate");
+    assert_eq!(usage, None, "a carried verdict spends no tokens");
+    assert!(
+        !finish.carried("src-gate"),
+        "the targeted repo reviewer stays fresh under the suite's seam-tainted seals"
+    );
+}
+
 /// The incremental loop works in CI too: a second CI review (`--repo`/`--pr`) of the
 /// same branch carries a *repository* reviewer's prior pass forward when its
 /// trigger-scoped diff is unchanged, exactly as a local re-run does, and re-executes

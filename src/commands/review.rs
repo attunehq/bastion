@@ -198,13 +198,13 @@ pub async fn review(
         return Ok(Decision::Pass);
     }
 
-    // Resolve the branch's most recent prior run once and share it: the
-    // prior-findings recall here and carry planning further down both want exactly
-    // this run, and each would otherwise rescan and reparse the whole run history
-    // independently ([`store::latest_run_on_branch`]).
-    let prior_run = store::latest_run_on_branch(layout, &branch);
-    let prior_findings = prior_run
-        .as_ref()
+    // Resolve the branch's prior runs once (newest first) and share them: the
+    // prior-findings recall here wants only the newest run, while carry planning
+    // further down walks the list per reviewer. Each would otherwise rescan and
+    // reparse the whole run history independently ([`store::runs_on_branch`]).
+    let prior_runs = store::runs_on_branch(layout, &branch);
+    let prior_findings = prior_runs
+        .first()
         .map(|(_, events)| store::findings_from_events(events))
         .unwrap_or_default();
 
@@ -284,9 +284,7 @@ pub async fn review(
     // run) and only unless `--fresh` opted out.
     let carried = plan_carry(
         layout,
-        prior_run
-            .as_ref()
-            .map(|(summary, events)| (&summary.run, events.as_slice())),
+        &prior_runs,
         &matched,
         &scope_digests,
         &repo_attestation.reviewers,
@@ -631,10 +629,10 @@ fn plan_scope_digests(
 
 /// Plan which prior passes carry forward this run ([`crate::carry`]).
 ///
-/// `prior_run` is the branch's most recent prior run (its id and events),
-/// resolved once by the caller ([`store::latest_run_on_branch`]) and shared with
-/// the prior-findings recall so the history is scanned only once per review;
-/// `None` is a branch with no prior run.
+/// `prior_runs` is the branch's prior runs newest first, resolved once by the
+/// caller ([`store::runs_on_branch`]) and shared with the prior-findings recall
+/// so the history is scanned only once per review. An empty slice is a branch
+/// with no prior run.
 ///
 /// Carry runs only for the full triggered set and only when the author did not
 /// opt out: `--fresh` disables it, and an explicit `--reviewer` selection asks
@@ -642,7 +640,7 @@ fn plan_scope_digests(
 /// with no computed scope digest is not a carry candidate.
 fn plan_carry(
     layout: &Layout,
-    prior_run: Option<(&RunId, &[RunEvent])>,
+    prior_runs: &[(store::RunSummary, Vec<RunEvent>)],
     matched: &[&crate::reviewer::Reviewer],
     scope_digests: &std::collections::BTreeMap<String, String>,
     repo_reviewers: &std::collections::BTreeSet<String>,
@@ -660,9 +658,13 @@ fn plan_carry(
                 .map(|digest| (*r, digest.clone()))
         })
         .collect();
+    let prior: Vec<(&RunId, &[RunEvent])> = prior_runs
+        .iter()
+        .map(|(summary, events)| (&summary.run, events.as_slice()))
+        .collect();
     crate::carry::plan(
         layout,
-        prior_run,
+        &prior,
         &candidates,
         repo_reviewers,
         crate::seal::embedded_secret(),
