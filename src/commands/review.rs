@@ -47,7 +47,7 @@ pub struct ReviewOptions {
     pub only: Vec<String>,
     /// Disable carrying prior passes forward (`--fresh`): every triggered
     /// reviewer executes even when its trigger-scoped diff is unchanged since
-    /// the branch's previous run ([`crate::carry`]).
+    /// its newest resolution on the branch ([`crate::carry`]).
     pub fresh: bool,
     /// Extra registry files merged into the repository layer (`--include`,
     /// repeatable), as if the repository registry's `include:` array listed
@@ -151,7 +151,7 @@ pub async fn review(
     // Partial means coverage was actually reduced: selecting every triggered
     // reviewer by name is still a full run.
     let partial = matched.len() < triggered.len();
-    let run = local_run_id(&repo_root);
+    let run = local_run_id(&repo_root, partial);
     let reviewer_refs: Vec<ReviewerRef> = matched
         .iter()
         .map(|r| ReviewerRef {
@@ -198,13 +198,13 @@ pub async fn review(
         return Ok(Decision::Pass);
     }
 
-    // Resolve the branch's most recent prior run once and share it: the
-    // prior-findings recall here and carry planning further down both want exactly
-    // this run, and each would otherwise rescan and reparse the whole run history
-    // independently ([`store::latest_run_on_branch`]).
-    let prior_run = store::latest_run_on_branch(layout, &branch);
-    let prior_findings = prior_run
-        .as_ref()
+    // Resolve the branch's prior runs once (newest first) and share them: the
+    // prior-findings recall here wants only the newest run, while carry planning
+    // further down walks the list per reviewer. Each would otherwise rescan and
+    // reparse the whole run history independently ([`store::runs_on_branch`]).
+    let prior_runs = store::runs_on_branch(layout, &branch);
+    let prior_findings = prior_runs
+        .first()
         .map(|(_, events)| store::findings_from_events(events))
         .unwrap_or_default();
 
@@ -284,9 +284,7 @@ pub async fn review(
     // run) and only unless `--fresh` opted out.
     let carried = plan_carry(
         layout,
-        prior_run
-            .as_ref()
-            .map(|(summary, events)| (&summary.run, events.as_slice())),
+        &prior_runs,
         &matched,
         &scope_digests,
         &repo_attestation.reviewers,
@@ -631,10 +629,10 @@ fn plan_scope_digests(
 
 /// Plan which prior passes carry forward this run ([`crate::carry`]).
 ///
-/// `prior_run` is the branch's most recent prior run (its id and events),
-/// resolved once by the caller ([`store::latest_run_on_branch`]) and shared with
-/// the prior-findings recall so the history is scanned only once per review;
-/// `None` is a branch with no prior run.
+/// `prior_runs` is the branch's prior runs newest first, resolved once by the
+/// caller ([`store::runs_on_branch`]) and shared with the prior-findings recall
+/// so the history is scanned only once per review. An empty slice is a branch
+/// with no prior run.
 ///
 /// Carry runs only for the full triggered set and only when the author did not
 /// opt out: `--fresh` disables it, and an explicit `--reviewer` selection asks
@@ -642,7 +640,7 @@ fn plan_scope_digests(
 /// with no computed scope digest is not a carry candidate.
 fn plan_carry(
     layout: &Layout,
-    prior_run: Option<(&RunId, &[RunEvent])>,
+    prior_runs: &[(store::RunSummary, Vec<RunEvent>)],
     matched: &[&crate::reviewer::Reviewer],
     scope_digests: &std::collections::BTreeMap<String, String>,
     repo_reviewers: &std::collections::BTreeSet<String>,
@@ -660,9 +658,13 @@ fn plan_carry(
                 .map(|digest| (*r, digest.clone()))
         })
         .collect();
+    let prior: Vec<(&RunId, &[RunEvent])> = prior_runs
+        .iter()
+        .map(|(summary, events)| (&summary.run, events.as_slice()))
+        .collect();
     crate::carry::plan(
         layout,
-        prior_run,
+        &prior,
         &candidates,
         repo_reviewers,
         crate::seal::embedded_secret(),
@@ -839,12 +841,23 @@ async fn gather_github_context(
     crate::github::context::gather(&client, &source.owner, &source.name, source.pr.get()).await
 }
 
-/// Build a run id for a local run from the short HEAD sha, falling back to a
-/// fixed local marker when git can't supply one.
-fn local_run_id(repo_root: &Path) -> RunId {
-    match git::short_head(repo_root) {
-        Some(sha) => RunId(format!("r-{sha}")),
-        None => RunId("r-local".to_string()),
+/// Build a run id from the short HEAD sha, falling back to a fixed local
+/// marker when git cannot supply one.
+///
+/// Full runs at one commit reuse the same id and overwrite the previous full
+/// run, folding carried verdicts into the newest record. A partial
+/// `--reviewer` run uses a distinct `-partial` suffix so it cannot overwrite
+/// that full run; otherwise the finishing full run would have no earlier
+/// sealed pass to carry from.
+fn local_run_id(repo_root: &Path, partial: bool) -> RunId {
+    let base = match git::short_head(repo_root) {
+        Some(sha) => format!("r-{sha}"),
+        None => "r-local".to_string(),
+    };
+    if partial {
+        RunId(format!("{base}-partial"))
+    } else {
+        RunId(base)
     }
 }
 
@@ -900,6 +913,31 @@ fn ok_or_warn<T, E: std::fmt::Display>(result: std::result::Result<T, E>, msg: &
 mod tests {
     use super::*;
     use crate::reviewer::Mode;
+
+    #[test]
+    fn a_partial_run_id_does_not_reuse_the_full_run_id_at_the_same_head() {
+        let repo = tempfile::tempdir().unwrap();
+        let dir = repo.path();
+        git(dir, &["init"]);
+        std::fs::write(dir.join("README"), "x\n").unwrap();
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-m", "base"]);
+
+        let full = local_run_id(dir, false);
+        let partial = local_run_id(dir, true);
+        assert_ne!(full, partial, "a partial must not overwrite the full run");
+        assert!(
+            partial.as_str().ends_with("-partial"),
+            "got {}",
+            partial.as_str()
+        );
+        assert!(
+            partial.as_str().starts_with(full.as_str()),
+            "partial id should be the full id plus a suffix; full={} partial={}",
+            full.as_str(),
+            partial.as_str()
+        );
+    }
 
     #[test]
     fn github_source_parses_a_slug_and_rejects_malformed_ones() {

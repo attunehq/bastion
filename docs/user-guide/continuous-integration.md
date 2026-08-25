@@ -12,8 +12,8 @@ order: 6
 The local loop gets you to green before you open a PR. CI is the authoritative
 confirmation: it executes, skips, replays, or carries the reviewers from the repository's
 `.bastion.yaml` (replay draws from a verified attestation, when the registry sets
-`attestations: true`; carry reuses an unchanged reviewer's pass from the branch's
-previous CI run) and reports one merge gate. Because routing and aggregation are
+`attestations: true`; carry reuses an unchanged reviewer's pass from the newest
+prior CI run on the branch that resolved that reviewer) and reports one merge gate. Because routing and aggregation are
 shared, CI rarely surprises an
 author who looped locally. It can differ in two ways: CI adds the PR's description and
 discussion that a default local run lacks, and CI runs the repository's reviewers
@@ -33,7 +33,8 @@ On each pull-request event (`opened`, `synchronize`, `reopened`) the workflow ru
 `bastion review`, which computes the changed files, routes reviewer candidates, and
 resolves them in parallel. A candidate may execute with a timeout, record an
 agent-trigger skip, replay from a verified attestation with no backend dispatch, or
-carry an unchanged pass from the branch's previous CI run. The GitHub Action
+carry an unchanged pass from the newest prior CI run on the branch that
+resolved that reviewer. The GitHub Action
 persists the run store across runs by default. A second step, `bastion github
 report`, reads the persisted run and posts each terminal outcome to two GitHub
 surfaces:
@@ -440,8 +441,9 @@ job is green GitHub merges. A push re-triggers the workflow and it resolves agai
 
 Every reviewer is an agent invocation, so a PR that ran clean locally pays for
 each reviewer the first time CI confirms it. (Once the run store is persisted across
-runs, a later push carries any reviewer whose scoped content did not change from the
-branch's previous CI run, so the recurring cost falls on subsequent pushes; the very
+runs, a later push carries any reviewer whose scoped content did not change since
+the newest prior CI run on the branch that resolved that reviewer, so the
+recurring cost falls on subsequent pushes; the very
 first CI run of a changeset still has nothing to carry from.) Attestation cuts the
 cost of that first run too: if you would rather CI trust a signed local run than
 re-execute every reviewer, opt in with one registry field:
@@ -485,8 +487,8 @@ replayed reviewer's check-run summary says so too. When an attestation is offere
 but *refused* (an unreadable or unverifiable note, an unregistered key, a stale
 base, or any other mismatch), CI falls back to resolving each reviewer the
 ordinary way and the comment carries a `> [!WARNING]` block naming the reason: a
-reviewer whose content is unchanged from the branch's previous CI run is still
-carried, and the rest execute fresh. A dirty CI checkout (uncommitted or untracked
+reviewer whose content is unchanged since the newest prior CI run on the
+branch that resolved that reviewer is still carried, and the rest execute fresh. A dirty CI checkout (uncommitted or untracked
 files) is treated as a refusal too, and is checked before the note is even looked
 up: it warns even when HEAD carries no note, since the reviewers see content no
 attestation could bind. On a clean checkout that simply carries no note, nothing

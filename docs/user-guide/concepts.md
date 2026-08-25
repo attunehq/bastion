@@ -203,9 +203,9 @@ authenticates from auth baked into its image or from a credential written into i
         |
         v
    run matched reviewers in parallel; a reviewer may instead replay from a verified
-   attestation (CI), or carry an unchanged prior pass forward from the branch's
-   previous run (local or CI), both with no backend dispatch (each executed reviewer
-   is timeout-bounded)
+   attestation (CI), or carry an unchanged prior pass from the newest prior run
+   on the branch that resolved that reviewer (local or CI), both with no backend
+   dispatch (each executed reviewer is timeout-bounded)
         |
         v
    each returns a verdict, or records an agent-trigger skip

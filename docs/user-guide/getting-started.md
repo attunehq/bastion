@@ -287,7 +287,8 @@ bundled with `bastion skills list`, and install into a different directory with
 ## Keeping scratch runs out of your history
 
 While you are experimenting, point Bastion at a throwaway data directory so trial
-runs do not pile up in your real run history:
+runs do not pile up in your real run history. A new data directory has no prior
+runs, so nothing carries and every reviewer executes:
 
 ```sh
 bastion --data-dir /tmp/bastion-scratch review --base main

@@ -9,9 +9,10 @@
 //! changed files its verdict judged. A path trigger judges its matched slice;
 //! an agent trigger sees the full changeset after its path prefilter admits the
 //! candidate, so its digest covers every changed file. On the next run of the same branch, a
-//! reviewer whose digest is unchanged and whose prior verdict was a pass is
-//! *carried* instead of executed; a reviewer whose scoped content changed (the
-//! one that blocked, plus anything the fix touched) runs fresh.
+//! reviewer whose digest is unchanged and whose newest prior verdict on that
+//! branch was a pass is *carried* instead of executed; a reviewer whose scoped
+//! content changed (the one that blocked, plus anything the fix touched) runs
+//! fresh.
 //!
 //! The soundness boundary is the trigger. A path trigger's globs declare the
 //! content its reviewer depends on. Agent-trigger paths are only a cheap
@@ -54,6 +55,13 @@
 //! complementary: replay imports the *author's* signed local run across the machine
 //! boundary (which is why it needs the SSH signature), while carry reuses a run
 //! that already ran on the same surface.
+//!
+//! Planning walks the branch's prior runs newest first and, for each reviewer,
+//! stops at the newest run that recorded a terminal outcome for it. A later
+//! partial `--reviewer` run (unsealed, and resolving only the named subset)
+//! therefore cannot hide an earlier sealed pass for a reviewer it did not run.
+//! A more recent block or skip still forces a fresh execution: the walk never
+//! skips over a newer resolution to pick up an older pass.
 //!
 //! Blocks are never carried: a blocked reviewer whose scoped diff is unchanged
 //! still re-runs, because the surrounding context (intent, discussion, prior
@@ -239,22 +247,29 @@ pub fn scope_digest(
     Ok(hex::encode(Sha256::digest(&bytes)))
 }
 
-/// Decide which of `candidates` carry their verdict forward from `prior_run`,
-/// the branch's most recent prior run (its id and event stream, resolved once by
-/// [`store::latest_run_on_branch`] and shared with the prior-findings recall),
-/// keyed by reviewer name. `None` is a branch with no prior run: nothing carries.
+/// Decide which of `candidates` carry their verdict forward from `prior_runs`,
+/// the branch's prior runs newest first (resolved once by
+/// [`store::runs_on_branch`] and shared with the prior-findings recall). An
+/// empty slice is a branch with no prior run: nothing carries.
 ///
-/// Each candidate pairs a triggered reviewer with its current scope digest. A
-/// candidate carries when all of the following hold; anything short of that
-/// executes fresh, silently (carry is an optimization, never an error):
+/// Each candidate pairs a triggered reviewer with its current scope digest. The
+/// planner walks `prior_runs` newest first and stops at the first run that
+/// recorded a terminal outcome for that reviewer (`reviewer.resolved` or
+/// `reviewer.skipped`). A later partial run that did not resolve the reviewer
+/// is skipped so an earlier eligible pass can still carry; a more recent block,
+/// skip, or non-matching digest forces a fresh execution.
 ///
-/// - the prior run resolved this reviewer to a **pass** whose recorded
+/// That newest resolution carries when all of the following hold; anything
+/// short of that executes fresh, silently (carry is an optimization, never an
+/// error):
+///
+/// - the run resolved this reviewer to a **pass** whose recorded
 ///   `scope_digest` equals the current one (a carried prior pass qualifies too:
 ///   digest equality is over content, so the chain stays anchored);
 /// - the reviewer does not set `attestation: never`;
-/// - when the reviewer is in `repo_reviewers`, the prior run has a seal that
-///   verifies under `secret` over the prior run's own sealed events, covers
-///   this reviewer, and records no active test seam. A dirty prior seal is
+/// - when the reviewer is in `repo_reviewers`, that same run has a seal that
+///   verifies under `secret` over the run's own sealed events, covers this
+///   reviewer, and records no active test seam. A dirty prior seal is
 ///   acceptable: the digest binds the actual working-tree content the reviewer
 ///   judged, so digest equality carries its own proof that the content is the
 ///   same one now under review.
@@ -264,50 +279,58 @@ pub fn scope_digest(
 #[must_use]
 pub fn plan(
     layout: &Layout,
-    prior_run: Option<(&RunId, &[RunEvent])>,
+    prior_runs: &[(&RunId, &[RunEvent])],
     candidates: &[(&Reviewer, String)],
     repo_reviewers: &BTreeSet<String>,
     secret: &[u8],
 ) -> BTreeMap<String, Carried> {
     let mut carried = BTreeMap::new();
-    if candidates.is_empty() {
+    if candidates.is_empty() || prior_runs.is_empty() {
         return carried;
     }
 
-    let Some((prior_run, events)) = prior_run else {
-        return carried;
-    };
-
-    // Verify the prior seal once, lazily reusable for every repo candidate.
-    // `None` means "no verified seal": every repo reviewer then executes fresh.
-    let sealed_names = verified_seal_reviewers(layout, prior_run, events, secret);
+    // Verify each prior seal once, reused for every repo candidate that stops
+    // on that run. `None` means "no verified seal": a repo reviewer then
+    // cannot carry from that run and the walk stops for it.
+    let sealed_names: Vec<Option<BTreeSet<String>>> = prior_runs
+        .iter()
+        .map(|(run, events)| verified_seal_reviewers(layout, run, events, secret))
+        .collect();
 
     for (reviewer, digest) in candidates {
         if reviewer.attestation == Some(AttestationPolicy::Never) {
             continue;
         }
-        let Some(event) = resolved_pass_with_digest(events, &reviewer.name, digest) else {
-            continue;
-        };
-        // A repo reviewer may carry only when the prior seal actually covered it; an
-        // unsealed repo reviewer executes fresh. A personal reviewer (not in the repo
-        // set) carries on its content digest alone. The `&&` short-circuits, so the
-        // seal-set probe never runs on the personal-reviewer path.
         let is_repo_reviewer = repo_reviewers.contains(&reviewer.name);
-        if is_repo_reviewer
-            && !sealed_names
-                .as_ref()
-                .is_some_and(|names| names.contains(reviewer.name.as_str()))
-        {
-            continue;
+        for (index, (_run, events)) in prior_runs.iter().enumerate() {
+            if let Some(event) = resolved_pass_with_digest(events, &reviewer.name, digest) {
+                // A repo reviewer may carry only when this run's seal actually
+                // covered it; an unsealed repo reviewer executes fresh. A
+                // personal reviewer (not in the repo set) carries on its
+                // content digest alone. The `&&` short-circuits, so the
+                // seal-set probe never runs on the personal-reviewer path.
+                if is_repo_reviewer
+                    && !sealed_names[index]
+                        .as_ref()
+                        .is_some_and(|names| names.contains(reviewer.name.as_str()))
+                {
+                    break;
+                }
+                carried.insert(
+                    reviewer.name.clone(),
+                    Carried {
+                        reviewer: (*reviewer).clone(),
+                        event: event.clone(),
+                    },
+                );
+                break;
+            }
+            if reviewer_was_resolved(events, &reviewer.name) {
+                // A newer block, skip, or pass with a different digest is a
+                // real resolution: do not walk past it to an older pass.
+                break;
+            }
         }
-        carried.insert(
-            reviewer.name.clone(),
-            Carried {
-                reviewer: (*reviewer).clone(),
-                event: event.clone(),
-            },
-        );
     }
     carried
 }
@@ -349,6 +372,17 @@ fn verified_seal_reviewers(
         return None;
     }
     Some(seal.reviewers.into_iter().collect())
+}
+
+/// Whether this run recorded a terminal outcome for `name` (`reviewer.resolved`
+/// or `reviewer.skipped`). Used to stop the newest-first walk so a more recent
+/// non-carryable resolution is not skipped in favor of an older pass.
+fn reviewer_was_resolved(events: &[RunEvent], name: &str) -> bool {
+    events.iter().any(|event| match event {
+        RunEvent::ReviewerResolved { reviewer, .. }
+        | RunEvent::ReviewerSkipped { reviewer, .. } => reviewer == name,
+        _ => false,
+    })
 }
 
 /// The prior run's `reviewer.resolved` event for `name`, when it is a pass
@@ -559,22 +593,64 @@ mod tests {
         assert_ne!(a, b, "editing the reviewer must invalidate its carry");
     }
 
+    /// Inputs for [`persist_run`]: one resolved reviewer on a branch.
+    struct PersistSpec<'a> {
+        run_id: &'a str,
+        branch: &'a str,
+        name: &'a str,
+        digest: &'a str,
+        verdict: Decision,
+        seal: Option<&'a [u8]>,
+        dirty_seal: bool,
+        partial: bool,
+    }
+
     /// A prior run on `branch` with one resolved pass for `name` carrying
     /// `digest`, persisted (and optionally sealed) into `layout`.
     fn persist_prior_run(
         layout: &Layout,
+        run_id: &str,
         branch: &str,
         name: &str,
         digest: &str,
-        seal_it: Option<&[u8]>,
+        seal: Option<&[u8]>,
         dirty_seal: bool,
     ) -> RunId {
-        let run = RunId("r-prior".into());
+        persist_run(
+            layout,
+            PersistSpec {
+                run_id,
+                branch,
+                name,
+                digest,
+                verdict: Decision::Pass,
+                seal,
+                dirty_seal,
+                partial: false,
+            },
+        )
+    }
+
+    /// Persist one resolved reviewer. A `partial` spec stays unsealed even
+    /// when `seal` is `Some`.
+    fn persist_run(layout: &Layout, spec: PersistSpec<'_>) -> RunId {
+        let PersistSpec {
+            run_id,
+            branch,
+            name,
+            digest,
+            verdict,
+            seal: seal_it,
+            dirty_seal,
+            partial,
+        } = spec;
+        let run = RunId(run_id.into());
+        let passed = verdict == Decision::Pass;
         let resolved = RunEvent::ReviewerResolved {
             run: run.clone(),
             reviewer: name.into(),
-            verdict: Decision::Pass,
-            summary: "clean".into(),
+            verdict,
+            summary: if passed { "clean" } else { "blocked" }.into(),
             findings: vec![],
             usage: None,
             duration_ms: 5,
@@ -594,16 +670,16 @@ mod tests {
                     name: name.into(),
                     mode: Mode::Gate,
                 }],
-                partial: false,
+                partial,
             },
             resolved.clone(),
             RunEvent::RunCompleted {
                 run: run.clone(),
-                verdict: Decision::Pass,
+                verdict,
                 gates: Gates {
                     total: 1,
-                    passed: 1,
-                    blocked: 0,
+                    passed: u32::from(passed),
+                    blocked: u32::from(!passed),
                     skipped: 0,
                 },
                 duration_ms: 5,
@@ -611,11 +687,11 @@ mod tests {
                 tokens_out: 0,
                 cache_read: 0,
                 cost_usd: Money::from_cents(0),
-                partial: false,
+                partial,
             },
         ];
         store::write_run(layout, &run, &events).unwrap();
-        if let Some(secret) = seal_it {
+        if let Some(secret) = seal_it.filter(|_| !partial) {
             let values = vec![serde_json::to_value(&resolved).unwrap()];
             let seal = crate::seal::seal(
                 secret,
@@ -645,9 +721,9 @@ mod tests {
         (tmp, layout)
     }
 
-    /// Resolve `branch`'s prior run through the store, then plan carry against it,
-    /// exactly as `review` composes [`store::latest_run_on_branch`] and [`plan`].
-    /// Production threads a pre-resolved prior run in; these tests exercise the
+    /// Resolve `branch`'s prior runs through the store, then plan carry against
+    /// them, exactly as `review` composes [`store::runs_on_branch`] and [`plan`].
+    /// Production threads the pre-resolved list in; these tests exercise the
     /// whole branch-to-carry path, so they resolve it the same way here.
     fn plan_on_branch(
         layout: &Layout,
@@ -656,22 +732,26 @@ mod tests {
         repo_reviewers: &BTreeSet<String>,
         secret: &[u8],
     ) -> BTreeMap<String, Carried> {
-        let prior = store::latest_run_on_branch(layout, branch);
-        plan(
-            layout,
-            prior
-                .as_ref()
-                .map(|(summary, events)| (&summary.run, events.as_slice())),
-            candidates,
-            repo_reviewers,
-            secret,
-        )
+        let prior = store::runs_on_branch(layout, branch);
+        let prior_runs: Vec<(&RunId, &[RunEvent])> = prior
+            .iter()
+            .map(|(summary, events)| (&summary.run, events.as_slice()))
+            .collect();
+        plan(layout, &prior_runs, candidates, repo_reviewers, secret)
     }
 
     #[test]
     fn a_repo_reviewer_carries_only_from_a_verified_seal() {
         let (_tmp, layout) = layout();
-        persist_prior_run(&layout, "feat", "g1", "digest-1", Some(SECRET), false);
+        persist_prior_run(
+            &layout,
+            "r-prior",
+            "feat",
+            "g1",
+            "digest-1",
+            Some(SECRET),
+            false,
+        );
         let g1 = reviewer("g1", &["src/**"]);
         let repo_set: BTreeSet<String> = ["g1".to_string()].into_iter().collect();
 
@@ -702,7 +782,15 @@ mod tests {
         // digest binds the actual working-tree content the reviewer judged, so
         // digest equality is itself the proof the content is unchanged.
         let (_tmp, layout) = layout();
-        persist_prior_run(&layout, "feat", "g1", "digest-1", Some(SECRET), true);
+        persist_prior_run(
+            &layout,
+            "r-prior",
+            "feat",
+            "g1",
+            "digest-1",
+            Some(SECRET),
+            true,
+        );
         let g1 = reviewer("g1", &["src/**"]);
         let repo_set: BTreeSet<String> = ["g1".to_string()].into_iter().collect();
 
@@ -861,7 +949,7 @@ mod tests {
     #[test]
     fn an_unsealed_prior_run_does_not_carry_a_repo_reviewer_but_carries_a_user_one() {
         let (_tmp, layout) = layout();
-        persist_prior_run(&layout, "feat", "g1", "digest-1", None, false);
+        persist_prior_run(&layout, "r-prior", "feat", "g1", "digest-1", None, false);
         let g1 = reviewer("g1", &["src/**"]);
 
         let repo_set: BTreeSet<String> = ["g1".to_string()].into_iter().collect();
@@ -890,7 +978,15 @@ mod tests {
     #[test]
     fn a_changed_digest_a_block_or_a_never_policy_executes_fresh() {
         let (_tmp, layout) = layout();
-        persist_prior_run(&layout, "feat", "g1", "digest-1", Some(SECRET), false);
+        persist_prior_run(
+            &layout,
+            "r-prior",
+            "feat",
+            "g1",
+            "digest-1",
+            Some(SECRET),
+            false,
+        );
         let g1 = reviewer("g1", &["src/**"]);
         let repo_set: BTreeSet<String> = ["g1".to_string()].into_iter().collect();
 
@@ -1001,7 +1097,15 @@ mod tests {
     #[test]
     fn a_seam_tainted_seal_does_not_carry() {
         let (_tmp, layout) = layout();
-        let run = persist_prior_run(&layout, "feat", "g1", "digest-1", Some(SECRET), false);
+        let run = persist_prior_run(
+            &layout,
+            "r-prior",
+            "feat",
+            "g1",
+            "digest-1",
+            Some(SECRET),
+            false,
+        );
         // Re-seal with `seams: true` under the same secret, so only the seam
         // flag disqualifies.
         let events = store::read_run(&layout, &run).unwrap();
@@ -1038,6 +1142,91 @@ mod tests {
                 SECRET,
             )
             .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_later_partial_run_does_not_hide_an_earlier_sealed_pass() {
+        // The documented cheap finish after `--reviewer`: a later unsealed
+        // partial that ran some other reviewer must not hide this reviewer's
+        // earlier sealed pass.
+        let (_tmp, layout) = layout();
+        persist_prior_run(
+            &layout,
+            "r-1",
+            "feat",
+            "g1",
+            "digest-1",
+            Some(SECRET),
+            false,
+        );
+        persist_run(
+            &layout,
+            PersistSpec {
+                run_id: "r-2",
+                branch: "feat",
+                name: "g2",
+                digest: "digest-other",
+                verdict: Decision::Pass,
+                seal: None,
+                dirty_seal: false,
+                partial: true,
+            },
+        );
+        let g1 = reviewer("g1", &["src/**"]);
+        let repo_set: BTreeSet<String> = ["g1".to_string()].into_iter().collect();
+
+        let carried = plan_on_branch(
+            &layout,
+            "feat",
+            &[(&g1, "digest-1".to_string())],
+            &repo_set,
+            SECRET,
+        );
+        assert!(
+            carried.contains_key("g1"),
+            "a later partial must not hide an earlier sealed pass"
+        );
+    }
+
+    #[test]
+    fn a_later_block_is_not_walked_past_to_an_older_pass() {
+        let (_tmp, layout) = layout();
+        persist_prior_run(
+            &layout,
+            "r-1",
+            "feat",
+            "g1",
+            "digest-1",
+            Some(SECRET),
+            false,
+        );
+        persist_run(
+            &layout,
+            PersistSpec {
+                run_id: "r-2",
+                branch: "feat",
+                name: "g1",
+                digest: "digest-1",
+                verdict: Decision::Block,
+                seal: None,
+                dirty_seal: false,
+                partial: false,
+            },
+        );
+        let g1 = reviewer("g1", &["src/**"]);
+        let repo_set: BTreeSet<String> = ["g1".to_string()].into_iter().collect();
+
+        let carried = plan_on_branch(
+            &layout,
+            "feat",
+            &[(&g1, "digest-1".to_string())],
+            &repo_set,
+            SECRET,
+        );
+        assert!(
+            carried.is_empty(),
+            "a more recent block must re-run, not carry an older pass"
         );
     }
 }
