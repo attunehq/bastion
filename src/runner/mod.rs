@@ -93,6 +93,8 @@ pub struct OwnedRequest {
     /// (including a backend reprompt) counts against the run-wide caps. Cloned from
     /// the one governor [`execute_with`] builds, so all reviewers share it.
     pub governor: Arc<SpawnGovernor>,
+    /// Isolation directory for native agent sessions when Akari handoff is on.
+    pub native_session_dir: Option<PathBuf>,
 }
 
 impl OwnedRequest {
@@ -107,6 +109,7 @@ impl OwnedRequest {
                 merge_base: &self.merge_base,
                 context: &self.context,
                 purpose: self.purpose,
+                native_session_dir: self.native_session_dir.as_deref(),
             };
             backend::dispatch(&request, &self.governor).await
         })
@@ -208,6 +211,8 @@ pub struct ExecContext {
     /// effective registry; a run with none configured takes the conservative
     /// defaults.
     pub limits: SpawnLimits,
+    /// Opt-in Akari client. `None` skips isolation and ingest.
+    pub akari: Option<crate::akari::AkariHandoff>,
 }
 
 /// The inputs [`crate::carry::scope_digest`] needs beyond the reviewer itself,
@@ -347,7 +352,7 @@ pub async fn execute_with(
     // collect it in registry order, then resolve fresh + replayed + carried rows
     // and re-check each stamped scope digest against the post-run tree.
     let started_events = emit_started_events(ctx, matched, emit);
-    let (results, finished_events) = run_fresh(matched, ctx, &exec, &governor, emit).await;
+    let (results, finished_events) = run_fresh(matched, ctx, layout, &exec, &governor, emit).await;
     let mut resolved = resolve_all(matched, ctx, results);
     recheck_scope_digests(&mut resolved, ctx);
 
@@ -364,7 +369,12 @@ pub async fn execute_with(
     events.extend(started_events);
     events.extend(finished_events);
     for item in &resolved {
-        persist_reviewer(layout, &ctx.run, item)
+        let akari = if !item.replayed && !item.carried {
+            handoff_native_session(layout, ctx, item).await
+        } else {
+            None
+        };
+        persist_reviewer(layout, &ctx.run, item, akari.as_ref())
             .wrap_err_with(|| format!("persisting reviewer '{}'", item.reviewer.name))?;
         let event = if item.skipped {
             RunEvent::ReviewerSkipped {
@@ -526,6 +536,7 @@ fn emit_started_events(
 async fn run_fresh(
     matched: &[&Reviewer],
     ctx: &ExecContext,
+    layout: &Layout,
     exec: &Arc<ReviewFn>,
     governor: &Arc<SpawnGovernor>,
     emit: &mut dyn FnMut(&RunEvent),
@@ -542,6 +553,7 @@ async fn run_fresh(
             context: ctx.context.clone(),
             purpose: ReviewPurpose::Review,
             governor: governor.clone(),
+            native_session_dir: native_session_dir(layout, ctx, reviewer),
         };
         let force = ctx.force;
         let exec = exec.clone();
@@ -737,6 +749,7 @@ async fn run_one(
                     context: ReviewContext::default(),
                     purpose: ReviewPurpose::Routing,
                     governor: request.governor.clone(),
+                    native_session_dir: request.native_session_dir.clone(),
                 };
                 let timeout = agent.timeout.unwrap_or(DEFAULT_TRIGGER_TIMEOUT);
                 let started = Instant::now();
@@ -973,6 +986,32 @@ fn resolve(
             Duration::ZERO,
         ),
     }
+}
+
+fn native_session_dir(layout: &Layout, ctx: &ExecContext, reviewer: &Reviewer) -> Option<PathBuf> {
+    ctx.akari.as_ref()?;
+    let dir = layout.native_session_dir(&ctx.run, &reviewer.name);
+    if let Err(err) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(
+            reviewer = %reviewer.name,
+            path = %dir.display(),
+            error = %err,
+            "could not create native session directory; Akari isolation skipped"
+        );
+        return None;
+    }
+    Some(dir)
+}
+
+async fn handoff_native_session(
+    layout: &Layout,
+    ctx: &ExecContext,
+    item: &Resolved,
+) -> Option<crate::akari::HandoffRecord> {
+    let client = ctx.akari.as_ref()?;
+    let dir = layout.native_session_dir(&ctx.run, &item.reviewer.name);
+    let runner = crate::backend::command::SystemCommandRunner;
+    Some(crate::akari::handoff(&runner, client, &dir, &ctx.repo_root).await)
 }
 
 /// Preserve a fail-closed full-review outcome while attaching the routing call

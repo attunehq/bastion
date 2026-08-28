@@ -3,7 +3,12 @@
 use super::*;
 
 /// Persist one reviewer's saved artifacts: transcript, raw verdict, and metadata.
-pub(super) fn persist_reviewer(layout: &Layout, run: &RunId, item: &Resolved) -> Result<()> {
+pub(super) fn persist_reviewer(
+    layout: &Layout,
+    run: &RunId,
+    item: &Resolved,
+    akari: Option<&crate::akari::HandoffRecord>,
+) -> Result<()> {
     let dir = layout.reviewer_dir(run, &item.reviewer.name);
     std::fs::create_dir_all(&dir)
         .wrap_err_with(|| format!("creating reviewer directory {}", dir.display()))?;
@@ -53,6 +58,7 @@ pub(super) fn persist_reviewer(layout: &Layout, run: &RunId, item: &Resolved) ->
         duration_ms: duration_ms(item.duration),
         usage,
         trigger: item.reviewer.trigger.clone(),
+        akari: akari.cloned(),
     };
     let meta_path = layout.meta(run, &item.reviewer.name);
     std::fs::write(
@@ -84,6 +90,8 @@ struct ReviewerMeta {
     #[serde(skip_serializing_if = "Option::is_none")]
     usage: Option<Usage>,
     trigger: crate::reviewer::Trigger,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    akari: Option<crate::akari::HandoffRecord>,
 }
 
 /// Persist the run's event stream, prepending the authoritative `run.started`.

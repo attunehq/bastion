@@ -31,7 +31,7 @@ use crate::verdict::{Decision, Money, Usage, Verdict};
 
 use self::claude_code::ClaudeCodeBackend;
 use self::codex::CodexBackend;
-use self::command::{CommandRunner, SystemCommandRunner};
+use self::command::{CommandRunner, OverlayEnvRunner, SystemCommandRunner};
 use self::container::{ContainerEngine, ContainerRunner, ExecutionPlan, credential_passthrough};
 use self::governor::{GovernedRunner, SpawnGovernor};
 use self::grok::GrokBackend;
@@ -73,6 +73,9 @@ pub struct ReviewRequest<'a> {
     pub context: &'a ReviewContext,
     /// Whether this call reviews the concern or only routes it.
     pub purpose: ReviewPurpose,
+    /// Directory native agent session files should be written to when Akari
+    /// handoff is on. `None` leaves the agent writing to its default location.
+    pub native_session_dir: Option<&'a Path>,
 }
 
 /// What a backend returns for one reviewer.
@@ -161,9 +164,14 @@ pub async fn dispatch(
     request: &ReviewRequest<'_>,
     governor: &Arc<SpawnGovernor>,
 ) -> Result<ReviewOutcome> {
+    let overlay = request
+        .native_session_dir
+        .map(|dir| crate::akari::session_env(request.reviewer.backend, dir))
+        .unwrap_or_default();
     match ExecutionPlan::resolve(request.reviewer)? {
         ExecutionPlan::Native => {
             let runner = GovernedRunner::new(SystemCommandRunner, governor.clone());
+            let runner = OverlayEnvRunner::new(runner, overlay);
             run_backend(request, runner, Program::HostDefault).await
         }
         ExecutionPlan::Container(plan) => {
@@ -177,7 +185,11 @@ pub async fn dispatch(
                 image = %image,
                 "running reviewer in a container"
             );
-            let runner = ContainerRunner::new(base, engine, image, credential_passthrough());
+            let mut runner = ContainerRunner::new(base, engine, image, credential_passthrough());
+            if let Some(dir) = request.native_session_dir {
+                runner = runner.with_session_mount(dir.to_path_buf());
+            }
+            let runner = OverlayEnvRunner::new(runner, overlay);
             run_backend(request, runner, Program::InContainer).await
         }
     }
@@ -671,6 +683,7 @@ mod tests {
             merge_base: "abc1234",
             context: ReviewContext::empty(),
             purpose: ReviewPurpose::Review,
+            native_session_dir: None,
         };
         let routing = ReviewRequest {
             purpose: ReviewPurpose::Routing,
@@ -816,6 +829,7 @@ findings: []
             merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
             purpose: ReviewPurpose::Review,
+            native_session_dir: None,
         };
 
         let outcome = MockBackend.review(&request).await.expect("mock runs");
@@ -842,6 +856,7 @@ findings: []
             merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
             purpose: ReviewPurpose::Review,
+            native_session_dir: None,
         };
         let err = dispatch(&request, &SpawnGovernor::shared_default())
             .await

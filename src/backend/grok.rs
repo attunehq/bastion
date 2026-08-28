@@ -397,6 +397,7 @@ mod tests {
             merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
             purpose: crate::backend::ReviewPurpose::Review,
+            native_session_dir: None,
         };
         let outcome = backend.review(&request).await;
         (outcome, backend.runner)
@@ -699,6 +700,7 @@ mod tests {
             merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
             purpose: crate::backend::ReviewPurpose::Review,
+            native_session_dir: None,
         };
         let outcome = backend.review(&request).await.expect("verdict");
         assert_eq!(outcome.verdict.summary, "real subprocess ok");

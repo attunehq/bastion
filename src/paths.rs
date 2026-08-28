@@ -11,10 +11,11 @@
 //!       seal.json                 # the run seal, when the run was sealed
 //!       reviewers/
 //!         tenant-isolation/
-//!           transcript.jsonl      # the full agent session
+//!           transcript.jsonl      # the reconstructed agent session
 //!           verdict.json          # the raw structured verdict; absent on a skip
 //!           meta.json             # backend, timing, usage, matched trigger
 //!     latest                      # pointer to the most recent run
+//!   native/                       # isolated native agent sessions (Akari handoff)
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -124,6 +125,23 @@ impl Layout {
     #[must_use]
     pub fn meta(&self, id: &RunId, reviewer: &str) -> PathBuf {
         self.reviewer_dir(id, reviewer).join("meta.json")
+    }
+
+    /// Durable native agent-session tree (`<root>/native`), a sibling of `runs/`
+    /// so `bastion clean` does not delete it. Isolated reviewer sessions land
+    /// here so Akari can ingest them after an ephemeral worktree is gone.
+    #[must_use]
+    pub fn native_sessions_dir(&self) -> PathBuf {
+        self.root.join("native")
+    }
+
+    /// One reviewer's native session directory within a run
+    /// (`<root>/native/<run>/<reviewer>`).
+    #[must_use]
+    pub fn native_session_dir(&self, id: &RunId, reviewer: &str) -> PathBuf {
+        self.native_sessions_dir()
+            .join(id.as_str())
+            .join(path_component(reviewer))
     }
 
     /// The pointer file recording the most recent run id (`<root>/runs/latest`).

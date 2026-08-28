@@ -328,6 +328,7 @@ pub async fn review(
         digest_probe,
         attestation_fallback,
         limits: config.limits,
+        akari: crate::akari::resolve(user_dir),
     };
 
     // The runner streams the per-reviewer and completion events; render each as it

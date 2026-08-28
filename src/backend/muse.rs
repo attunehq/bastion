@@ -476,6 +476,7 @@ mod tests {
             merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
             purpose: crate::backend::ReviewPurpose::Review,
+            native_session_dir: None,
         }
     }
 

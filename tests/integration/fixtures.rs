@@ -372,6 +372,12 @@ impl TestRepo {
         self
     }
 
+    /// Write user-level `akari.yaml` into this repo's isolated config dir.
+    pub(crate) fn with_akari_settings(self, yaml: &str) -> Self {
+        std::fs::write(self.config.path().join(bastion::akari::SETTINGS_FILE), yaml).unwrap();
+        self
+    }
+
     /// Re-dirty the working tree (used between runs to keep a changeset present).
     fn dirty(dir: &Path) {
         std::fs::write(

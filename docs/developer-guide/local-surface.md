@@ -48,6 +48,20 @@ both sets by reviewer name:
 
 This is a local-only layer. A review carrying a GitHub source (`--repo`/`--pr`, as CI runs) rejects `--with-user-reviewers` and skips the user-level registry, so the GitHub adapter sees the repository's reviewers alone and the `repo:` scope never appears there, even on a self-hosted runner that has a config dir. `--config-dir` (or `$BASTION_CONFIG_DIR`) overrides where the user-level file is read from, mirroring `--data-dir` for run history; it does not enable the merge.
 
+### Akari session handoff
+
+Native reviewer sessions can be handed to a local [Akari](https://github.com/attunehq/akari) client so they show up in the session history with provider, model, and usage intact. This is off by default and is not repository policy: a checkout cannot enable it.
+
+Write `akari.yaml` in the same user config directory as the personal registry:
+
+```yaml
+enabled: true
+```
+
+`BASTION_AKARI=1` enables it without a file; `BASTION_AKARI=0` disables it even when the file says otherwise. `BASTION_AKARI_BIN` points at a specific `akari` binary. A `--repo`/`--pr` run withholds the user config directory, so CI stays off unless `BASTION_AKARI=1` is set on the runner.
+
+When enabled, Bastion relocates Pi, Claude Code, and Codex native session files into `<data-dir>/native/<run>/<reviewer>/` for that reviewer (so they survive an ephemeral worktree and do not land in `~/.pi` / `~/.claude` / `~/.codex` session trees) and runs `akari ingest --root <that directory>` after a fresh execute. Akari discovers and classifies whatever landed there. A handoff failure is recorded on the reviewer's `meta.json` and logged; it never changes the verdict.
+
 ### Multi-file registries and `--include`
 
 Either layer's registry can spread across files: a top-level `include:` array merges further registry files (recursively, each path relative to the file that lists it, a file reached twice merging once), and a reviewer's `prompt` can be a `{file: <path>}` reference whose content is inlined at load. Both resolve inside their own layer before the user/repo merge above happens, so a user-file include is a user-layer reviewer and a repo-file include is part of the effective repository config. The global `--include <path>` flag (repeatable, on `review`, `validate`, `attest`, and `github codeowners`) merges extra files into the *repository* layer, like `include:` entries except that a relative path resolves against the current directory. It does not suppress personal fallback reviewers when there is no repository registry. Because the extra files change the effective repository config hash, `bastion attest` (and a CI replay) only agree with such a run when given the same flags. See [Authoring reviewers](../user-guide/authoring-reviewers.md#splitting-the-registry-across-files) for the authoring-level rules (per-file `defaults`, root-only `attestations`, cross-file name uniqueness).
