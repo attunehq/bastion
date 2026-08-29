@@ -5,7 +5,8 @@
 //! behind [`CommandRunner`]: production uses [`SystemCommandRunner`] (a real
 //! `tokio` child process), while tests inject a runner that drives a fake
 //! executable or canned output. The trait is the one place that touches the OS,
-//! so everything above it is deterministic.
+//! so everything above it is deterministic. [`OverlayEnvRunner`] is the decorator
+//! that injects isolation env when Akari handoff is on.
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -228,6 +229,40 @@ fn resolve_windows_executable(
     None
 }
 
+/// A [`CommandRunner`] decorator that layers extra environment variables onto
+/// every spec before the inner runner sees it.
+///
+/// Isolation env for native agent sessions is applied here so every backend
+/// (and an agent trigger) picks it up without each `build_spec` copying the
+/// overlay. Empty overlay is a no-op. Overlay keys win over the spec's own env
+/// so a reviewer cannot relocate sessions out of the isolation directory.
+#[derive(Debug, Clone)]
+pub struct OverlayEnvRunner<R> {
+    inner: R,
+    overlay: BTreeMap<String, String>,
+}
+
+impl<R> OverlayEnvRunner<R> {
+    /// Wrap `inner`, inserting `overlay` into every spec's env.
+    #[must_use]
+    pub fn new(inner: R, overlay: BTreeMap<String, String>) -> Self {
+        Self { inner, overlay }
+    }
+}
+
+impl<R: CommandRunner> CommandRunner for OverlayEnvRunner<R> {
+    async fn run(&self, spec: &CommandSpec) -> Result<CommandOutput> {
+        if self.overlay.is_empty() {
+            return self.inner.run(spec).await;
+        }
+        let mut spec = spec.clone();
+        for (key, value) in &self.overlay {
+            spec.env.insert(key.clone(), value.clone());
+        }
+        self.inner.run(&spec).await
+    }
+}
+
 /// Resolve the program path for a backend CLI, honoring an environment override.
 ///
 /// Each backend has a default program name (e.g. `claude`) found on `PATH`; the
@@ -270,6 +305,50 @@ pub fn program_available(program: impl AsRef<OsStr>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct RecordingRunner {
+        specs: std::sync::Mutex<Vec<CommandSpec>>,
+    }
+
+    impl CommandRunner for RecordingRunner {
+        async fn run(&self, spec: &CommandSpec) -> Result<CommandOutput> {
+            self.specs.lock().expect("specs").push(spec.clone());
+            Ok(CommandOutput {
+                code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn overlay_env_runner_inserts_keys_and_wins_over_spec() {
+        let inner = RecordingRunner {
+            specs: std::sync::Mutex::new(Vec::new()),
+        };
+        let overlay = BTreeMap::from([
+            ("PI_CODING_AGENT_SESSION_DIR".into(), "/native/pi".into()),
+            ("KEEP".into(), "overlay".into()),
+        ]);
+        let runner = OverlayEnvRunner::new(inner, overlay);
+        let mut spec = CommandSpec::new("pi", ".");
+        spec.env.insert("KEEP".into(), "spec".into());
+        spec.env.insert("OTHER".into(), "spec".into());
+        runner.run(&spec).await.expect("runs");
+        let specs = runner.inner.specs.lock().expect("specs");
+        assert_eq!(
+            specs[0]
+                .env
+                .get("PI_CODING_AGENT_SESSION_DIR")
+                .map(String::as_str),
+            Some("/native/pi")
+        );
+        assert_eq!(
+            specs[0].env.get("KEEP").map(String::as_str),
+            Some("overlay")
+        );
+        assert_eq!(specs[0].env.get("OTHER").map(String::as_str), Some("spec"));
+    }
 
     #[test]
     fn resolve_program_prefers_override() {

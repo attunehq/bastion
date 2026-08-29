@@ -143,7 +143,7 @@ fn persisting_a_skip_removes_artifacts_from_an_earlier_run_at_the_same_head() {
         skipped: false,
         trigger: None,
     };
-    persist_reviewer(&layout, &run, &reviewed).unwrap();
+    persist_reviewer(&layout, &run, &reviewed, None).unwrap();
     assert!(layout.verdict(&run, "semantic").exists());
     assert!(layout.transcript(&run, "semantic").exists());
 
@@ -166,7 +166,7 @@ fn persisting_a_skip_removes_artifacts_from_an_earlier_run_at_the_same_head() {
         }),
         ..reviewed
     };
-    persist_reviewer(&layout, &run, &skipped).unwrap();
+    persist_reviewer(&layout, &run, &skipped, None).unwrap();
 
     assert!(!layout.verdict(&run, "semantic").exists());
     assert!(!layout.transcript(&run, "semantic").exists());
@@ -233,6 +233,7 @@ fn ctx(reviewers: &[&Reviewer]) -> ExecContext {
         scope_digests: Default::default(),
         attestation_fallback: None,
         limits: SpawnLimits::default(),
+        akari: None,
     }
 }
 

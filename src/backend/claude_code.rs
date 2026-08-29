@@ -461,6 +461,7 @@ mod tests {
             merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
             purpose: crate::backend::ReviewPurpose::Review,
+            native_session_dir: None,
         };
         backend.review(&request).await
     }
@@ -487,6 +488,7 @@ mod tests {
             merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
             purpose: crate::backend::ReviewPurpose::Review,
+            native_session_dir: None,
         };
         backend.review(&request).await.expect("verdict parses");
         backend.runner.nth_args(0)
@@ -670,6 +672,7 @@ mod tests {
             merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
             purpose: crate::backend::ReviewPurpose::Review,
+            native_session_dir: None,
         };
 
         let outcome = backend.review(&request).await.expect("reprompt succeeds");
@@ -770,6 +773,7 @@ mod tests {
             merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
             purpose: crate::backend::ReviewPurpose::Review,
+            native_session_dir: None,
         };
         let err = backend.review(&request).await.unwrap_err();
         assert!(err.to_string().contains("execution error"));
@@ -834,6 +838,7 @@ mod tests {
             merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
             purpose: crate::backend::ReviewPurpose::Review,
+            native_session_dir: None,
         };
         let prompt = build_prompt(&request);
         // The shared changeset preamble leads, naming the base and steering the
@@ -887,6 +892,7 @@ mod tests {
             merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
             purpose: crate::backend::ReviewPurpose::Review,
+            native_session_dir: None,
         };
         backend.review(&request).await.expect("runs");
 
@@ -983,6 +989,7 @@ mod tests {
             merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
             purpose: crate::backend::ReviewPurpose::Review,
+            native_session_dir: None,
         };
 
         let outcome = backend

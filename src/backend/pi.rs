@@ -671,6 +671,7 @@ mod tests {
             merge_base: "deadbeef",
             context: crate::context::ReviewContext::empty(),
             purpose: crate::backend::ReviewPurpose::Review,
+            native_session_dir: None,
         }
     }
 
@@ -713,6 +714,7 @@ mod tests {
             merge_base: "deadbeef",
             context: &context,
             purpose: crate::backend::ReviewPurpose::Review,
+            native_session_dir: None,
         };
         let prompt = build_prompt(&req);
         let prompt_at = prompt

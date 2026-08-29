@@ -12,6 +12,7 @@
 //!
 //! The module layout follows the domain rather than file kind:
 //!
+//! - [`akari`]: opt-in handoff of native agent sessions to the local Akari client.
 //! - [`reviewer`] / [`config`]: the declarative reviewer registry.
 //! - [`routing`]: matching changed files to reviewers by trigger glob.
 //! - [`verdict`] / [`event`]: the structured outputs reviewers and runs emit.
@@ -37,6 +38,7 @@
 
 #![warn(missing_docs)]
 
+pub mod akari;
 pub mod attest;
 pub mod backend;
 pub mod carry;

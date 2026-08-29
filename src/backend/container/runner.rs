@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use color_eyre::eyre::{Context, Result, bail};
 
@@ -28,6 +28,9 @@ pub struct ContainerRunner<R> {
     engine: ContainerEngine,
     image: ImageReference,
     credentials: Vec<String>,
+    /// Host directory bind-mounted onto the same path inside the container so
+    /// isolation env vars that name a host path still resolve.
+    session_mount: Option<PathBuf>,
 }
 
 impl<R> ContainerRunner<R> {
@@ -47,7 +50,15 @@ impl<R> ContainerRunner<R> {
             engine,
             image,
             credentials,
+            session_mount: None,
         }
+    }
+
+    /// Bind-mount `host` onto the same path inside the container.
+    #[must_use]
+    pub fn with_session_mount(mut self, host: PathBuf) -> Self {
+        self.session_mount = Some(host);
+        self
     }
 
     /// Rewrite a backend spec into the `docker run` spec that executes it in the
@@ -62,6 +73,10 @@ impl<R> ContainerRunner<R> {
         // Bind-mount the checkout and run there.
         let mount = format!("{}:{WORKDIR}", spec.cwd.display());
         docker.arg("-v").arg(mount).arg("-w").arg(WORKDIR);
+        if let Some(host) = &self.session_mount {
+            let mount = format!("{}:{}", host.display(), host.display());
+            docker.arg("-v").arg(mount);
+        }
         // Forward the reviewer's declared env through an env-file: the engine injects
         // those pairs into the container without them entering the argv (no secret in
         // a process listing) or the engine *client* process (a reviewer `DOCKER_HOST`

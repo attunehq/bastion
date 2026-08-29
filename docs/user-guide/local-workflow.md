@@ -38,6 +38,13 @@ each terminal verdict or agent-trigger skip. Candidates resolve in parallel with
 per-reviewer timeouts, and a re-run is incremental (next section): a reviewer that
 already passed may carry its verdict forward instead of executing again, locally
 and in CI.
+
+To send native reviewer sessions to a local [Akari](https://github.com/attunehq/akari)
+install, write `akari.yaml` with `enabled: true` in your user config directory
+(the same place as a personal `.bastion.yaml`). This is off by default and is not
+repository configuration, so a checkout cannot turn it on. `BASTION_AKARI=1`
+enables it without a file. A failed ingest is logged and does not change the
+verdict.
 A CI review (`--repo`/`--pr`)
 against a repository with `attestations: true` first checks for a verified
 attestation covering the run: a reviewer the attestation covers replays its

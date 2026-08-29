@@ -485,6 +485,20 @@ fn fake_agent() -> Option<&'static Path> {
     FAKE.get_or_init(build_fake_agent).as_deref()
 }
 
+const FAKE_AKARI_SRC: &str = r#"
+fn main() {
+    println!("0 file(s): 0 uploaded, 0 reset, 0 up to date, 0 skipped, 0 failed, 0 discovery error(s) (0 bytes sent)");
+}
+"#;
+
+/// A stand-in `akari` that reports an empty ingest, so handoff tests do not
+/// call a real client (or fail if none is installed).
+pub(crate) fn fake_akari() -> Option<&'static Path> {
+    static FAKE: OnceLock<Option<PathBuf>> = OnceLock::new();
+    FAKE.get_or_init(|| compile_rust(FAKE_AKARI_SRC, "fake-akari"))
+        .as_deref()
+}
+
 fn build_fake_agent() -> Option<PathBuf> {
     compile_rust(FAKE_AGENT_SRC, "fake-agent")
 }

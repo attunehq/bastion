@@ -18,7 +18,7 @@ stays pure orchestration.
 | File | Role |
 | --- | --- |
 | [`mod.rs`](../../src/backend/mod.rs) | The `Backend` trait, `ReviewRequest`/`ReviewOutcome`, `MockBackend`, `dispatch`, and the shared prompt/helpers (`changeset_preamble`, `EXHAUSTIVE_FINDINGS_INSTRUCTION`, `context_segment`, `interpolate`, `money_from_dollars`, plus the JSON-schema set `VERDICT_JSON_SCHEMA`/`JSON_SCHEMA_INSTRUCTION`/`JSON_REPROMPT` and the fenced-YAML set `SCHEMA_INSTRUCTION`/`REPROMPT_SUFFIX`/`extract_verdict`). |
-| [`command.rs`](../../src/backend/command.rs) | The `CommandRunner` subprocess seam: `CommandSpec` and `SystemCommandRunner`, plus a fake runner for tests. |
+| [`command.rs`](../../src/backend/command.rs) | The `CommandRunner` subprocess seam: `CommandSpec`, `SystemCommandRunner`, and `OverlayEnvRunner` (the decorator that injects isolation env when Akari handoff is on). |
 | [`governor.rs`](../../src/backend/governor.rs) | The spawn governor: `GovernedRunner` (a `CommandRunner` decorator) and `SpawnGovernor`, the per-run spend caps enforced at the seam. See [The spawn governor](#the-spawn-governor). |
 | [`claude_code.rs`](../../src/backend/claude_code.rs) | The Claude Code backend. |
 | [`codex.rs`](../../src/backend/codex.rs) | The Codex backend. |
@@ -142,6 +142,12 @@ place to *bound* launches. [`governor.rs`](../../src/backend/governor.rs) define
 `SpawnGovernor`, the per-run state it shares. One `Arc<SpawnGovernor>` is built in the
 runner (`src/runner/mod.rs`) for the whole review and threaded through `dispatch` so
 every reviewer, container image build included, draws from the same budget.
+
+When Akari handoff is on, `dispatch` wraps that runner in `OverlayEnvRunner` so
+isolation env (`PI_CODING_AGENT_SESSION_DIR`, `CLAUDE_PROJECTS_DIR`,
+`CODEX_SESSIONS_DIR`) is injected at the seam rather than copied in each backend.
+A containerized reviewer also bind-mounts the isolation directory onto the same
+host path inside the container.
 
 `GovernedRunner::run` does three things around the inner call: it `admit`s (awaiting a
 concurrency permit and refusing once a cap has tripped), runs the inner runner, then

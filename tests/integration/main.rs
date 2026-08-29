@@ -40,6 +40,7 @@ mod github;
 
 mod accounting;
 mod aggregation;
+mod akari;
 mod attestation;
 mod carry;
 mod cli_surface;
