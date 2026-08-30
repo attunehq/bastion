@@ -148,6 +148,15 @@ Targeted checks when relevant:
   agent-time hook; the prose-voice judgment a regex cannot express is
   write-time discipline via the `stop-slop` skill.
 
+## Proof artifacts
+
+- Proof artifacts (screenshots, HTML mocks, logs) go in `scratch/`, which is
+  gitignored. Never commit them and never upload them to a host outside GitHub.
+- Upload PR images with the `github-image-upload` skill (`gh image`), which produces
+  `github.com/user-attachments` URLs that stay private for private repos.
+- `bastion attest` requires a clean tree; files in `scratch/` do not dirty it, so
+  proof does not cost you an extra paid review.
+
 ## Architecture map
 
 The module map and the life of a `bastion review` live in

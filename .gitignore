@@ -23,3 +23,6 @@ Thumbs.db
 
 # Claude Code agent worktrees (transient; created by background agents)
 /.claude/worktrees/
+
+# Agent throwaway files: screenshots, mocks, logs. See AGENTS.md, "Proof artifacts".
+/scratch/
