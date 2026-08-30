@@ -25,6 +25,8 @@ name: bastion
 
 on:
   pull_request:
+  # Merge queue runs report this check without reviewing; see the job condition.
+  merge_group:
 
 # Read the diff and fail the job, and write the surfaces `bastion github report`
 # posts after the review: the sticky PR comment (`pull-requests: write`) and the
@@ -38,7 +40,7 @@ permissions:
 
 # One in-flight review per PR; a new push cancels the previous run.
 concurrency:
-  group: bastion-${{ github.event.pull_request.number }}
+  group: bastion-${{ github.event.pull_request.number || github.event.merge_group.head_ref }}
   cancel-in-progress: true
 
 jobs:
@@ -57,7 +59,17 @@ jobs:
     # agentic backend over untrusted code. So this runs for same-repo PRs only; a
     # maintainer reviews a fork PR by pushing its branch to a trusted branch in
     # this repo.
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    #
+    # The review never runs in the merge queue. Reviewers are paid agents, and
+    # the queue would spend a second set of tokens on content a green PR review
+    # already covered. The workflow still triggers on `merge_group` so this job
+    # reports as skipped, which a required status check accepts; without the
+    # trigger the check would never report and the queue would stall. The
+    # tradeoff is that a merge group combining several PRs merges on the
+    # per-PR verdicts rather than a review of the combined result.
+    if: |
+      github.event_name == 'pull_request'
+        && github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - uses: actions/checkout@v7
         with:

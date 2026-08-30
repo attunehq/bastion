@@ -1,0 +1,60 @@
+name: Merge queue duplicate check
+description: >-
+  Reports whether a merge_group run would repeat a check the queued pull request
+  already passed on identical content.
+
+# GitHub only enqueues a pull request once its required checks are green, so a
+# merge group whose tree matches that pull request's head tree carries content
+# every check has already accepted. Re-running them there costs a full CI cycle
+# per merge and, for the paid reviewers, a second set of review tokens.
+#
+# The comparison is on tree content, so it stays conservative on its own. A
+# group holding several pull requests carries the other pull requests' changes,
+# and a base branch that moved under the pull request produces a merge nobody
+# checked; in both cases the trees differ and every check runs.
+
+outputs:
+  skip:
+    description: >-
+      "true" when this is a merge_group run whose tree matches the head tree of
+      the pull request the group was built from, "false" otherwise.
+    value: ${{ steps.compare.outputs.skip }}
+
+runs:
+  using: composite
+  steps:
+    - id: compare
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        EVENT_NAME: ${{ github.event_name }}
+        HEAD_REF: ${{ github.event.merge_group.head_ref }}
+        HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -euo pipefail
+
+        decide() {
+          echo "skip=$1" >> "$GITHUB_OUTPUT"
+          echo "$2"
+          exit 0
+        }
+
+        if [ "$EVENT_NAME" != "merge_group" ]; then
+          decide false "Not a merge queue run; the checks run as usual."
+        fi
+
+        # The queue branch is gh-readonly-queue/<base>/pr-<number>-<base sha>.
+        if [[ ! "$HEAD_REF" =~ /pr-([0-9]+)-[0-9a-f]+$ ]]; then
+          decide false "No pull request number in $HEAD_REF; running the checks."
+        fi
+        pr="${BASH_REMATCH[1]}"
+
+        pr_head="$(gh api "repos/$REPO/pulls/$pr" --jq .head.sha)"
+        pr_tree="$(gh api "repos/$REPO/commits/$pr_head" --jq .commit.tree.sha)"
+        group_tree="$(gh api "repos/$REPO/commits/$HEAD_SHA" --jq .commit.tree.sha)"
+
+        if [ "$pr_tree" = "$group_tree" ]; then
+          decide true "Tree $group_tree matches PR #$pr head $pr_head, which is already green; skipping."
+        fi
+        decide false "Tree $group_tree differs from PR #$pr head tree $pr_tree; running the checks."
