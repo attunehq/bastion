@@ -16,6 +16,16 @@ use std::process::Stdio;
 use color_eyre::eyre::{Context, Result};
 use tokio::io::AsyncWriteExt;
 
+/// Why an agent process is being launched.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LaunchKind {
+    /// Required work for the current review.
+    #[default]
+    Review,
+    /// A best-effort attempt to continue prior conversation state.
+    ConversationResume,
+}
+
 /// A fully-specified invocation of an agent CLI.
 ///
 /// This is the parsed, proof-carrying form a backend hands to a [`CommandRunner`]:
@@ -36,6 +46,8 @@ pub struct CommandSpec {
     /// argument -- which also sidesteps the Windows refusal to forward complex
     /// arguments to a `.cmd`/`.bat` shim. `None` connects stdin to null.
     pub stdin: Option<String>,
+    /// Whether this launch is required review work or an optional resume attempt.
+    pub kind: LaunchKind,
 }
 
 impl CommandSpec {
@@ -47,6 +59,7 @@ impl CommandSpec {
             cwd: cwd.into(),
             env: BTreeMap::new(),
             stdin: None,
+            kind: LaunchKind::Review,
         }
     }
 
@@ -59,6 +72,12 @@ impl CommandSpec {
     /// Set the text piped to the child's standard input.
     pub fn stdin(&mut self, input: impl Into<String>) -> &mut Self {
         self.stdin = Some(input.into());
+        self
+    }
+
+    /// Mark this invocation as a best-effort prior-conversation resume.
+    pub fn conversation_resume(&mut self) -> &mut Self {
+        self.kind = LaunchKind::ConversationResume;
         self
     }
 }

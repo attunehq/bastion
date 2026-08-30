@@ -66,6 +66,7 @@ impl<R> ContainerRunner<R> {
     /// and forwarding the reviewer's env from `env_file` (when one was written).
     fn wrap(&self, spec: &CommandSpec, name: &str, env_file: Option<&Path>) -> CommandSpec {
         let mut docker = CommandSpec::new(self.engine.program().to_os_string(), spec.cwd.clone());
+        docker.kind = spec.kind;
         docker.arg("run").arg("--rm").arg("--name").arg(name);
         if spec.stdin.is_some() {
             docker.arg("-i");
@@ -125,12 +126,9 @@ impl<R> ContainerRunner<R> {
 }
 
 impl<R: CommandRunner> CommandRunner for ContainerRunner<R> {
-    // Each call is its own `docker run --rm` container with no persisted home, so a
-    // backend's reprompt-on-malformed-output retry (`--resume` / `exec resume`) cannot
-    // recover first-turn session state across the two turns: a containerized reviewer
-    // with a malformed first turn fails closed rather than recovering. That is safe (a
-    // gate never launders a pass), just less forgiving; persisting a shared agent home
-    // is a deliberate later pass (see docs/developer-guide/containers.md).
+    // Each call is its own `docker run --rm` container. A configured session mount
+    // preserves isolated backend state across calls; without one, a resume cannot
+    // recover state written into the prior container's home. See containers.md.
     async fn run(&self, spec: &CommandSpec) -> Result<CommandOutput> {
         // Name the container so the teardown guard (armed below) can force-remove it if
         // this future is cancelled.

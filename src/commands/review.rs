@@ -45,9 +45,9 @@ pub struct ReviewOptions {
     /// partial and is never sealed, so a filtered green cannot be presented (or
     /// attested) as a full green.
     pub only: Vec<String>,
-    /// Disable carrying prior passes forward (`--fresh`): every triggered
-    /// reviewer executes even when its trigger-scoped diff is unchanged since
-    /// its newest resolution on the branch ([`crate::carry`]).
+    /// Disable prior verdict and conversation reuse (`--fresh`): every triggered
+    /// reviewer executes in a new conversation even when its trigger-scoped diff
+    /// is unchanged since its newest resolution on the branch ([`crate::carry`]).
     pub fresh: bool,
     /// Extra registry files merged into the repository layer (`--include`,
     /// repeatable), as if the repository registry's `include:` array listed
@@ -122,6 +122,7 @@ pub async fn review(
     } = options;
     let base = base.as_str();
     let repo_root = git::repo_root(cwd)?;
+    let repository = store::RepositoryId::resolve(&repo_root)?;
     warn_on_stale_skills(&repo_root);
     let branch = git::current_branch(&repo_root)?;
     let (_sources, repo_attestation, config) = Config::discover_merged_attested(
@@ -194,7 +195,7 @@ pub async fn review(
             cost_usd: Money::from_cents(0),
         };
         render::write_event(&mut out, format, &completed)?;
-        store::write_run(layout, &run, &[started, completed])?;
+        store::write_run(layout, &run, &repository, &[started, completed])?;
         return Ok(Decision::Pass);
     }
 
@@ -202,11 +203,16 @@ pub async fn review(
     // prior-findings recall here wants only the newest run, while carry planning
     // further down walks the list per reviewer. Each would otherwise rescan and
     // reparse the whole run history independently ([`store::runs_on_branch`]).
-    let prior_runs = store::runs_on_branch(layout, &branch);
+    let prior_runs = store::runs_on_branch(layout, &repository, &branch);
     let prior_findings = prior_runs
         .first()
         .map(|(_, events)| store::findings_from_events(events))
         .unwrap_or_default();
+    let conversations = if fresh {
+        std::collections::BTreeMap::new()
+    } else {
+        plan_conversations(layout, &prior_runs, &matched)
+    };
 
     let (context, gathered_github) =
         assemble_context(&repo_root, base, github.as_ref(), prior_findings).await;
@@ -311,6 +317,7 @@ pub async fn review(
     let ctx = ExecContext {
         run,
         repo_root,
+        repository,
         branch,
         base: base.to_string(),
         merge_base,
@@ -324,6 +331,7 @@ pub async fn review(
         partial,
         force,
         carried,
+        conversations,
         scope_digests,
         digest_probe,
         attestation_fallback,
@@ -626,6 +634,36 @@ fn plan_scope_digests(
         }
     }
     scope_digests
+}
+
+/// Find the newest compatible, locally available conversation for each reviewer.
+///
+/// The run list is already scoped to this repository and branch. A partial,
+/// carried, replayed, or failed run may have no conversation metadata, so the
+/// walk continues until it finds the newest actual backend conversation whose
+/// effective reviewer profile still matches. Missing isolated session storage
+/// disqualifies only that reference; a backend-default or provider-side session
+/// has no path to preflight and is attempted best-effort by the backend.
+fn plan_conversations(
+    layout: &Layout,
+    prior_runs: &[(store::RunSummary, Vec<RunEvent>)],
+    reviewers: &[&crate::reviewer::Reviewer],
+) -> std::collections::BTreeMap<String, crate::conversation::ConversationRef> {
+    let mut planned = std::collections::BTreeMap::new();
+    for reviewer in reviewers {
+        for (summary, _) in prior_runs {
+            let Some(conversation) =
+                store::reviewer_conversation(layout, &summary.run, &reviewer.name)
+            else {
+                continue;
+            };
+            if conversation.is_compatible(reviewer) && conversation.storage_is_available() {
+                planned.insert(reviewer.name.clone(), conversation);
+                break;
+            }
+        }
+    }
+    planned
 }
 
 /// Plan which prior passes carry forward this run ([`crate::carry`]).
@@ -1041,6 +1079,66 @@ mod tests {
             attestation: None,
             prompt: "p".into(),
         }
+    }
+
+    fn summary(run: &str) -> store::RunSummary {
+        store::RunSummary {
+            run: RunId(run.into()),
+            branch: Some("feat/x".into()),
+            base: Some("main".into()),
+            verdict: Some(Decision::Block),
+            reviewers: 1,
+            partial: false,
+        }
+    }
+
+    fn write_conversation(
+        layout: &Layout,
+        run: &RunId,
+        reviewer: &str,
+        conversation: &crate::conversation::ConversationRef,
+    ) {
+        let path = layout.meta(run, reviewer);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            serde_json::to_vec(&serde_json::json!({ "conversation": conversation })).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn conversation_planning_uses_the_newest_compatible_available_reference() {
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = Layout::with_root(tmp.path().to_path_buf());
+        let reviewer = named_reviewer("continuity");
+        let mut changed = reviewer.clone();
+        changed.prompt = "old profile".into();
+        let incompatible = crate::conversation::ConversationRef::from_backend(
+            crate::reviewer::Backend::ClaudeCode,
+            "new-but-incompatible",
+            &changed,
+            None,
+            None,
+        )
+        .unwrap();
+        let compatible = crate::conversation::ConversationRef::from_backend(
+            crate::reviewer::Backend::ClaudeCode,
+            "older-compatible",
+            &reviewer,
+            None,
+            None,
+        )
+        .unwrap();
+        write_conversation(&layout, &RunId("r-new".into()), "continuity", &incompatible);
+        write_conversation(&layout, &RunId("r-old".into()), "continuity", &compatible);
+        let prior_runs = vec![
+            (summary("r-new"), Vec::new()),
+            (summary("r-old"), Vec::new()),
+        ];
+
+        let planned = plan_conversations(&layout, &prior_runs, &[&reviewer]);
+        assert_eq!(planned["continuity"].id().as_str(), "older-compatible");
     }
 
     #[test]

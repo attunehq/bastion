@@ -544,7 +544,13 @@ mod tests {
                 cost_usd: Money::from_cents(0),
             },
         ];
-        store::write_run(&layout, &run_id, &resolved_events).unwrap();
+        store::write_run(
+            &layout,
+            &run_id,
+            &store::RepositoryId::for_test("attest-replay-tests"),
+            &resolved_events,
+        )
+        .unwrap();
 
         let secret: &'static [u8] = b"fixture-test-secret";
         let sealed_events: Vec<serde_json::Value> = resolved_events

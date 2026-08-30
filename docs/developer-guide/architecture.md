@@ -27,9 +27,10 @@ through it.
 | [`src/verdict.rs`](../../src/verdict.rs) | The structured verdict (`Decision`, `Verdict`, `Finding`, `Usage`, and `Money`, which carries cents but serializes as dollars). |
 | [`src/context.rs`](../../src/context.rs) | The transport-neutral review context (`ReviewContext`): the author's stated intent, the surrounding discussion (`ContextComment` with a generic `Standing`), and a reviewer's prior findings (`PriorFinding`, keyed by a content-derived `FindingId`). A producer fills it; the backends consume it through `render_for`. Everything in it is untrusted input. |
 | [`src/event.rs`](../../src/event.rs) | The run-event schema streamed as JSONL and persisted to `run.jsonl`. |
-| [`src/git.rs`](../../src/git.rs) | The git queries the CLI needs (changed files, branch, repo root, and the `base..HEAD` commit messages that serve as local intent when there is no PR body). |
+| [`src/git.rs`](../../src/git.rs) | The git queries the CLI needs (changed files, branch, repo root, origin URL, common git directory, and the `base..HEAD` commit messages that serve as local intent when there is no PR body). |
 | [`src/paths.rs`](../../src/paths.rs) | The data-directory layout (`Layout`), resolved by platform convention or `BASTION_DATA_DIR`. Maps a reviewer name to a portable run-store path component (`path_component`), so the `repo:` merge sentinel cannot produce an unwritable path; `config.rs` enforces that distinct names never collapse to the same component. |
-| [`src/store.rs`](../../src/store.rs) | Run-history persistence: writing/reading `run.jsonl`, listing and pruning runs, and resolving a branch's prior runs newest first once per review (`runs_on_branch`, with `latest_run_on_branch` as the first entry). The review context takes prior findings from the newest run (`findings_from_events`); carry planning walks the list per reviewer. |
+| [`src/store.rs`](../../src/store.rs) | Run-history persistence: writing/reading `run.jsonl`, repository identities, reviewer conversation metadata, listing and pruning runs, and resolving one repository and branch's prior runs newest first (`runs_on_branch`, with `latest_run_on_branch` as the first entry). The review context takes prior findings from the newest run (`findings_from_events`); carry and conversation planning walk the list per reviewer. |
+| [`src/conversation.rs`](../../src/conversation.rs) | Durable backend conversation references. A reference binds a non-empty backend session or thread id to the effective reviewer definition, plus an isolated session directory and cumulative usage when applicable. |
 | [`src/render.rs`](../../src/render.rs) | Human and JSONL output (`Format`). |
 | [`src/text.rs`](../../src/text.rs) | Shared text helpers (`truncate`), used by `render.rs` and the GitHub reporter. |
 | [`src/runner/`](../../src/runner/) | The parallel, timeout-bounded runner: resolves agent triggers and full reviewers through one governed backend path, fails closed on review errors, streams terminal verdict or skip events, folds in replayed and carried outcomes, persists each run, and seals an eligible full run. It also builds one per-run [`SpawnGovernor`](../../src/backend/governor.rs) from the effective [`SpawnLimits`](../../src/limits.rs) and aborts a run whose fan-out trips a cap. `mod.rs` is the orchestration core; `verdicts.rs`, `seal.rs`, and `persist.rs` split out outcome folding, run sealing, and persistence. |
@@ -41,7 +42,7 @@ through it.
 | [`src/update.rs`](../../src/update.rs) | The native self-updater behind `bastion update`: resolves the latest release from the `releases/latest` redirect, downloads and checksum-verifies the `bastion-<target>.tar.gz` for `BASTION_TARGET` over `reqwest`, extracts it (`flate2` + `tar`), and swaps it over the running binary (`self-replace`). Also drives the passive out-of-date nag (`warn_if_outdated`, called from `cli::run` for every command but `update`), which prints to stderr for interactive release builds and refreshes a day-TTL cache in a detached `bastion __update-check` process. `BASTION_REPO` and `BASTION_BASE_URL` override the release source (tests point them at a local server). |
 | [`src/backend/`](../../src/backend/) | The agent execution boundary. See [Backends](./backends.md). |
 | [`src/github/`](../../src/github/) | The GitHub adapter (CI surface): `codeowners.rs` generates the governance block, `client.rs` is the `reqwest`-backed REST seam (a proof-carrying `ApiRequest` plus a `GitHubApi` trait and a recording test double, modeled on the backend's `CommandRunner`), `report/` posts a finished run as a sticky PR comment and check runs (split into `comment`, `callouts`, `checks`, `requests`, and `post`), `context.rs` produces the review context (a PR's description and discussion, the author's login, and the head SHA), and `signing.rs` fetches a user's registered SSH signing keys (`GET /users/{username}/ssh_signing_keys`) for attestation verification. See the [GitHub adapter](./github-adapter.md). |
-| [`tests/integration/`](../../tests/integration/) | The end-to-end suite: it drives the *real compiled binary* against a `rustc`-compiled fake agent, each scenario in its own throwaway `git` repo and private `BASTION_DATA_DIR`, with the fake wired in via `BASTION_CLAUDE_BIN`/`BASTION_CODEX_BIN`/`BASTION_PI_BIN` (and a fake engine via `BASTION_CONTAINER_ENGINE`). Scenarios are grouped into per-theme files (`aggregation`, `carry`, `container`, `accounting`, `persistence`, `cli_surface`, `github_report`, `attestation`) over shared `fakes`/`fixtures`/`github` support. Sibling structural targets guard the repo's shape: `tests/skills_mirror.rs`, `tests/script_safety.rs`, and `tests/user_guide_integrity.rs`. |
+| [`tests/integration/`](../../tests/integration/) | The end-to-end suite: it drives the *real compiled binary* against a `rustc`-compiled fake agent, each scenario in its own throwaway `git` repo and private `BASTION_DATA_DIR`, with the fake wired in via the five `BASTION_<BACKEND>_BIN` variables (and a fake engine via `BASTION_CONTAINER_ENGINE`). Scenarios are grouped into per-theme files (`aggregation`, `carry`, `container`, `accounting`, `persistence`, `cli_surface`, `github_report`, `attestation`) over shared `fakes`/`fixtures`/`github` support. Sibling structural targets guard the repo's shape: `tests/skills_mirror.rs`, `tests/script_safety.rs`, and `tests/user_guide_integrity.rs`. |
 | [`scripts/install.sh`](../../scripts/install.sh) / [`install.ps1`](../../scripts/install.ps1) | The public install scripts: detect the platform, download the matching archive plus `checksums.txt`, verify the SHA-256, and fail closed on any checksum problem. `tests/script_safety.rs` pins that behavior. |
 
 ## The two boundaries that shape the design
@@ -99,12 +100,22 @@ Following one review top to bottom touches most of the crate:
    explicit `--reviewer` selection then narrows that set (an unknown or untriggered
    name errors here), and a selection that excludes a triggered reviewer marks the
    run partial: persisted and rendered as such, and never sealed.
+4a. **Resolve prior history and conversations** (`store.rs`, `conversation.rs`).
+    `commands::review` resolves the current repository's opaque identity, then
+    reads this repository and branch's runs newest first. For each reviewer it
+    selects the newest conversation whose backend and effective definition still
+    match. An explicitly isolated session directory must still exist. `--fresh`
+    disables conversation lookup. Carry and attestation replay take precedence
+    later, so a planned conversation is used only if the reviewer executes.
 5. **Gather context** (`context.rs`, `git.rs`, `store.rs`, `github/context.rs`).
    Bastion assembles a `ReviewContext` for the run: the author's stated intent (a
    non-empty PR body when reviewing a pull request, otherwise this branch's commit
    messages as the fallback), the prior findings recalled from the last run of this
    branch, and (on GitHub) the PR's discussion. It is best effort: a failure to reach GitHub falls back to the local
-   context. Empty context leaves every reviewer's prompt unchanged.
+   context. Empty context leaves every reviewer's prompt unchanged. Run history is
+   scoped by an opaque repository identity and the current branch before this step,
+   so repositories that share a data directory do not recall each other's findings,
+   carry verdicts, or conversations.
 5a. **Verify and plan attestation replay** (`attest/replay.rs`, GitHub CI only). When the
     repository registry sets `attestations: true` and the run carries a GitHub
     source (`--repo`/`--pr`), `commands::review` first checks whether the CI
@@ -159,8 +170,12 @@ Following one review top to bottom touches most of the crate:
    fresh-task counts. An agent-triggered candidate
    first runs its least-privilege routing profile without author intent. A valid `skip`
    becomes `reviewer.skipped`; every trigger failure becomes `run`, then the full
-   reviewer is bounded by its `timeout` (default 15m). Each agent launch uses the
-   same governor, so trigger calls count toward run-wide limits and usage. Each
+   reviewer is bounded by its `timeout` (default 15m). A full reviewer with a
+   planned conversation submits the complete current review prompt as another turn
+   in that conversation. If the backend session is unavailable, which is common on
+   an ephemeral CI runner, the backend starts a fresh session and performs the same
+   review. Each agent launch uses the same governor, so trigger calls and resume
+   attempts count toward run-wide limits and usage. Each
    spawned task calls `backend::dispatch`
    (`backend/mod.rs`), which resolves the reviewer's `ExecutionPlan` (failing closed
    on an unprovisioned capability tier), selects the concrete backend, wraps its
@@ -181,7 +196,9 @@ Following one review top to bottom touches most of the crate:
    no pass. The aggregate is `block` if any gate blocked, else `pass`.
 8. **Emit & persist** (`render.rs`, `store.rs`, `seal.rs`). Events stream out as
    flushed human text or JSONL as they happen; the full event stream, plus per-reviewer
-   transcript, verdict, and metadata, is written under the run's directory, and
+   transcript, verdict, and metadata, is written under the run's directory. The
+   metadata includes the conversation reference returned by the backend. The run's
+   repository identity is written separately from the public event stream, and
    `latest` is updated. The runner then seals an eligible run on a best-effort
    basis: a canonical digest of the committed HEAD tree, the merge-base tree,
    the `base..HEAD` patch-id, the effective config hash, whether the working

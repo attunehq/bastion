@@ -242,6 +242,15 @@ Instead of running its own agent loops, Bastion supports existing tooling as bac
 
 For local usage, a native reviewer reuses the same configs the user has configured locally for the harness being used, so the billing or other configuration the host CLI already holds is reused in the reviewer agents. A containerized reviewer (one with a `runner` and `capabilities.network: true`) does not get that host config: Bastion bind-mounts only the checkout and forwards the reviewer's literal `env` plus a fixed set of provider-credential variable names, so the in-container agent authenticates from those forwarded credentials (or from auth baked into the image), not from the host's `~/.claude` / `~/.codex`. See [Containers](./containers.md).
 
+On a later review of the same repository and branch, a reviewer that must execute
+continues its newest compatible backend conversation when that session is still
+available. Compatibility binds the backend and the effective reviewer definition,
+so changing the prompt or execution profile starts a new conversation. The new
+turn carries the complete current review prompt. If the session state is absent,
+as it usually is on an ephemeral CI runner, Bastion performs a fresh review instead.
+`--fresh` bypasses both verdict carry and conversation continuation. The persisted
+reference is an optimization and never substitutes for a verdict.
+
 To comply with subscription terms of service (which tie a subscription to an individual, not a team) in CI, Bastion can be configured with mappings for different authentication to use per reviewer. Bastion does not store these subscription details; teams must store these separately. For example, GitHub Actions secrets can be used to store API keys or subscription details, and the Bastion runner can be configured to read different secrets depending on the user making the request in CI. Bastion can also optionally default to API billing if no subscription is configured.
 
 ### CI backends

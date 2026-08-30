@@ -81,6 +81,38 @@ pub fn repo_root(cwd: &Path) -> Result<PathBuf> {
     Ok(PathBuf::from(root))
 }
 
+/// The configured fetch URL for `origin`, when this repository has one.
+///
+/// A remote is optional for a valid local repository, so an absent or unreadable
+/// `origin` returns `None`. Callers that need a repository identity can fall back
+/// to the local common git directory.
+#[must_use]
+pub fn origin_url(cwd: &Path) -> Option<String> {
+    run_git(cwd, &["remote", "get-url", "origin"])
+        .ok()
+        .filter(|url| !url.is_empty())
+}
+
+/// The canonical common git directory shared by linked worktrees.
+///
+/// Unlike the checkout root, this path stays the same when the same local
+/// repository is reviewed through different linked worktrees.
+///
+/// # Errors
+///
+/// Returns an error when git cannot resolve its common directory or the path
+/// cannot be canonicalized.
+pub fn common_dir(cwd: &Path) -> Result<PathBuf> {
+    let raw = PathBuf::from(run_git(cwd, &["rev-parse", "--git-common-dir"])?);
+    let path = if raw.is_absolute() {
+        raw
+    } else {
+        cwd.join(raw)
+    };
+    path.canonicalize()
+        .wrap_err_with(|| format!("canonicalizing git common directory {}", path.display()))
+}
+
 /// The current branch name, or `HEAD` when detached.
 ///
 /// # Errors
@@ -482,6 +514,32 @@ mod tests {
         assert_eq!(
             repo_root(dir).unwrap().canonicalize().unwrap(),
             dir.canonicalize().unwrap()
+        );
+        assert_eq!(
+            common_dir(dir).unwrap(),
+            dir.join(".git").canonicalize().unwrap()
+        );
+        assert_eq!(origin_url(dir), None);
+    }
+
+    #[test]
+    fn origin_url_reads_the_repository_remote_when_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        git(dir, &["init"]);
+        git(
+            dir,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://example.com/ada/bastion.git",
+            ],
+        );
+
+        assert_eq!(
+            origin_url(dir).as_deref(),
+            Some("https://example.com/ada/bastion.git")
         );
     }
 

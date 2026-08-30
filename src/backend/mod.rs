@@ -25,6 +25,7 @@ use std::sync::Arc;
 use color_eyre::eyre::Result;
 
 use crate::context::ReviewContext;
+use crate::conversation::ConversationRef;
 use crate::event::RunId;
 use crate::reviewer::{self, Reviewer};
 use crate::verdict::{Decision, Money, Usage, Verdict};
@@ -73,6 +74,10 @@ pub struct ReviewRequest<'a> {
     pub context: &'a ReviewContext,
     /// Whether this call reviews the concern or only routes it.
     pub purpose: ReviewPurpose,
+    /// The newest compatible prior conversation to continue, when one is
+    /// available. Backends treat it as a hint and fall back to a fresh session
+    /// when resume fails.
+    pub conversation: Option<&'a ConversationRef>,
     /// Directory native agent session files should be written to when Akari
     /// handoff is on. `None` leaves the agent writing to its default location.
     pub native_session_dir: Option<&'a Path>,
@@ -87,6 +92,9 @@ pub struct ReviewOutcome {
     pub usage: Option<Usage>,
     /// The full session transcript, saved to disk but never streamed.
     pub transcript: Option<String>,
+    /// The backend conversation after this review, when the backend reported an
+    /// identifier that can be resumed by a later run.
+    pub conversation: Option<Box<ConversationRef>>,
 }
 
 /// A backend capable of executing a reviewer and returning a structured verdict.
@@ -131,6 +139,7 @@ impl Backend for MockBackend {
             },
             usage: None,
             transcript: Some("(mock transcript)".to_string()),
+            conversation: None,
         })
     }
 }
@@ -271,6 +280,45 @@ pub(crate) const fn concrete_backend(backend: reviewer::Backend) -> reviewer::Ba
         reviewer::Backend::Any => reviewer::Backend::ClaudeCode,
         concrete => concrete,
     }
+}
+
+/// Build the durable conversation reference returned by a backend.
+///
+/// A resumed CLI does not always echo its id. In that case the prior id remains
+/// authoritative because the turn was submitted through it.
+pub(super) fn conversation_ref(
+    request: &ReviewRequest<'_>,
+    backend: reviewer::Backend,
+    reported_id: Option<&str>,
+    resumed: bool,
+    cumulative_usage: Option<Usage>,
+) -> Option<Box<ConversationRef>> {
+    let prior_id = if resumed {
+        request.conversation.map(|prior| prior.id().as_str())
+    } else {
+        None
+    };
+    let id = reported_id.or(prior_id)?;
+    let session_dir = request
+        .native_session_dir
+        .filter(|dir| !crate::akari::session_env(backend, dir).is_empty());
+    ConversationRef::from_backend(backend, id, request.reviewer, session_dir, cumulative_usage)
+        .map(Box::new)
+}
+
+/// Record that an optional conversation could not be resumed and the backend is
+/// starting the current review in a fresh session instead.
+pub(super) fn log_resume_fallback(
+    request: &ReviewRequest<'_>,
+    backend: reviewer::Backend,
+    error: &color_eyre::Report,
+) {
+    tracing::debug!(
+        reviewer = %request.reviewer.name,
+        backend = backend.as_str(),
+        error = %error,
+        "prior agent conversation unavailable; starting a fresh session"
+    );
 }
 
 /// The shared preamble that tells a reviewing agent what its changeset is and how
@@ -684,6 +732,7 @@ mod tests {
             context: ReviewContext::empty(),
             purpose: ReviewPurpose::Review,
             native_session_dir: None,
+            conversation: None,
         };
         let routing = ReviewRequest {
             purpose: ReviewPurpose::Routing,
@@ -830,6 +879,7 @@ findings: []
             context: crate::context::ReviewContext::empty(),
             purpose: ReviewPurpose::Review,
             native_session_dir: None,
+            conversation: None,
         };
 
         let outcome = MockBackend.review(&request).await.expect("mock runs");
@@ -857,6 +907,7 @@ findings: []
             context: crate::context::ReviewContext::empty(),
             purpose: ReviewPurpose::Review,
             native_session_dir: None,
+            conversation: None,
         };
         let err = dispatch(&request, &SpawnGovernor::shared_default())
             .await

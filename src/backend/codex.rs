@@ -322,14 +322,58 @@ impl<R: CommandRunner> Backend for CodexBackend<R> {
     async fn review(&self, request: &ReviewRequest<'_>) -> Result<ReviewOutcome> {
         let prompt = build_prompt(request);
 
-        // First pass: the full review with the schema instruction appended.
-        let first = self.first_spec(request, &prompt);
-        let session = self.run_once(&first).await?;
+        let (mut session, mut resumed) = if let Some(prior) = request.conversation {
+            let mut spec = self.reprompt_spec(request, Some(prior.id().as_str()), &prompt);
+            spec.conversation_resume();
+            match self.run_once(&spec).await {
+                Ok(session) => (session, true),
+                Err(err) => {
+                    super::log_resume_fallback(request, reviewer::Backend::Codex, &err);
+                    (
+                        self.run_once(&self.first_spec(request, &prompt)).await?,
+                        false,
+                    )
+                }
+            }
+        } else {
+            (
+                self.run_once(&self.first_spec(request, &prompt)).await?,
+                false,
+            )
+        };
+
+        // A missing provider-side thread can also arrive as an in-band failure on
+        // an otherwise successful process. Treat it like any other unavailable
+        // resume and perform the required fresh review.
+        if resumed && session.parse_verdict().is_none() && session.failure.is_some() {
+            let err = eyre!(
+                "codex could not resume the prior conversation: {}",
+                session.failure.as_deref().unwrap_or("unknown failure")
+            );
+            super::log_resume_fallback(request, reviewer::Backend::Codex, &err);
+            session = self.run_once(&self.first_spec(request, &prompt)).await?;
+            resumed = false;
+        }
 
         // A verdict is authoritative even if the stream also carried a transient
         // `error` event, so it is checked before any failure.
         if let Some(verdict) = session.parse_verdict() {
-            return Ok(outcome(verdict, session, None));
+            let prior_id = if resumed {
+                request
+                    .conversation
+                    .map(|prior| prior.id().as_str().to_string())
+            } else {
+                None
+            };
+            let conversation_id = session.thread_id.clone().or(prior_id);
+            return Ok(outcome(
+                request,
+                verdict,
+                session,
+                None,
+                conversation_id.as_deref(),
+                resumed,
+            ));
         }
 
         // No verdict. If Codex reported a fatal error (an auth or usage-limit failure,
@@ -345,12 +389,29 @@ impl<R: CommandRunner> Backend for CodexBackend<R> {
         // turn is only the reprompt suffix (the session already holds the review).
         // Without a thread id we fall back to a fresh session and must re-send the
         // full prompt.
-        let reprompt_text = super::reprompt_text(&prompt, session.thread_id.is_some());
-        let retry = self.reprompt_spec(request, session.thread_id.as_deref(), &reprompt_text);
+        let prior_id = if resumed {
+            request.conversation.map(|prior| prior.id().as_str())
+        } else {
+            None
+        };
+        let active_id = session.thread_id.as_deref().or(prior_id);
+        let reprompt_text = super::reprompt_text(&prompt, active_id.is_some());
+        let retry = self.reprompt_spec(request, active_id, &reprompt_text);
         let retry_session = self.run_once(&retry).await?;
 
         if let Some(verdict) = retry_session.parse_verdict() {
-            return Ok(outcome(verdict, retry_session, Some(&session)));
+            let conversation_id = retry_session
+                .thread_id
+                .clone()
+                .or_else(|| active_id.map(str::to_string));
+            return Ok(outcome(
+                request,
+                verdict,
+                retry_session,
+                Some(&session),
+                conversation_id.as_deref(),
+                active_id.is_some(),
+            ));
         }
         if let Some(reason) = &retry_session.failure {
             bail!("{}", classify_codex_failure(reason));
@@ -368,7 +429,21 @@ impl<R: CommandRunner> Backend for CodexBackend<R> {
 /// Assemble a [`ReviewOutcome`] from a parsed verdict and the session it came
 /// from, optionally prepending an earlier session's transcript (the original
 /// review, when the verdict was recovered on a reprompt).
-fn outcome(verdict: Verdict, session: CodexSession, prior: Option<&CodexSession>) -> ReviewOutcome {
+fn outcome(
+    request: &ReviewRequest<'_>,
+    verdict: Verdict,
+    session: CodexSession,
+    prior: Option<&CodexSession>,
+    conversation_id: Option<&str>,
+    resumed: bool,
+) -> ReviewOutcome {
+    let conversation = super::conversation_ref(
+        request,
+        reviewer::Backend::Codex,
+        conversation_id,
+        resumed,
+        None,
+    );
     let transcript =
         super::stitch_transcript(prior.map(|p| p.transcript.as_str()), session.transcript);
     ReviewOutcome {
@@ -377,6 +452,7 @@ fn outcome(verdict: Verdict, session: CodexSession, prior: Option<&CodexSession>
         // accounting is not lost when the resume turn reports none.
         usage: session.usage.or_else(|| prior.and_then(|p| p.usage)),
         transcript: Some(transcript),
+        conversation,
     }
 }
 
@@ -718,6 +794,14 @@ mod tests {
         }
     }
 
+    fn failed_output(stderr: &str) -> CommandOutput {
+        CommandOutput {
+            code: Some(1),
+            stdout: String::new(),
+            stderr: stderr.to_string(),
+        }
+    }
+
     /// A JSON-lines stream in the legacy flat schema. `usage` is
     /// `(input, output, cached_input, cost)`.
     fn stream(messages: &[&str], usage: Option<(u64, u64, u64, f64)>) -> String {
@@ -804,7 +888,75 @@ mod tests {
             context: crate::context::ReviewContext::empty(),
             purpose: crate::backend::ReviewPurpose::Review,
             native_session_dir: None,
+            conversation: None,
         }
+    }
+
+    fn prior_conversation(reviewer: &Reviewer) -> crate::conversation::ConversationRef {
+        crate::conversation::ConversationRef::from_backend(
+            reviewer::Backend::Codex,
+            "th-prior",
+            reviewer,
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn continues_a_prior_conversation_with_the_full_review_prompt() {
+        let reviewer = reviewer();
+        let prior = prior_conversation(&reviewer);
+        let pass = "```yaml\nverdict: pass\nsummary: resumed\nfindings: []\n```";
+        let backend = CodexBackend::with_program(
+            FakeRunner::new([ok_output(threaded_stream("th-current", &[pass], None))]),
+            DEFAULT_PROGRAM,
+        );
+        let run = RunId("r-test".into());
+        let root = PathBuf::from(".");
+        let mut req = request(&reviewer, &run, &root);
+        req.conversation = Some(&prior);
+
+        let outcome = backend.review(&req).await.unwrap();
+        let specs = backend.runner.specs();
+        assert_eq!(
+            specs[0].kind,
+            crate::backend::command::LaunchKind::ConversationResume
+        );
+        let args = args_of(&specs[0]);
+        assert!(args.windows(2).any(|pair| pair == ["resume", "--json"]));
+        assert!(args.iter().any(|arg| arg == "th-prior"));
+        assert!(stdin_of(&specs[0]).contains("You are reviewing a changeset"));
+        assert_eq!(outcome.conversation.unwrap().id().as_str(), "th-current");
+    }
+
+    #[tokio::test]
+    async fn unavailable_prior_conversation_falls_back_to_a_fresh_review() {
+        let reviewer = reviewer();
+        let prior = prior_conversation(&reviewer);
+        let pass = "```yaml\nverdict: pass\nsummary: fresh\nfindings: []\n```";
+        let backend = CodexBackend::with_program(
+            FakeRunner::new([
+                failed_output("thread not found"),
+                ok_output(threaded_stream("th-fresh", &[pass], None)),
+            ]),
+            DEFAULT_PROGRAM,
+        );
+        let run = RunId("r-test".into());
+        let root = PathBuf::from(".");
+        let mut req = request(&reviewer, &run, &root);
+        req.conversation = Some(&prior);
+
+        let outcome = backend.review(&req).await.unwrap();
+        let specs = backend.runner.specs();
+        assert_eq!(specs.len(), 2);
+        assert_eq!(
+            specs[0].kind,
+            crate::backend::command::LaunchKind::ConversationResume
+        );
+        assert_eq!(specs[1].kind, crate::backend::command::LaunchKind::Review);
+        assert!(!args_of(&specs[1]).iter().any(|arg| arg == "resume"));
+        assert_eq!(outcome.conversation.unwrap().id().as_str(), "th-fresh");
     }
 
     async fn review_with(
@@ -841,6 +993,7 @@ mod tests {
             context: &context,
             purpose: crate::backend::ReviewPurpose::Review,
             native_session_dir: None,
+            conversation: None,
         };
         let prompt = build_prompt(&req);
         let prompt_at = prompt

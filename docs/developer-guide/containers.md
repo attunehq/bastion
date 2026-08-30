@@ -46,12 +46,15 @@ plan it then:
 
    ```
    docker run --rm --name <unique> [-i] -v <repo>:/workspace -w /workspace \
-     [--env-file <reviewer-env>] -e <CREDENTIAL_NAME> ... \
+     [-v <session-dir>:<session-dir>] [--env-file <reviewer-env>] \
+     -e <CREDENTIAL_NAME> ... \
      --entrypoint <program> <image> <args...>
    ```
 
    The checkout is bind-mounted at `/workspace` and made the working directory, and
    stdin (the Codex prompt) flows through `docker run -i`. The container is given a
+   session-directory mount when Akari isolation is active, so backend state can
+   survive across the separate containers used for review and resume turns. It is given a
    unique `--name` so it can be torn down on cancellation (see Timeouts below). The
    backend program (`claude` / `codex` / `pi` / `grok` / `muse`) is set as the container `--entrypoint`
    rather than appended as a command argument: a bare `docker run <image> <program>` overrides
@@ -104,18 +107,24 @@ nothing to scope. The general egress `network: true` grants does not provide
 adversarial isolation (see the
 [threat model](./design.md#threat-model--trust-boundary)).
 
-## Reprompt recovery is not persisted across turns
+## Session persistence across turns
 
 When a backend's first turn returns output that does not parse as a verdict, it
 reprompts once in the *same session* (`claude --resume`, `codex exec resume`) to ask
 for just the structured output before failing closed (see [Backends](./backends.md)).
-That recovery depends on first-turn session state on disk. Each `docker run` here is a
-separate `--rm` container with no persisted home, so a resume in the second container
-cannot find the first turn's session: a containerized reviewer whose first turn is
-malformed blocks instead of returning a pass, but a flaky first turn fails instead of
-recovering. On Codex, when the first
-turn yields no thread id, Bastion reprompts with the full prompt in a fresh session,
-which works in a new container.
+The same resume mechanism continues a reviewer's conversation across Bastion runs.
+
+Each `docker run` is a separate `--rm` container. When Akari isolation supplies a
+session directory for Claude Code, Codex, or Pi, `ContainerRunner` bind-mounts that
+directory at the same absolute path in every container. Reprompt recovery and later
+conversation turns can then find the session state. A custom CI workflow must
+persist `<data-dir>/native` for that state to survive onto a new runner.
+
+Without a session mount, the agent writes into the ephemeral container home. A
+later resume cannot find that state. A prior-run resume falls back to a fresh review;
+a malformed-output reprompt fails closed if it depends on the missing first-turn
+state. When Codex or Pi reports no session id, Bastion sends the full prompt in a
+fresh session, which works in a new container.
 
 ## Timeouts and teardown
 

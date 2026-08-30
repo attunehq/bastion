@@ -36,10 +36,10 @@ pub trait Backend {
 }
 ```
 
-A backend is handed a `ReviewRequest` (the reviewer, the run id, the repo root, the
-base branch, and the untrusted `ReviewContext` for the run) and returns a
-`ReviewOutcome` (the structured `Verdict`, optional `Usage`, and the optional full
-transcript). The trait is deliberately small and
+A backend is handed a `ReviewRequest` (the reviewer, run id, repo root, base
+branch, untrusted `ReviewContext`, and an optional prior conversation) and returns
+a `ReviewOutcome` (the structured `Verdict`, optional `Usage`, optional full
+transcript, and the conversation after this turn). The trait is deliberately small and
 stable: sibling backends implement the same signature, and `dispatch` is the single
 place that grows when one lands; the trait does not.
 
@@ -134,6 +134,35 @@ The `BASTION_CLAUDE_BIN`/`BASTION_CODEX_BIN`/`BASTION_PI_BIN`/`BASTION_GROK_BIN`
 (`src/seal.rs`); a run sealed with one active cannot be attested (see
 [Attestation](./attestation.md)).
 
+### Conversation continuity
+
+When a reviewer must execute again, `ReviewRequest::conversation` can identify its
+newest compatible prior backend conversation. Each backend sends the complete
+current review prompt as another turn:
+
+| Backend | Resume invocation |
+| --- | --- |
+| Claude Code | `claude --resume <id> -p <prompt>` |
+| Codex | `codex exec resume ... <id> -` |
+| Pi | `pi ... --session <id>` |
+| Grok Build | `grok --resume <id> -p <prompt>` |
+| Muse Code | `muse exec ... --session-id <id> <prompt>` |
+
+The stored reference is a hint. The run store can outlive the backend's session
+files or provider-side thread, especially when CI restores only
+`<data-dir>/runs`. A failed resume therefore causes one fresh invocation with the
+same full prompt. The fresh invocation remains required review work and follows
+the normal fail-closed policy. A successful turn returns a new
+`ConversationRef`, or retains the prior id when the CLI does not echo it. Claude
+Code reports cumulative session usage, so its backend stores the prior cumulative
+total and subtracts it from the resumed total before adding this run's usage.
+
+`ConversationRef` also records an isolated session directory for Claude Code,
+Codex, and Pi when Akari isolation is active. The planner rejects that reference
+if the directory no longer exists. References without an explicit directory are
+attempted because their state may live in the backend's default store or with the
+provider.
+
 ### The spawn governor
 
 Because every agent launch is a `CommandRunner::run` call, that seam is also the one
@@ -160,6 +189,11 @@ semaphore, `max_total_spawns` caps launch attempts over the whole run, and
 `max_consecutive_failures` trips the moment that many dead spawns land back to back. A
 productive launch resets the consecutive counter, so a run that is merely slow or has
 the odd failure is unaffected; only a genuine respawn storm trips it.
+
+A resume launch still consumes concurrency and total-launch budget. A dead resume
+does not advance the consecutive-dead-launch breaker because missing session state
+is an expected cache miss. The required fresh fallback uses the ordinary launch
+kind, so a broken backend still advances and can trip the breaker.
 
 Crucially the counter increments on *every* admitted launch, dead ones included, so a
 loop that respawns a crashing CLI still marches toward `max_total_spawns` and trips the
@@ -305,7 +339,8 @@ and the [user-facing status](../user-guide/README.md#status).
 3. Wire the variant into `dispatch` in [`mod.rs`](../../src/backend/mod.rs).
 4. Test it against a fake `CommandRunner`, following `claude_code.rs` / `codex.rs` /
    `pi.rs` / `grok.rs` / `muse.rs`: assert the args and env you build, and the parsing of a
-   representative envelope, including the malformed-output retry path. Then teach the
+   representative envelope, including prior-conversation resume, unavailable-session
+   fallback, and the malformed-output retry path. Then teach the
    integration fake agent (`tests/integration/fakes.rs`) the new CLI's protocol and
    add its `BASTION_<NAME>_BIN` seam to `seal::seams_active_from`.
 
@@ -319,7 +354,7 @@ Backends capture the agent's structured output, then validate it against the
 verdict schema: Claude Code and Grok Build via a JSON schema (`--json-schema`); Codex,
 Pi, and Muse Code via a requested fenced YAML verdict block parsed from the final message (the shared
 `SCHEMA_INSTRUCTION` + `extract_verdict`). If the agent does not produce complying
-output, the backend re-runs the *same session* (resumed by its session/thread id)
+output, the backend re-runs the active session (resumed by its session/thread id)
 with a turn that re-states the schema and asks for just the structured output of the
 work already done; only after that fails does it give up with an error (which the
 runner fails closed). The verdict schema itself is specified in the

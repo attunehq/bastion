@@ -155,8 +155,8 @@ The action then, in order:
    fresh runner starts with an empty store, so without this two things reset on
    every push: a reviewer's recall of the findings it raised last push, and
    incremental carry (an unchanged reviewer reusing its prior pass instead of
-   re-executing). Best effort: a first push restores nothing and every reviewer
-   runs fresh.
+   re-executing). The restored metadata also names prior backend conversations.
+   Best effort: a first push restores nothing and every reviewer runs fresh.
 4. **Runs `bastion review`**, diffing at the merge base with the PR's base
    branch and feeding the reviewers the PR's description and discussion via
    `--repo`/`--pr`.
@@ -166,6 +166,13 @@ The action then, in order:
    per-reviewer and aggregate check runs.
 7. **Fails on a blocked review**, deliberately last, so the comment and checks
    land even when the gate blocks. The step's failure is your merge gate.
+
+The action uploads only `<data-dir>/runs`. It does not persist the agent CLI's
+native session store, so a reviewer that must execute usually cannot resume its
+prior conversation on a fresh hosted runner. Bastion treats that as a cache miss
+and starts a fresh conversation. To preserve conversations in a custom workflow,
+also restore the backend's session state. When `BASTION_AKARI=1` isolates Claude
+Code, Codex, or Pi sessions, include `<data-dir>/native` in the artifact.
 
 Its inputs, all optional:
 

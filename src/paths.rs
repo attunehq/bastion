@@ -8,12 +8,13 @@
 //!   runs/
 //!     r-0f3a/
 //!       run.jsonl                 # the full event stream
+//!       identity.json             # opaque repository identity for history lookup
 //!       seal.json                 # the run seal, when the run was sealed
 //!       reviewers/
 //!         tenant-isolation/
 //!           transcript.jsonl      # the reconstructed agent session
 //!           verdict.json          # the raw structured verdict; absent on a skip
-//!           meta.json             # backend, timing, usage, matched trigger
+//!           meta.json             # backend, timing, usage, trigger, conversation
 //!     latest                      # pointer to the most recent run
 //!   native/                       # isolated native agent sessions (Akari handoff)
 //! ```
@@ -85,6 +86,12 @@ impl Layout {
         self.run_dir(id).join("run.jsonl")
     }
 
+    /// A run's opaque repository identity (`.../identity.json`).
+    #[must_use]
+    pub fn identity(&self, id: &RunId) -> PathBuf {
+        self.run_dir(id).join("identity.json")
+    }
+
     /// A run's seal (`.../seal.json`), when the run was sealed. See
     /// [`crate::seal`] and `docs/developer-guide/attestation.md`.
     #[must_use]
@@ -120,7 +127,7 @@ impl Layout {
         self.reviewer_dir(id, reviewer).join("verdict.json")
     }
 
-    /// A reviewer's metadata: backend, timing, usage, matched trigger
+    /// A reviewer's metadata: backend, timing, usage, trigger, conversation
     /// (`.../meta.json`).
     #[must_use]
     pub fn meta(&self, id: &RunId, reviewer: &str) -> PathBuf {
@@ -194,6 +201,7 @@ mod tests {
         let layout = Layout::with_root(PathBuf::from("/data"));
         let id = RunId("r-0f3a".into());
         assert!(layout.run_jsonl(&id).ends_with("runs/r-0f3a/run.jsonl"));
+        assert!(layout.identity(&id).ends_with("runs/r-0f3a/identity.json"));
         assert!(
             layout
                 .transcript(&id, "tenant-isolation")
