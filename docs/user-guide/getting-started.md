@@ -206,10 +206,11 @@ bastion review --base main
 Bastion computes the files your branch changed (the diff at the merge base with
 `main`, so changes that landed on `main` itself are never counted), selects the
 reviewer candidates, resolves them in parallel, and renders progress plus each
-terminal verdict or agent-trigger skip. (A
-re-run of the same branch may carry an already-passed reviewer's verdict
+terminal verdict or agent-trigger skip. A re-run of the same branch may carry an already-passed reviewer's verdict
 forward instead of executing it again; the exact conditions are in
-[the local workflow](./local-workflow.md#re-runs-are-incremental).) A blocked
+[the local workflow](./local-workflow.md#re-runs-are-incremental). A reviewer
+that does execute continues its compatible prior agent conversation when the
+backend session is available, and otherwise starts fresh. A blocked
 review exits non-zero; a clean one exits zero. That exit code is what lets an agent
 (or a shell loop) know whether to keep working:
 

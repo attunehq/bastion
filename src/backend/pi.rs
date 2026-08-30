@@ -217,16 +217,57 @@ impl<R: CommandRunner> Backend for PiBackend<R> {
     async fn review(&self, request: &ReviewRequest<'_>) -> Result<ReviewOutcome> {
         let prompt = build_prompt(request);
 
-        // First pass: the full review with the schema instruction appended.
-        let first = self.first_spec(request, &prompt);
-        let session = self.run_once(&first).await?;
+        let (mut session, mut resumed) = if let Some(prior) = request.conversation {
+            let mut spec = self.reprompt_spec(request, Some(prior.id().as_str()), &prompt);
+            spec.conversation_resume();
+            match self.run_once(&spec).await {
+                Ok(session) => (session, true),
+                Err(err) => {
+                    super::log_resume_fallback(request, reviewer::Backend::Pi, &err);
+                    (
+                        self.run_once(&self.first_spec(request, &prompt)).await?,
+                        false,
+                    )
+                }
+            }
+        } else {
+            (
+                self.run_once(&self.first_spec(request, &prompt)).await?,
+                false,
+            )
+        };
+
+        if resumed && session.parse_verdict().is_none() && session.error.is_some() {
+            let err = eyre!(
+                "pi could not resume the prior conversation: {}",
+                session.error.as_deref().unwrap_or("unknown failure")
+            );
+            super::log_resume_fallback(request, reviewer::Backend::Pi, &err);
+            session = self.run_once(&self.first_spec(request, &prompt)).await?;
+            resumed = false;
+        }
 
         if let Some(error) = &session.error {
             bail!("pi reported an execution error: {error}");
         }
 
         if let Some(verdict) = session.parse_verdict() {
-            return Ok(outcome(verdict, session, None));
+            let prior_id = if resumed {
+                request
+                    .conversation
+                    .map(|prior| prior.id().as_str().to_string())
+            } else {
+                None
+            };
+            let conversation_id = session.session_id.clone().or(prior_id);
+            return Ok(outcome(
+                request,
+                verdict,
+                session,
+                None,
+                conversation_id.as_deref(),
+                resumed,
+            ));
         }
 
         // The agent's final message was not a schema-conforming verdict. Per
@@ -235,8 +276,14 @@ impl<R: CommandRunner> Backend for PiBackend<R> {
         // resuming, the new turn is only the reprompt suffix (the session already
         // holds the review). Without a session id we fall back to a fresh session
         // and must re-send the full prompt.
-        let reprompt_text = super::reprompt_text(&prompt, session.session_id.is_some());
-        let retry = self.reprompt_spec(request, session.session_id.as_deref(), &reprompt_text);
+        let prior_id = if resumed {
+            request.conversation.map(|prior| prior.id().as_str())
+        } else {
+            None
+        };
+        let active_id = session.session_id.as_deref().or(prior_id);
+        let reprompt_text = super::reprompt_text(&prompt, active_id.is_some());
+        let retry = self.reprompt_spec(request, active_id, &reprompt_text);
         let retry_session = self.run_once(&retry).await?;
 
         // The reprompt can itself report an in-band execution error, exactly like the
@@ -248,7 +295,20 @@ impl<R: CommandRunner> Backend for PiBackend<R> {
         }
 
         match retry_session.parse_verdict() {
-            Some(verdict) => Ok(outcome(verdict, retry_session, Some(&session))),
+            Some(verdict) => {
+                let conversation_id = retry_session
+                    .session_id
+                    .clone()
+                    .or_else(|| active_id.map(str::to_string));
+                Ok(outcome(
+                    request,
+                    verdict,
+                    retry_session,
+                    Some(&session),
+                    conversation_id.as_deref(),
+                    active_id.is_some(),
+                ))
+            }
             None => Err(eyre!(
                 "pi did not emit a schema-conforming verdict after one reprompt; \
                  failing closed. final message was:\n{}",
@@ -267,14 +327,29 @@ impl<R: CommandRunner> Backend for PiBackend<R> {
 /// Unlike a single Claude session whose totals are cumulative, each Pi process
 /// reports usage only for its own turns, so the original review and the reprompt are
 /// disjoint and their usage is summed rather than max'd.
-fn outcome(verdict: Verdict, session: PiSession, prior: Option<&PiSession>) -> ReviewOutcome {
+fn outcome(
+    request: &ReviewRequest<'_>,
+    verdict: Verdict,
+    session: PiSession,
+    prior: Option<&PiSession>,
+    conversation_id: Option<&str>,
+    resumed: bool,
+) -> ReviewOutcome {
     let usage = sum_usage(prior.and_then(PiSession::usage), session.usage());
+    let conversation = super::conversation_ref(
+        request,
+        reviewer::Backend::Pi,
+        conversation_id,
+        resumed,
+        None,
+    );
     let transcript =
         super::stitch_transcript(prior.map(|p| p.transcript.as_str()), session.transcript);
     ReviewOutcome {
         verdict,
         usage,
         transcript: Some(transcript),
+        conversation,
     }
 }
 
@@ -616,6 +691,14 @@ mod tests {
         }
     }
 
+    fn failed_output(stderr: &str) -> CommandOutput {
+        CommandOutput {
+            code: Some(1),
+            stdout: String::new(),
+            stderr: stderr.to_string(),
+        }
+    }
+
     /// Build a Pi `--mode json` stream: a `session` event followed by one assistant
     /// `message_end` per text, with the given usage attached to each assistant turn.
     /// `usage` is `(input, output, cacheRead, cost)`.
@@ -672,7 +755,77 @@ mod tests {
             context: crate::context::ReviewContext::empty(),
             purpose: crate::backend::ReviewPurpose::Review,
             native_session_dir: None,
+            conversation: None,
         }
+    }
+
+    fn prior_conversation(reviewer: &Reviewer) -> crate::conversation::ConversationRef {
+        crate::conversation::ConversationRef::from_backend(
+            reviewer::Backend::Pi,
+            "pi-prior",
+            reviewer,
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn continues_a_prior_conversation_with_the_full_review_prompt() {
+        let reviewer = reviewer();
+        let prior = prior_conversation(&reviewer);
+        let pass = "```yaml\nverdict: pass\nsummary: resumed\nfindings: []\n```";
+        let backend = PiBackend::with_program(
+            FakeRunner::new([ok_output(stream("pi-current", &[pass], None))]),
+            DEFAULT_PROGRAM,
+        );
+        let run = RunId("r-test".into());
+        let root = PathBuf::from(".");
+        let mut req = request(&reviewer, &run, &root);
+        req.conversation = Some(&prior);
+
+        let outcome = backend.review(&req).await.unwrap();
+        let specs = backend.runner.specs();
+        assert_eq!(
+            specs[0].kind,
+            crate::backend::command::LaunchKind::ConversationResume
+        );
+        let args = args_of(&specs[0]);
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--session", "pi-prior"])
+        );
+        assert!(stdin_of(&specs[0]).contains("You are reviewing a changeset"));
+        assert_eq!(outcome.conversation.unwrap().id().as_str(), "pi-current");
+    }
+
+    #[tokio::test]
+    async fn unavailable_prior_conversation_falls_back_to_a_fresh_review() {
+        let reviewer = reviewer();
+        let prior = prior_conversation(&reviewer);
+        let pass = "```yaml\nverdict: pass\nsummary: fresh\nfindings: []\n```";
+        let backend = PiBackend::with_program(
+            FakeRunner::new([
+                failed_output("session not found"),
+                ok_output(stream("pi-fresh", &[pass], None)),
+            ]),
+            DEFAULT_PROGRAM,
+        );
+        let run = RunId("r-test".into());
+        let root = PathBuf::from(".");
+        let mut req = request(&reviewer, &run, &root);
+        req.conversation = Some(&prior);
+
+        let outcome = backend.review(&req).await.unwrap();
+        let specs = backend.runner.specs();
+        assert_eq!(specs.len(), 2);
+        assert_eq!(
+            specs[0].kind,
+            crate::backend::command::LaunchKind::ConversationResume
+        );
+        assert_eq!(specs[1].kind, crate::backend::command::LaunchKind::Review);
+        assert!(!args_of(&specs[1]).iter().any(|arg| arg == "--session"));
+        assert_eq!(outcome.conversation.unwrap().id().as_str(), "pi-fresh");
     }
 
     async fn review_with(
@@ -715,6 +868,7 @@ mod tests {
             context: &context,
             purpose: crate::backend::ReviewPurpose::Review,
             native_session_dir: None,
+            conversation: None,
         };
         let prompt = build_prompt(&req);
         let prompt_at = prompt

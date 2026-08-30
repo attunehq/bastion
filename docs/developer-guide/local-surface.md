@@ -20,11 +20,21 @@ The loop's dominant cost is re-executing reviewers that already passed: after fi
 
 The trigger is the soundness boundary. A path trigger declares the files its concern depends on, so carry keys the verdict to that matched slice. Agent-trigger `paths` only avoid a routing call when no candidate file changed; once admitted, the routing and review agents see the full changeset, so carry keys their verdict to the full changeset too.
 
+Carry decides whether a reviewer executes. Conversation continuity reduces the
+cost of reviewers that do execute. Bastion reads the same repository and branch
+history newest first and selects each reviewer's newest backend conversation whose
+effective definition still matches. The full current prompt is submitted as a new
+turn, so the reviewer retains its prior analysis while judging the current working
+tree. A missing backend session starts a fresh conversation and runs the review
+normally. Semantic skips, carry, and attestation replay preserve the latest
+conversation reference because they do not run a replacement full review. A
+failed or timed-out attempt preserves it for the same reason.
+
 Carry runs on both surfaces, local and CI. Three things keep it sound and under your control:
 
 - **A repository reviewer carries only from a sealed, verified run.** The carried verdict flows into the new run's seal, and (locally) from there into anything the author later attests, so every link in the chain must have been binary-verified: an unsealed prior run, a seal that fails verification (under the release secret embedded in the binary), or a seal recording an active test seam disqualifies carry for every repository reviewer. In CI the run store is a restored artifact, but the seal is verified before any repository reviewer carries, so a restored store cannot pass off a fabricated pass; forging a seal means extracting that embedded secret, the deliberate malice the [threat model](./design.md#threat-model--trust-boundary) already excludes. A user-level reviewer (never sealed, never gating anyone else's PR) carries on the digest alone. A reviewer with `attestation: never` is never carried; that policy asks for fresh execution every time.
 - **The digest binds the reviewed content.** A carried pass provably still describes the changeset now under review, so carrying from a prior run reuses a verdict over the same scoped content. Carry and attestation replay stay complementary: replay reuses the *author's* signed local run (crossing from their machine into CI, which is why it needs the SSH signature), carry reuses a run that already executed on the same surface.
-- **`--fresh` opts out.** Every triggered reviewer executes even when its scoped diff is unchanged.
+- **`--fresh` opts out.** Every triggered reviewer executes in a new conversation, even when its scoped diff is unchanged.
 
 ### Running a subset by hand
 
@@ -60,7 +70,7 @@ enabled: true
 
 `BASTION_AKARI=1` enables it without a file; `BASTION_AKARI=0` disables it even when the file says otherwise. `BASTION_AKARI_BIN` points at a specific `akari` binary. A `--repo`/`--pr` run withholds the user config directory, so CI stays off unless `BASTION_AKARI=1` is set on the runner.
 
-When enabled, Bastion relocates Pi, Claude Code, and Codex native session files into `<data-dir>/native/<run>/<reviewer>/` for that reviewer (so they survive an ephemeral worktree and do not land in `~/.pi` / `~/.claude` / `~/.codex` session trees) and runs `akari ingest --root <that directory>` after a fresh execute. Akari discovers and classifies whatever landed there. A handoff failure is recorded on the reviewer's `meta.json` and logged; it never changes the verdict.
+When enabled, Bastion relocates Pi, Claude Code, and Codex native session files into `<data-dir>/native/<run>/<reviewer>/` for that reviewer (so they survive an ephemeral worktree and do not land in `~/.pi` / `~/.claude` / `~/.codex` session trees) and runs `akari ingest --root <that directory>` after a fresh execute. A later run that continues the conversation reuses the same directory. Akari discovers and classifies whatever landed there. A handoff failure is recorded on the reviewer's `meta.json` and logged; it never changes the verdict.
 
 ### Multi-file registries and `--include`
 
@@ -125,14 +135,22 @@ Each run gets a directory keyed by its run id, holding the full event stream and
   runs/
     r-0f3a/
       run.jsonl                  # the full event stream, always JSONL regardless of display format
+      identity.json              # opaque repository identity used for history lookup
       seal.json                  # the run seal, when the run was sealed
       reviewers/
         tenant-isolation/
           transcript.jsonl       # the full agent session
           verdict.json           # the raw structured verdict; absent on a semantic skip
-          meta.json              # backend, timing, usage, matched trigger
+          meta.json              # backend, timing, usage, trigger, resumable conversation
     latest                       # a plain file holding the most recent run id
+  native/                        # isolated backend session state when Akari is enabled
 ```
+
+History lookup requires both the current repository identity and branch. The
+identity hashes the `origin` URL when present, or the canonical common git
+directory for a local-only repository. Runs written by older Bastion releases have
+no identity file, so they remain inspectable but are not used for findings, carry,
+or conversation continuity.
 
 The runner seals an eligible run on a best-effort basis as it finishes
 persisting: a canonical digest of the committed HEAD tree, the merge-base

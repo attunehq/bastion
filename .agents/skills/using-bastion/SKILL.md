@@ -157,6 +157,13 @@ counts in the gate tally. Reviewers whose triggered files your fix touched
 they flagged) execute fresh. So the loop above is already the cheap loop; let
 it work.
 
+When a reviewer executes again, Bastion continues its newest compatible agent
+conversation for this repository and branch. The current full review prompt is
+the next turn, so the reviewer can reuse its earlier analysis. If the backend
+session is gone, Bastion starts a fresh conversation and runs the same review.
+Changing the effective reviewer configuration or passing `--fresh` also starts
+a new conversation.
+
 The carry keys to your changeset (the trigger-scoped diff against the merge
 base), not to the base branch's position. The base moving under you, or a rebase
 over it, re-runs a reviewer only when it actually changes your scoped diff (a
@@ -166,9 +173,9 @@ rebase as a reason to expect, or budget for, a full re-review.
 
 Do not opt out of that cheap path unless the human asked:
 
-- Do not pass `--fresh`. It re-executes every reviewer, including ones whose
-  pass would have carried, and is how a productive loop turns into a full-price
-  one.
+- Do not pass `--fresh`. It re-executes every reviewer in a new conversation,
+  including ones whose pass would have carried, and is how a productive loop
+  turns into a full-price one.
 - Do not pass `--data-dir` or set `BASTION_DATA_DIR` to "start over". A new
   data directory has no prior runs, so nothing carries and every reviewer
   executes.

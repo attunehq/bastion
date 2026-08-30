@@ -45,5 +45,6 @@ mod attestation;
 mod carry;
 mod cli_surface;
 mod container;
+mod conversation;
 mod github_report;
 mod persistence;

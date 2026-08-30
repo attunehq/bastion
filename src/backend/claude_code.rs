@@ -131,26 +131,68 @@ impl<R: CommandRunner> Backend for ClaudeCodeBackend<R> {
     async fn review(&self, request: &ReviewRequest<'_>) -> Result<ReviewOutcome> {
         let prompt = build_prompt(request);
 
-        // First turn: the full review prompt with the schema instruction.
-        let mut spec = self.base_spec(request);
-        spec.arg("-p").arg(&prompt);
-        let first = self.run_turn(&spec).await?;
+        let (first, resumed) = if let Some(prior) = request.conversation {
+            let mut spec = self.base_spec(request);
+            spec.arg("--resume")
+                .arg(prior.id().as_str())
+                .arg("-p")
+                .arg(&prompt)
+                .conversation_resume();
+            match self.run_turn(&spec).await {
+                Ok(first) => (first, true),
+                Err(err) => {
+                    super::log_resume_fallback(request, reviewer::Backend::ClaudeCode, &err);
+                    let mut fresh = self.base_spec(request);
+                    fresh.arg("-p").arg(&prompt);
+                    (self.run_turn(&fresh).await?, false)
+                }
+            }
+        } else {
+            let mut fresh = self.base_spec(request);
+            fresh.arg("-p").arg(&prompt);
+            (self.run_turn(&fresh).await?, false)
+        };
 
         let transcript = first.raw.clone();
         match first.verdict() {
-            Some(verdict) => Ok(ReviewOutcome {
-                verdict,
-                usage: first.usage(),
-                transcript: Some(transcript),
-            }),
+            Some(verdict) => {
+                let cumulative = first.usage();
+                let prior_id = if resumed {
+                    request
+                        .conversation
+                        .map(|prior| prior.id().as_str().to_string())
+                } else {
+                    None
+                };
+                let conversation_id = first.session_id.clone().or(prior_id);
+                Ok(ReviewOutcome {
+                    verdict,
+                    usage: current_session_usage(request, resumed, cumulative),
+                    transcript: Some(transcript),
+                    conversation: super::conversation_ref(
+                        request,
+                        reviewer::Backend::ClaudeCode,
+                        conversation_id.as_deref(),
+                        resumed,
+                        cumulative,
+                    ),
+                })
+            }
             None => {
                 // Malformed/missing structured output. Per design.md, re-run the
                 // same session once asking only for the structured output, then
                 // fail if it is still wrong.
-                let session = first.session_id.clone().ok_or_else(|| {
+                let prior_id = if resumed {
+                    request
+                        .conversation
+                        .map(|prior| prior.id().as_str().to_string())
+                } else {
+                    None
+                };
+                let session = first.session_id.clone().or(prior_id).ok_or_else(|| {
                     eyre!(
                         "claude produced no structured verdict and no session id to resume \
-                         (reviewer '{}')",
+                             (reviewer '{}')",
                         request.reviewer.name
                     )
                 })?;
@@ -168,13 +210,25 @@ impl<R: CommandRunner> Backend for ClaudeCodeBackend<R> {
                 transcript.push_str(&second.raw);
 
                 match second.verdict() {
-                    Some(verdict) => Ok(ReviewOutcome {
-                        verdict,
+                    Some(verdict) => {
                         // The reprompt resumes the same session, so its reported
                         // total is cumulative; combine without double-counting.
-                        usage: combine_session_usage(first.usage(), second.usage()),
-                        transcript: Some(transcript),
-                    }),
+                        let cumulative = combine_session_usage(first.usage(), second.usage());
+                        let conversation_id =
+                            second.session_id.as_deref().or(Some(session.as_str()));
+                        Ok(ReviewOutcome {
+                            verdict,
+                            usage: current_session_usage(request, resumed, cumulative),
+                            transcript: Some(transcript),
+                            conversation: super::conversation_ref(
+                                request,
+                                reviewer::Backend::ClaudeCode,
+                                conversation_id,
+                                true,
+                                cumulative,
+                            ),
+                        })
+                    }
                     None => bail!(
                         "claude did not produce a valid verdict for reviewer '{}' even after \
                          re-prompting for the structured output",
@@ -372,6 +426,38 @@ fn combine_session_usage(first: Option<Usage>, second: Option<Usage>) -> Option<
     }
 }
 
+/// Convert Claude's cumulative session counters into usage spent by this Bastion
+/// run. A fresh conversation has no baseline; a resumed one subtracts the totals
+/// persisted after the prior run.
+fn current_session_usage(
+    request: &ReviewRequest<'_>,
+    resumed: bool,
+    cumulative: Option<Usage>,
+) -> Option<Usage> {
+    let current = cumulative?;
+    let baseline = if resumed {
+        request
+            .conversation
+            .and_then(crate::conversation::ConversationRef::cumulative_usage)
+    } else {
+        None
+    };
+    let Some(baseline) = baseline else {
+        return Some(current);
+    };
+    Some(Usage {
+        tokens_in: current.tokens_in.saturating_sub(baseline.tokens_in),
+        tokens_out: current.tokens_out.saturating_sub(baseline.tokens_out),
+        cache_read: current.cache_read.saturating_sub(baseline.cache_read),
+        cost_usd: Money::from_cents(
+            current
+                .cost_usd
+                .cents()
+                .saturating_sub(baseline.cost_usd.cents()),
+        ),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,6 +513,14 @@ mod tests {
         }
     }
 
+    fn failed(stderr: &str) -> CommandOutput {
+        CommandOutput {
+            code: Some(1),
+            stdout: String::new(),
+            stderr: stderr.to_string(),
+        }
+    }
+
     fn reviewer() -> Reviewer {
         Reviewer {
             name: "demo".into(),
@@ -462,6 +556,7 @@ mod tests {
             context: crate::context::ReviewContext::empty(),
             purpose: crate::backend::ReviewPurpose::Review,
             native_session_dir: None,
+            conversation: None,
         };
         backend.review(&request).await
     }
@@ -472,6 +567,155 @@ mod tests {
             "structured_output": { "verdict": "pass", "summary": "ok", "findings": [] }
         })
         .to_string()
+    }
+
+    fn prior_conversation(reviewer: &Reviewer) -> crate::conversation::ConversationRef {
+        crate::conversation::ConversationRef::from_backend(
+            reviewer::Backend::ClaudeCode,
+            "s-prior",
+            reviewer,
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn continues_a_prior_conversation_with_the_full_review_prompt() {
+        let reviewer = reviewer();
+        let prior = prior_conversation(&reviewer);
+        let runner = ScriptedRunner::with(vec![ok(&pass_envelope())]);
+        let backend = ClaudeCodeBackend::with_program(runner, "claude-fake");
+        let run = RunId("r-test".into());
+        let root = PathBuf::from(".");
+        let request = ReviewRequest {
+            reviewer: &reviewer,
+            run: &run,
+            repo_root: &root,
+            base: "main",
+            merge_base: "deadbeef",
+            context: crate::context::ReviewContext::empty(),
+            purpose: crate::backend::ReviewPurpose::Review,
+            native_session_dir: None,
+            conversation: Some(&prior),
+        };
+
+        let outcome = backend.review(&request).await.unwrap();
+        let spec = &backend.runner.seen.lock().unwrap()[0];
+        let args: Vec<String> = spec
+            .args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            spec.kind,
+            crate::backend::command::LaunchKind::ConversationResume
+        );
+        assert!(args.windows(2).any(|pair| pair == ["--resume", "s-prior"]));
+        let prompt = &args[args.iter().position(|arg| arg == "-p").unwrap() + 1];
+        assert!(prompt.contains("You are reviewing a changeset"));
+        assert_eq!(
+            outcome.conversation.unwrap().id().as_str(),
+            "s-1",
+            "the newest reported session id is persisted"
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_prior_conversation_falls_back_to_a_fresh_review() {
+        let reviewer = reviewer();
+        let prior = prior_conversation(&reviewer);
+        let runner = ScriptedRunner::with(vec![failed("unknown session"), ok(&pass_envelope())]);
+        let backend = ClaudeCodeBackend::with_program(runner, "claude-fake");
+        let run = RunId("r-test".into());
+        let root = PathBuf::from(".");
+        let request = ReviewRequest {
+            reviewer: &reviewer,
+            run: &run,
+            repo_root: &root,
+            base: "main",
+            merge_base: "deadbeef",
+            context: crate::context::ReviewContext::empty(),
+            purpose: crate::backend::ReviewPurpose::Review,
+            native_session_dir: None,
+            conversation: Some(&prior),
+        };
+
+        let outcome = backend.review(&request).await.unwrap();
+        let seen = backend.runner.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(
+            seen[0].kind,
+            crate::backend::command::LaunchKind::ConversationResume
+        );
+        assert_eq!(seen[1].kind, crate::backend::command::LaunchKind::Review);
+        assert!(!seen[1].args.iter().any(|arg| arg == "--resume"));
+        assert_eq!(outcome.conversation.unwrap().id().as_str(), "s-1");
+    }
+
+    #[tokio::test]
+    async fn resumed_usage_excludes_the_prior_claude_session_total() {
+        let reviewer = reviewer();
+        let baseline = Usage {
+            tokens_in: 1_000,
+            tokens_out: 100,
+            cache_read: 800,
+            cost_usd: Money::from_cents(20),
+        };
+        let prior = crate::conversation::ConversationRef::from_backend(
+            reviewer::Backend::ClaudeCode,
+            "s-prior",
+            &reviewer,
+            None,
+            Some(baseline),
+        )
+        .unwrap();
+        let envelope = serde_json::json!({
+            "session_id": "s-prior",
+            "total_cost_usd": 0.27,
+            "usage": {
+                "input_tokens": 1300,
+                "output_tokens": 140,
+                "cache_read_input_tokens": 1050
+            },
+            "structured_output": { "verdict": "pass", "summary": "ok", "findings": [] }
+        })
+        .to_string();
+        let runner = ScriptedRunner::with(vec![ok(&envelope)]);
+        let backend = ClaudeCodeBackend::with_program(runner, "claude-fake");
+        let run = RunId("r-test".into());
+        let root = PathBuf::from(".");
+        let request = ReviewRequest {
+            reviewer: &reviewer,
+            run: &run,
+            repo_root: &root,
+            base: "main",
+            merge_base: "deadbeef",
+            context: crate::context::ReviewContext::empty(),
+            purpose: crate::backend::ReviewPurpose::Review,
+            native_session_dir: None,
+            conversation: Some(&prior),
+        };
+
+        let outcome = backend.review(&request).await.unwrap();
+        assert_eq!(
+            outcome.usage,
+            Some(Usage {
+                tokens_in: 300,
+                tokens_out: 40,
+                cache_read: 250,
+                cost_usd: Money::from_cents(7),
+            })
+        );
+        assert_eq!(
+            outcome.conversation.unwrap().cumulative_usage(),
+            Some(Usage {
+                tokens_in: 1_300,
+                tokens_out: 140,
+                cache_read: 1_050,
+                cost_usd: Money::from_cents(27),
+            })
+        );
     }
 
     /// Run one review and return the recorded args of the first (and only) turn.
@@ -489,6 +733,7 @@ mod tests {
             context: crate::context::ReviewContext::empty(),
             purpose: crate::backend::ReviewPurpose::Review,
             native_session_dir: None,
+            conversation: None,
         };
         backend.review(&request).await.expect("verdict parses");
         backend.runner.nth_args(0)
@@ -673,6 +918,7 @@ mod tests {
             context: crate::context::ReviewContext::empty(),
             purpose: crate::backend::ReviewPurpose::Review,
             native_session_dir: None,
+            conversation: None,
         };
 
         let outcome = backend.review(&request).await.expect("reprompt succeeds");
@@ -774,6 +1020,7 @@ mod tests {
             context: crate::context::ReviewContext::empty(),
             purpose: crate::backend::ReviewPurpose::Review,
             native_session_dir: None,
+            conversation: None,
         };
         let err = backend.review(&request).await.unwrap_err();
         assert!(err.to_string().contains("execution error"));
@@ -839,6 +1086,7 @@ mod tests {
             context: crate::context::ReviewContext::empty(),
             purpose: crate::backend::ReviewPurpose::Review,
             native_session_dir: None,
+            conversation: None,
         };
         let prompt = build_prompt(&request);
         // The shared changeset preamble leads, naming the base and steering the
@@ -893,6 +1141,7 @@ mod tests {
             context: crate::context::ReviewContext::empty(),
             purpose: crate::backend::ReviewPurpose::Review,
             native_session_dir: None,
+            conversation: None,
         };
         backend.review(&request).await.expect("runs");
 
@@ -990,6 +1239,7 @@ mod tests {
             context: crate::context::ReviewContext::empty(),
             purpose: crate::backend::ReviewPurpose::Review,
             native_session_dir: None,
+            conversation: None,
         };
 
         let outcome = backend

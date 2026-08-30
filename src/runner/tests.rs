@@ -129,6 +129,14 @@ fn persisting_a_skip_removes_artifacts_from_an_earlier_run_at_the_same_head() {
     let layout = Layout::with_root(tmp.path().to_path_buf());
     let run = RunId("r-same-head".into());
     let reviewer = agent_reviewer("semantic", &[]);
+    let conversation = crate::conversation::ConversationRef::from_backend(
+        rev::Backend::Codex,
+        "thread-42",
+        &reviewer,
+        None,
+        None,
+    )
+    .unwrap();
     let reviewed = Resolved {
         reviewer: reviewer.clone(),
         decision: Decision::Pass,
@@ -136,6 +144,7 @@ fn persisting_a_skip_removes_artifacts_from_an_earlier_run_at_the_same_head() {
         findings: vec![],
         usage: None,
         transcript: Some("full review transcript".into()),
+        conversation: Some(conversation),
         duration: Duration::from_secs(1),
         replayed: false,
         carried: false,
@@ -146,11 +155,19 @@ fn persisting_a_skip_removes_artifacts_from_an_earlier_run_at_the_same_head() {
     persist_reviewer(&layout, &run, &reviewed, None).unwrap();
     assert!(layout.verdict(&run, "semantic").exists());
     assert!(layout.transcript(&run, "semantic").exists());
+    assert_eq!(
+        crate::store::reviewer_conversation(&layout, &run, "semantic")
+            .unwrap()
+            .id()
+            .as_str(),
+        "thread-42"
+    );
 
     let skipped = Resolved {
         decision: Decision::Pass,
         summary: "The concern does not apply.".into(),
         transcript: None,
+        conversation: None,
         skipped: true,
         trigger: Some(TriggerResolution {
             backend: rev::Backend::Codex,
@@ -175,6 +192,7 @@ fn persisting_a_skip_removes_artifacts_from_an_earlier_run_at_the_same_head() {
         serde_json::from_slice(&std::fs::read(layout.meta(&run, "semantic")).unwrap()).unwrap();
     assert_eq!(meta["backend"], "codex");
     assert_eq!(meta["usage"]["tokens_in"], 40);
+    assert!(meta.get("conversation").is_none());
 }
 
 #[tokio::test]
@@ -209,6 +227,7 @@ async fn an_any_trigger_records_the_concrete_backend_that_ran() {
 fn ctx(reviewers: &[&Reviewer]) -> ExecContext {
     ExecContext {
         run: RunId("r-exec".into()),
+        repository: crate::store::RepositoryId::for_test("runner-tests"),
         repo_root: PathBuf::from("."),
         branch: "feat".into(),
         base: "main".into(),
@@ -230,6 +249,7 @@ fn ctx(reviewers: &[&Reviewer]) -> ExecContext {
         partial: false,
         force: false,
         carried: Default::default(),
+        conversations: Default::default(),
         scope_digests: Default::default(),
         attestation_fallback: None,
         limits: SpawnLimits::default(),
@@ -251,6 +271,7 @@ fn pass(summary: &str) -> ReviewOutcome {
             cost_usd: Money::from_cents(5),
         }),
         transcript: Some("t".into()),
+        conversation: None,
     }
 }
 
@@ -269,6 +290,7 @@ fn block(summary: &str) -> ReviewOutcome {
         },
         usage: None,
         transcript: Some("t".into()),
+        conversation: None,
     }
 }
 
@@ -1122,14 +1144,23 @@ async fn a_carried_reviewer_counts_toward_the_gate_without_executing() {
     let g1 = reviewer("g1", Mode::Gate);
     let reviewers = [&g1];
     let mut ctx = ctx(&reviewers);
-    ctx.carried
-        .insert("g2".into(), carried_entry("g2", Decision::Pass, "digest-1"));
+    let carried = carried_entry("g2", Decision::Pass, "digest-1");
+    let conversation = crate::conversation::ConversationRef::from_backend(
+        carried.reviewer.backend,
+        "g2-session",
+        &carried.reviewer,
+        None,
+        None,
+    )
+    .unwrap();
+    ctx.conversations.insert("g2".into(), conversation);
+    ctx.carried.insert("g2".into(), carried);
     ctx.reviewers.push(ReviewerRef {
         name: "g2".into(),
         mode: Mode::Gate,
     });
 
-    let (decision, events, _layout) = run_scenario_with_ctx(
+    let (decision, events, layout) = run_scenario_with_ctx(
         &reviewers,
         ctx,
         responses(vec![("g1", Response::Outcome(pass("ok")))]),
@@ -1173,6 +1204,14 @@ async fn a_carried_reviewer_counts_toward_the_gate_without_executing() {
         .unwrap();
     assert_eq!(gates.total, 2);
     assert_eq!(gates.passed, 2);
+    assert_eq!(
+        crate::store::reviewer_conversation(&layout, &RunId("r-exec".into()), "g2")
+            .unwrap()
+            .id()
+            .as_str(),
+        "g2-session",
+        "carry preserves the conversation for the next required execution"
+    );
 }
 
 #[tokio::test]

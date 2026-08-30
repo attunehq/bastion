@@ -70,7 +70,7 @@ its scoped content is unchanged and otherwise executing fresh (see
 - `--with-user-reviewers`: merge personal reviewers into a repository's configured reviewer set. This applies only to a purely local review; it is rejected when either `--repo` or `--pr` is supplied on the command line, and with `bastion validate FILE`. An ambient `$GITHUB_REPOSITORY` without `--pr` does not conflict or turn a local review into a GitHub-source review.
 - `--include <path>` (repeatable): merge an extra reviewer registry file into the repository registry, like an `include:` entry in the root file except that a relative path resolves against the current directory (see [Splitting the registry across files](./authoring-reviewers.md#splitting-the-registry-across-files)). The extra reviewers become part of the effective repository configuration for the run, so `bastion attest` needs the same `--include` flags to re-derive the same configuration hash.
 - `--reviewer <name>` (repeatable; alias `--only`): run only these triggered reviewers. An unknown or untriggered name is an error. Excluding a triggered reviewer makes the run *partial* (see below).
-- `--fresh`: disable the incremental carry below, so no reviewer reuses a prior pass (local or CI). It does not affect attestation replay: a `--repo`/`--pr` run still replays reviewers a verified attestation covers.
+- `--fresh`: disable incremental reuse below. No reviewer carries a prior pass or continues a prior agent conversation. It does not affect attestation replay: a `--repo`/`--pr` run still replays reviewers a verified attestation covers.
 
 ### Re-runs are incremental
 
@@ -99,6 +99,16 @@ starts, so an admitted agent-trigger reviewer keys carry to the full changeset.
 A reviewer with `attestation: never` in the registry is never carried, and
 `--fresh` re-runs everything.
 
+When a reviewer does re-run, Bastion continues the newest compatible agent
+conversation recorded for that reviewer on this repository and branch. It sends
+the complete current review prompt as the next turn. Changing the reviewer prompt,
+backend, model, effort, trigger, or other effective configuration starts a new
+conversation. `--fresh` also starts a new conversation.
+
+Conversation state is a cache. If the backend session or thread is unavailable,
+Bastion immediately performs the review in a fresh conversation. The verdict does
+not depend on resume succeeding.
+
 One extra condition applies to the repository's own reviewers (not personal
 user-level ones): they carry only from a prior run the binary sealed and can still
 verify, with no test seam recorded. A prior run that was never sealed, or whose
@@ -115,6 +125,13 @@ separate from [attestation replay](#attesting-a-run-for-ci): replay reuses your
 signed local run so CI need not re-execute it at all, while carry walks CI's
 own prior runs newest first when a later push leaves a reviewer's scoped
 content untouched.
+
+The packaged GitHub Action restores `<data-dir>/runs`, including conversation ids,
+but it does not restore the backend's native session store. A resume on a standard
+ephemeral runner therefore falls back to a fresh conversation. A custom workflow
+can preserve the backend session store too. With Akari isolation enabled for
+Claude Code, Codex, or Pi, persist `<data-dir>/native` alongside `runs`; otherwise
+persist the session location used by the selected backend.
 
 ### Running a subset by hand
 
@@ -321,18 +338,24 @@ variable, handy for scratch runs you do not want in your real history. The layou
   runs/
     r-0f3a/
       run.jsonl                  # the full event stream (always JSONL, regardless of display format)
+      identity.json              # opaque repository identity used for history lookup
       seal.json                  # the run seal, when the run was sealed (what `bastion attest` reads)
       reviewers/
         tenant-isolation/
           transcript.jsonl       # the full agent session
           verdict.json           # the raw structured verdict; absent on a semantic skip
-          meta.json              # backend, timing, usage, matched trigger
+          meta.json              # backend, timing, usage, trigger, resumable conversation
     latest                       # a plain file holding the most recent run id
+  native/                        # isolated backend session state when Akari is enabled
 ```
 
 Full runs at one commit reuse `r-<short-sha>` and overwrite the previous full
 run. A `--reviewer` partial is stored as `r-<short-sha>-partial` so it cannot
 overwrite that full record.
+
+Prior-run lookup is scoped to the repository and branch. Runs created before this
+identity metadata existed remain available to `show` and `transcript`, but Bastion
+does not use them for findings, carry, or conversation continuation.
 
 `run.jsonl` is the same event stream whether a human or an agent triggered the
 run, so any run can be replayed or inspected after the fact. Runs accumulate:

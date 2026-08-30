@@ -690,7 +690,13 @@ mod tests {
                 partial,
             },
         ];
-        store::write_run(layout, &run, &events).unwrap();
+        store::write_run(
+            layout,
+            &run,
+            &store::RepositoryId::for_test("carry-tests"),
+            &events,
+        )
+        .unwrap();
         if let Some(secret) = seal_it.filter(|_| !partial) {
             let values = vec![serde_json::to_value(&resolved).unwrap()];
             let seal = crate::seal::seal(
@@ -732,7 +738,11 @@ mod tests {
         repo_reviewers: &BTreeSet<String>,
         secret: &[u8],
     ) -> BTreeMap<String, Carried> {
-        let prior = store::runs_on_branch(layout, branch);
+        let prior = store::runs_on_branch(
+            layout,
+            &store::RepositoryId::for_test("carry-tests"),
+            branch,
+        );
         let prior_runs: Vec<(&RunId, &[RunEvent])> = prior
             .iter()
             .map(|(summary, events)| (&summary.run, events.as_slice()))
@@ -1078,7 +1088,13 @@ mod tests {
             },
         ];
         let (_tmp2, _) = (tempfile::tempdir().unwrap(), ());
-        store::write_run(&layout, &run, &events).unwrap();
+        store::write_run(
+            &layout,
+            &run,
+            &store::RepositoryId::for_test("carry-tests"),
+            &events,
+        )
+        .unwrap();
 
         let g1 = reviewer("g1", &["src/**"]);
         let carried = plan_on_branch(

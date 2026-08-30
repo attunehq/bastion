@@ -42,12 +42,14 @@ pub struct SpawnLimits {
     /// did any real work. A healthy full run spends a fraction of the default;
     /// reaching the cap means something is wrong, so the run aborts.
     pub max_total_spawns: u32,
-    /// How many agent launches may fail to produce any output *in a row* before
-    /// the breaker trips and aborts the run. This is the dead-spawn signature of
-    /// the incident: a broken or unauthenticated agent CLI (an exit-127, an auth
-    /// failure) that launches, dies at zero tokens, and is retried. A single
-    /// productive launch resets the count, so an occasional transient failure
-    /// never trips it; a sustained run of them trips it quickly.
+    /// How many required agent launches may fail to produce any output *in a row*
+    /// before the breaker trips and aborts the run. This is the dead-spawn
+    /// signature of the incident: a broken or unauthenticated agent CLI (an
+    /// exit-127, an auth failure) that launches, dies at zero tokens, and is
+    /// retried. A missing optional conversation resume leaves the count unchanged;
+    /// its required fresh fallback follows the normal rule. A productive launch
+    /// resets the count, so an occasional transient failure never trips it; a
+    /// sustained run of them trips it quickly.
     pub max_consecutive_failures: u32,
 }
 

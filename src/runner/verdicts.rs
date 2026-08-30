@@ -127,6 +127,7 @@ fn resolve_reused(reviewer: &Reviewer, event: &RunEvent, reuse: Reuse) -> Resolv
             findings: Vec::new(),
             usage: None,
             transcript: None,
+            conversation: None,
             duration: Duration::from_millis(trigger.duration_ms),
             replayed: *replayed || matches!(reuse, Reuse::Replayed),
             carried: false,
@@ -182,6 +183,7 @@ fn resolve_reused(reviewer: &Reviewer, event: &RunEvent, reuse: Reuse) -> Resolv
         // bundle carries only the resolved event, and a carry reuses the prior
         // run's row without its transcript file.
         transcript: None,
+        conversation: None,
         duration: reuse.duration(*duration_ms),
         replayed,
         carried,

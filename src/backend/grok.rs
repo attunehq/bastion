@@ -114,27 +114,72 @@ impl<R: CommandRunner> Backend for GrokBackend<R> {
     async fn review(&self, request: &ReviewRequest<'_>) -> Result<ReviewOutcome> {
         let prompt = super::review_prompt(request, super::JSON_SCHEMA_INSTRUCTION);
 
-        let mut spec = self.base_spec(request);
-        spec.arg("-p").arg(&prompt);
-        let first = self.run_turn(&spec).await?;
+        let (first, resumed) = if let Some(prior) = request.conversation {
+            let mut spec = self.base_spec(request);
+            spec.arg("--resume")
+                .arg(prior.id().as_str())
+                .arg("-p")
+                .arg(&prompt)
+                .conversation_resume();
+            match self.run_turn(&spec).await {
+                Ok(first) => (first, true),
+                Err(err) => {
+                    super::log_resume_fallback(request, reviewer::Backend::Grok, &err);
+                    let mut fresh = self.base_spec(request);
+                    fresh.arg("-p").arg(&prompt);
+                    (self.run_turn(&fresh).await?, false)
+                }
+            }
+        } else {
+            let mut fresh = self.base_spec(request);
+            fresh.arg("-p").arg(&prompt);
+            (self.run_turn(&fresh).await?, false)
+        };
 
         if let Some(verdict) = first.verdict() {
+            let prior_id = if resumed {
+                request
+                    .conversation
+                    .map(|prior| prior.id().as_str().to_string())
+            } else {
+                None
+            };
+            let conversation_id = first.result.session_id.clone().or(prior_id);
             return Ok(ReviewOutcome {
                 verdict,
                 usage: first.usage(),
                 transcript: Some(first.raw),
+                conversation: super::conversation_ref(
+                    request,
+                    reviewer::Backend::Grok,
+                    conversation_id.as_deref(),
+                    resumed,
+                    None,
+                ),
             });
         }
 
         // Malformed/missing structured output. Per design.md, re-run the same
         // session once asking only for the structured output, then fail closed.
-        let session = first.result.session_id.clone().ok_or_else(|| {
-            eyre!(
-                "grok produced no structured verdict and no session id to resume \
-                 (reviewer '{}')",
-                request.reviewer.name
-            )
-        })?;
+        let prior_id = if resumed {
+            request
+                .conversation
+                .map(|prior| prior.id().as_str().to_string())
+        } else {
+            None
+        };
+        let session = first
+            .result
+            .session_id
+            .clone()
+            .or(prior_id)
+            .ok_or_else(|| {
+                eyre!(
+                    "grok produced no structured verdict and no session id to resume \
+                     (reviewer '{}')",
+                    request.reviewer.name
+                )
+            })?;
 
         let mut reprompt = self.base_spec(request);
         reprompt
@@ -145,12 +190,26 @@ impl<R: CommandRunner> Backend for GrokBackend<R> {
         let second = self.run_turn(&reprompt).await?;
 
         match second.verdict() {
-            Some(verdict) => Ok(ReviewOutcome {
-                verdict,
-                // Each process reports its own turns only, so the two are disjoint.
-                usage: sum_usage(first.usage(), second.usage()),
-                transcript: Some(super::stitch_transcript(Some(&first.raw), second.raw)),
-            }),
+            Some(verdict) => {
+                let conversation = super::conversation_ref(
+                    request,
+                    reviewer::Backend::Grok,
+                    second
+                        .result
+                        .session_id
+                        .as_deref()
+                        .or(Some(session.as_str())),
+                    true,
+                    None,
+                );
+                Ok(ReviewOutcome {
+                    verdict,
+                    // Each process reports its own turns only, so the two are disjoint.
+                    usage: sum_usage(first.usage(), second.usage()),
+                    transcript: Some(super::stitch_transcript(Some(&first.raw), second.raw)),
+                    conversation,
+                })
+            }
             None => bail!(
                 "grok did not produce a valid verdict for reviewer '{}' even after \
                  re-prompting for the structured output",
@@ -363,6 +422,14 @@ mod tests {
         }
     }
 
+    fn failed(stderr: &str) -> CommandOutput {
+        CommandOutput {
+            code: Some(1),
+            stdout: String::new(),
+            stderr: stderr.to_string(),
+        }
+    }
+
     fn reviewer() -> Reviewer {
         Reviewer {
             name: "demo".into(),
@@ -398,6 +465,7 @@ mod tests {
             context: crate::context::ReviewContext::empty(),
             purpose: crate::backend::ReviewPurpose::Review,
             native_session_dir: None,
+            conversation: None,
         };
         let outcome = backend.review(&request).await;
         (outcome, backend.runner)
@@ -411,6 +479,86 @@ mod tests {
             "structuredOutput": { "verdict": "pass", "summary": "ok", "findings": [] }
         })
         .to_string()
+    }
+
+    fn prior_conversation(reviewer: &Reviewer) -> crate::conversation::ConversationRef {
+        crate::conversation::ConversationRef::from_backend(
+            reviewer::Backend::Grok,
+            "g-prior",
+            reviewer,
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn continues_a_prior_conversation_with_the_full_review_prompt() {
+        let reviewer = reviewer();
+        let prior = prior_conversation(&reviewer);
+        let runner = ScriptedRunner::with(vec![ok(&pass_envelope())]);
+        let backend = GrokBackend::with_program(runner, "grok-fake");
+        let run = RunId("r-test".into());
+        let root = PathBuf::from(".");
+        let request = ReviewRequest {
+            reviewer: &reviewer,
+            run: &run,
+            repo_root: &root,
+            base: "main",
+            merge_base: "deadbeef",
+            context: crate::context::ReviewContext::empty(),
+            purpose: crate::backend::ReviewPurpose::Review,
+            native_session_dir: None,
+            conversation: Some(&prior),
+        };
+
+        let outcome = backend.review(&request).await.unwrap();
+        let seen = backend.runner.seen.lock().unwrap();
+        assert_eq!(
+            seen[0].kind,
+            crate::backend::command::LaunchKind::ConversationResume
+        );
+        let args: Vec<String> = seen[0]
+            .args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.windows(2).any(|pair| pair == ["--resume", "g-prior"]));
+        let prompt = &args[args.iter().position(|arg| arg == "-p").unwrap() + 1];
+        assert!(prompt.contains("You are reviewing a changeset"));
+        assert_eq!(outcome.conversation.unwrap().id().as_str(), "g-1");
+    }
+
+    #[tokio::test]
+    async fn unavailable_prior_conversation_falls_back_to_a_fresh_review() {
+        let reviewer = reviewer();
+        let prior = prior_conversation(&reviewer);
+        let runner = ScriptedRunner::with(vec![failed("session not found"), ok(&pass_envelope())]);
+        let backend = GrokBackend::with_program(runner, "grok-fake");
+        let run = RunId("r-test".into());
+        let root = PathBuf::from(".");
+        let request = ReviewRequest {
+            reviewer: &reviewer,
+            run: &run,
+            repo_root: &root,
+            base: "main",
+            merge_base: "deadbeef",
+            context: crate::context::ReviewContext::empty(),
+            purpose: crate::backend::ReviewPurpose::Review,
+            native_session_dir: None,
+            conversation: Some(&prior),
+        };
+
+        let outcome = backend.review(&request).await.unwrap();
+        let seen = backend.runner.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(
+            seen[0].kind,
+            crate::backend::command::LaunchKind::ConversationResume
+        );
+        assert_eq!(seen[1].kind, crate::backend::command::LaunchKind::Review);
+        assert!(!seen[1].args.iter().any(|arg| arg == "--resume"));
+        assert_eq!(outcome.conversation.unwrap().id().as_str(), "g-1");
     }
 
     #[tokio::test]
@@ -701,6 +849,7 @@ mod tests {
             context: crate::context::ReviewContext::empty(),
             purpose: crate::backend::ReviewPurpose::Review,
             native_session_dir: None,
+            conversation: None,
         };
         let outcome = backend.review(&request).await.expect("verdict");
         assert_eq!(outcome.verdict.summary, "real subprocess ok");

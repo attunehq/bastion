@@ -26,6 +26,8 @@
 //! - [`carry`]: incremental re-review, carrying a prior pass forward when a
 //!   reviewer's trigger-scoped diff is unchanged since its newest resolution
 //!   on the branch.
+//! - [`conversation`]: compatible agent-session continuation for reviewers that
+//!   must execute again after an earlier run.
 //! - [`seal`]: the run seal, an HMAC over everything a verdict depends on, that
 //!   makes a persisted run tamper-evident (`docs/developer-guide/attestation.md`).
 //! - [`attest`]: `bastion attest`, which turns a sealed run into a signed git-note
@@ -46,6 +48,7 @@ pub mod cli;
 pub mod commands;
 pub mod config;
 pub mod context;
+pub mod conversation;
 pub mod event;
 pub mod git;
 pub mod github;

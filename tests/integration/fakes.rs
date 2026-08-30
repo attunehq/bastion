@@ -1,9 +1,8 @@
 //! The compiled fakes and the detect-and-skip tooling guards.
 //!
 //! These stand in for the heavyweight external programs the real backends shell
-//! out to: a deterministic, contract-checking fake agent for claude/codex/pi/grok,
-//! and a
-//! fake container engine for docker/podman. Both are compiled once with `rustc`
+//! out to: a deterministic, contract-checking fake agent for
+//! claude/codex/pi/grok/muse, and a fake container engine for docker/podman. Both are compiled once with `rustc`
 //! and reused for the whole test process; scenarios that need a toolchain we
 //! cannot guarantee detect-and-skip through [`tooling`] / [`container_tooling`].
 
@@ -15,7 +14,7 @@ use std::sync::OnceLock;
 // The fake agent: a deterministic, contract-checking stand-in for the agent CLIs.
 // ---------------------------------------------------------------------------
 
-/// Source for a tiny native program that emulates the four agent CLIs.
+/// Source for a tiny native program that emulates the five agent CLIs.
 ///
 /// It detects which protocol it is being driven as from its argv (Codex is
 /// invoked with an `exec` subcommand; Pi with `--mode`; Grok Build with
@@ -43,6 +42,9 @@ use std::sync::OnceLock;
 /// `FAKE_EXPECT_PROMPT_CONTAINS` (assert the delivered prompt contains a marker --
 /// used to verify `${...}` interpolation end to end), and `FAKE_MARKER_FILE`
 /// (written only *after* the sleep, so a killed-on-timeout child never writes it).
+/// `FAKE_REQUIRE_RESUME_IF_FILE_EXISTS` rejects a fresh invocation while its path
+/// exists. `FAKE_REJECT_RESUME_IF_FILE_EXISTS` removes its path and rejects one
+/// resume, which lets integration tests prove the fresh fallback.
 pub(crate) const FAKE_AGENT_SRC: &str = r##"
 use std::io::Read;
 
@@ -220,6 +222,19 @@ fn main() {
     if behavior == "crash" {
         eprintln!("fake agent: simulated crash");
         std::process::exit(7);
+    }
+
+    if let Ok(marker) = std::env::var("FAKE_REQUIRE_RESUME_IF_FILE_EXISTS") {
+        if !marker.is_empty() && std::path::Path::new(&marker).exists() && !is_reprompt {
+            fail("expected this invocation to resume the prior conversation");
+        }
+    }
+    if let Ok(marker) = std::env::var("FAKE_REJECT_RESUME_IF_FILE_EXISTS") {
+        if !marker.is_empty() && std::path::Path::new(&marker).exists() && is_reprompt {
+            let _ = std::fs::remove_file(&marker);
+            eprintln!("fake agent: simulated missing prior conversation");
+            std::process::exit(7);
+        }
     }
 
     // reprompt-recover is malformed on the first turn and valid once resumed.

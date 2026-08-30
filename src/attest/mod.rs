@@ -451,7 +451,13 @@ mod tests {
                 cost_usd: Money::from_cents(0),
             },
         ];
-        store::write_run(&layout, &run_id, &resolved_events).unwrap();
+        store::write_run(
+            &layout,
+            &run_id,
+            &store::RepositoryId::resolve(&repo).unwrap(),
+            &resolved_events,
+        )
+        .unwrap();
 
         let secret: &'static [u8] = b"fixture-test-secret";
         let sealed_events: Vec<serde_json::Value> = resolved_events
@@ -555,6 +561,7 @@ mod tests {
         store::write_run(
             &layout,
             &run_id,
+            &store::RepositoryId::resolve(&repo).unwrap(),
             &[RunEvent::RunStarted {
                 partial: false,
                 run: run_id.clone(),
@@ -593,6 +600,7 @@ mod tests {
         store::write_run(
             &layout,
             &run_id,
+            &store::RepositoryId::resolve(&repo).unwrap(),
             &[RunEvent::RunStarted {
                 run: run_id.clone(),
                 branch: "feature".into(),
@@ -731,7 +739,13 @@ mod tests {
                 *summary = "a perturbed summary that never happened".to_string();
             }
         }
-        store::write_run(&fixture.layout, &fixture.run_id, &events).unwrap();
+        store::write_run(
+            &fixture.layout,
+            &fixture.run_id,
+            &store::read_repository(&fixture.layout, &fixture.run_id).unwrap(),
+            &events,
+        )
+        .unwrap();
 
         let mut out = Vec::new();
         let err = attest(

@@ -59,6 +59,7 @@ pub(super) fn persist_reviewer(
         usage,
         trigger: item.reviewer.trigger.clone(),
         akari: akari.cloned(),
+        conversation: item.conversation.clone(),
     };
     let meta_path = layout.meta(run, &item.reviewer.name);
     std::fs::write(
@@ -92,6 +93,8 @@ struct ReviewerMeta {
     trigger: crate::reviewer::Trigger,
     #[serde(skip_serializing_if = "Option::is_none")]
     akari: Option<crate::akari::HandoffRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    conversation: Option<crate::conversation::ConversationRef>,
 }
 
 /// Persist the run's event stream, prepending the authoritative `run.started`.
@@ -115,5 +118,5 @@ pub(super) fn persist_run(
     let mut events = Vec::with_capacity(tail.len() + 1);
     events.push(started);
     events.extend_from_slice(tail);
-    crate::store::write_run(layout, run, &events)
+    crate::store::write_run(layout, run, &ctx.repository, &events)
 }

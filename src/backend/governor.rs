@@ -22,7 +22,7 @@ use tokio::sync::{Semaphore, SemaphorePermit};
 
 use crate::limits::SpawnLimits;
 
-use super::command::{CommandOutput, CommandRunner, CommandSpec};
+use super::command::{CommandOutput, CommandRunner, CommandSpec, LaunchKind};
 
 /// Why the breaker tripped, carried on the refusal error and surfaced when the
 /// runner aborts the run.
@@ -175,12 +175,16 @@ impl SpawnGovernor {
     }
 
     /// Record the outcome of an admitted launch, advancing the consecutive-failure
-    /// breaker. A dead launch (no output) increments it and may trip; a productive
-    /// one resets it.
-    fn record(&self, dead: bool) {
+    /// breaker. A dead required launch increments it and may trip; a productive
+    /// launch resets it. A dead optional resume leaves the streak unchanged because
+    /// missing prior session state is expected, especially in CI.
+    fn record(&self, dead: bool, kind: LaunchKind) {
         let mut state = self.state();
         if !dead {
             state.consecutive_dead = 0;
+            return;
+        }
+        if kind == LaunchKind::ConversationResume {
             return;
         }
         state.consecutive_dead += 1;
@@ -244,7 +248,7 @@ impl<R: CommandRunner> CommandRunner for GovernedRunner<R> {
         // not a launch, so it must not advance either counter.
         let _permit = self.governor.admit().await?;
         let result = self.inner.run(spec).await;
-        self.governor.record(is_dead_spawn(&result));
+        self.governor.record(is_dead_spawn(&result), spec.kind);
         result
     }
 }
@@ -322,6 +326,12 @@ mod tests {
 
     fn spec() -> CommandSpec {
         CommandSpec::new("agent", ".")
+    }
+
+    fn resume_spec() -> CommandSpec {
+        let mut spec = spec();
+        spec.conversation_resume();
+        spec
     }
 
     fn limits(concurrent: u32, total: u32, consecutive: u32) -> SpawnLimits {
@@ -500,5 +510,33 @@ mod tests {
             "interleaved productive launches must keep the breaker from tripping"
         );
         assert_eq!(runner.inner.ran(), 5);
+    }
+
+    #[tokio::test]
+    async fn missing_conversations_do_not_trip_the_dead_spawn_breaker() {
+        let governor = Arc::new(SpawnGovernor::new(limits(1, 100, 2)));
+        let runner = GovernedRunner::new(FakeRunner::always_dead(), governor.clone());
+
+        for _ in 0..4 {
+            let output = runner
+                .run(&resume_spec())
+                .await
+                .expect("an attempted resume still launches");
+            assert!(!output.success());
+        }
+
+        assert_eq!(governor.launched(), 4, "resume attempts still count");
+        assert!(
+            governor.tripped().is_none(),
+            "an unavailable optional conversation must leave room for fresh fallback"
+        );
+
+        for _ in 0..2 {
+            runner.run(&spec()).await.expect("required launch runs");
+        }
+        assert!(matches!(
+            governor.tripped(),
+            Some(TripReason::ConsecutiveFailures { failures: 2, .. })
+        ));
     }
 }

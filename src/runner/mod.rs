@@ -26,7 +26,7 @@
 //! here for the call sites that predate the split.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -36,6 +36,7 @@ use tokio::task::JoinSet;
 use crate::backend::governor::SpawnGovernor;
 use crate::backend::{self, ReviewOutcome, ReviewPurpose, ReviewRequest};
 use crate::context::ReviewContext;
+use crate::conversation::ConversationRef;
 use crate::event::{Gates, ReviewerRef, RunEvent, RunId, TriggerDecision, TriggerResolution};
 use crate::limits::SpawnLimits;
 use crate::paths::Layout;
@@ -89,6 +90,8 @@ pub struct OwnedRequest {
     pub context: ReviewContext,
     /// Whether this agent performs the full review or only routes it.
     pub purpose: ReviewPurpose,
+    /// A compatible prior conversation for this full reviewer.
+    pub conversation: Option<ConversationRef>,
     /// The run's shared spawn governor, so every agent launch this request makes
     /// (including a backend reprompt) counts against the run-wide caps. Cloned from
     /// the one governor [`execute_with`] builds, so all reviewers share it.
@@ -109,6 +112,7 @@ impl OwnedRequest {
                 merge_base: &self.merge_base,
                 context: &self.context,
                 purpose: self.purpose,
+                conversation: self.conversation.as_ref(),
                 native_session_dir: self.native_session_dir.as_deref(),
             };
             backend::dispatch(&request, &self.governor).await
@@ -127,6 +131,8 @@ pub struct ExecContext {
     pub run: RunId,
     /// The repository root.
     pub repo_root: PathBuf,
+    /// The opaque identity used to scope persisted history to this repository.
+    pub repository: crate::store::RepositoryId,
     /// The branch under review.
     pub branch: String,
     /// The base branch.
@@ -184,6 +190,8 @@ pub struct ExecContext {
     /// surface (a CI run carries from its own prior CI run just as a local run
     /// does); disjoint from both `replayed` and the fresh set.
     pub carried: std::collections::BTreeMap<String, crate::carry::Carried>,
+    /// The newest compatible prior conversation for each reviewer in the plan.
+    pub conversations: std::collections::BTreeMap<String, ConversationRef>,
     /// The current scope digest for each reviewer executing fresh this run,
     /// keyed by name, stamped onto its `reviewer.resolved` event so a later run
     /// can decide whether to carry it. An absent entry (a digest that failed to
@@ -272,6 +280,7 @@ struct Resolved {
     findings: Vec<crate::verdict::Finding>,
     usage: Option<Usage>,
     transcript: Option<String>,
+    conversation: Option<ConversationRef>,
     duration: Duration,
     /// Whether this verdict was replayed from a signed local attestation rather
     /// than executed fresh this run.
@@ -544,6 +553,11 @@ async fn run_fresh(
     let mut set: JoinSet<(usize, ReviewTaskResult)> = JoinSet::new();
     let mut tasks = HashMap::with_capacity(matched.len());
     for (index, reviewer) in matched.iter().enumerate() {
+        let conversation = ctx.conversations.get(&reviewer.name).cloned();
+        let prior_session_dir = conversation
+            .as_ref()
+            .and_then(ConversationRef::session_dir)
+            .map(Path::to_path_buf);
         let request = OwnedRequest {
             reviewer: (*reviewer).clone(),
             run: ctx.run.clone(),
@@ -552,8 +566,10 @@ async fn run_fresh(
             merge_base: ctx.merge_base.clone(),
             context: ctx.context.clone(),
             purpose: ReviewPurpose::Review,
+            conversation,
             governor: governor.clone(),
-            native_session_dir: native_session_dir(layout, ctx, reviewer),
+            native_session_dir: prior_session_dir
+                .or_else(|| native_session_dir(layout, ctx, reviewer)),
         };
         let force = ctx.force;
         let exec = exec.clone();
@@ -623,13 +639,28 @@ fn resolve_all(
     let mut resolved = Vec::with_capacity(matched.len() + ctx.replayed.len() + ctx.carried.len());
     for (index, reviewer) in matched.iter().enumerate() {
         let digest = ctx.scope_digests.get(&reviewer.name).cloned();
-        resolved.push(resolve(reviewer, results[index].take(), digest));
+        let produced_review = matches!(
+            results[index].as_ref(),
+            Some(ReviewTaskResult {
+                outcome: TaskOutcome::Ok(_),
+                ..
+            })
+        );
+        let mut item = resolve(reviewer, results[index].take(), digest);
+        if !produced_review {
+            item.conversation = ctx.conversations.get(&reviewer.name).cloned();
+        }
+        resolved.push(item);
     }
     for replay in ctx.replayed.values() {
-        resolved.push(resolve_replayed(replay));
+        let mut item = resolve_replayed(replay);
+        item.conversation = ctx.conversations.get(&item.reviewer.name).cloned();
+        resolved.push(item);
     }
     for carry in ctx.carried.values() {
-        resolved.push(resolve_carried(carry));
+        let mut item = resolve_carried(carry);
+        item.conversation = ctx.conversations.get(&item.reviewer.name).cloned();
+        resolved.push(item);
     }
     resolved
 }
@@ -748,6 +779,7 @@ async fn run_one(
                     // intent and discussion cannot justify a semantic skip.
                     context: ReviewContext::default(),
                     purpose: ReviewPurpose::Routing,
+                    conversation: None,
                     governor: request.governor.clone(),
                     native_session_dir: request.native_session_dir.clone(),
                 };
@@ -922,6 +954,7 @@ fn resolve(
                 findings,
                 usage: outcome.usage,
                 transcript,
+                conversation: outcome.conversation.map(|reference| *reference),
                 duration,
                 replayed: false,
                 carried: false,
@@ -962,6 +995,7 @@ fn resolve(
             findings: Vec::new(),
             usage: None,
             transcript: trigger.transcript,
+            conversation: None,
             duration,
             replayed: false,
             carried: false,
@@ -1009,7 +1043,12 @@ async fn handoff_native_session(
     item: &Resolved,
 ) -> Option<crate::akari::HandoffRecord> {
     let client = ctx.akari.as_ref()?;
-    let dir = layout.native_session_dir(&ctx.run, &item.reviewer.name);
+    let dir = item
+        .conversation
+        .as_ref()
+        .and_then(ConversationRef::session_dir)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| layout.native_session_dir(&ctx.run, &item.reviewer.name));
     let runner = crate::backend::command::SystemCommandRunner;
     Some(crate::akari::handoff(&runner, client, &dir, &ctx.repo_root).await)
 }
@@ -1105,6 +1144,7 @@ fn fail(reviewer: &Reviewer, is_gate: bool, reason: &str, duration: Duration) ->
         findings,
         usage: None,
         transcript: None,
+        conversation: None,
         duration,
         replayed: false,
         carried: false,

@@ -76,9 +76,9 @@ pub enum Command {
         /// marked as such in the output and the stored run, and cannot be attested.
         #[arg(long = "reviewer", visible_alias = "only", value_name = "NAME")]
         reviewers: Vec<String>,
-        /// Execute every triggered reviewer even when its trigger-scoped diff is
-        /// unchanged since this branch's previous run (disable carrying prior
-        /// passes forward).
+        /// Execute every triggered reviewer in a new agent conversation, even
+        /// when its trigger-scoped diff is unchanged since this branch's previous
+        /// run (disable prior verdict and conversation reuse).
         #[arg(long)]
         fresh: bool,
         /// Merge personal user-level reviewers with the repository's reviewers.

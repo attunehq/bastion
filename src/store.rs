@@ -9,12 +9,85 @@ use std::time::{Duration, SystemTime};
 
 use color_eyre::eyre::{Context, Result, bail, eyre};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::context::PriorFinding;
+use crate::conversation::ConversationRef;
 use crate::event::{RunEvent, RunId};
 use crate::paths::Layout;
 use crate::seal::Seal;
 use crate::verdict::Decision;
+
+/// An opaque, stable identity for a git repository.
+///
+/// Repositories with an `origin` use its URL so restored CI history remains
+/// usable across checkout paths. Local-only repositories hash their canonical
+/// common git directory, which is shared by linked worktrees.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RepositoryId(String);
+
+impl RepositoryId {
+    /// Derive the identity for `repo_root`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a repository without `origin` has no resolvable
+    /// common git directory.
+    pub fn resolve(repo_root: &std::path::Path) -> Result<Self> {
+        let seed = if let Some(origin) = crate::git::origin_url(repo_root) {
+            format!("origin\0{origin}")
+        } else {
+            format!(
+                "common-dir\0{}",
+                crate::git::common_dir(repo_root)?.display()
+            )
+        };
+        Ok(Self::from_source(&seed))
+    }
+
+    fn from_source(source: &str) -> Self {
+        Self(hex::encode(Sha256::digest(source.as_bytes())))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(name: &str) -> Self {
+        Self::from_source(name)
+    }
+}
+
+impl Serialize for RepositoryId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for RepositoryId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        let valid = raw.len() == 64
+            && raw
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'));
+        if valid {
+            Ok(Self(raw))
+        } else {
+            Err(serde::de::Error::custom(
+                "repository identity must be 64 lowercase hex characters",
+            ))
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct RunIdentity {
+    repository: RepositoryId,
+}
 
 /// A one-line description of a persisted run, for `bastion runs`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,7 +122,12 @@ fn ensure_run_dir(layout: &Layout, id: &RunId) -> Result<()> {
 /// # Errors
 ///
 /// Returns an error if the data directory cannot be created or written.
-pub fn write_run(layout: &Layout, id: &RunId, events: &[RunEvent]) -> Result<()> {
+pub fn write_run(
+    layout: &Layout,
+    id: &RunId,
+    repository: &RepositoryId,
+    events: &[RunEvent],
+) -> Result<()> {
     ensure_run_dir(layout, id)?;
 
     let mut body = String::new();
@@ -60,8 +138,30 @@ pub fn write_run(layout: &Layout, id: &RunId, events: &[RunEvent]) -> Result<()>
     let jsonl = layout.run_jsonl(id);
     std::fs::write(&jsonl, body).wrap_err_with(|| format!("writing {}", jsonl.display()))?;
 
+    let identity = serde_json::to_string(&RunIdentity {
+        repository: repository.clone(),
+    })
+    .wrap_err("serializing run identity")?;
+    let identity_path = layout.identity(id);
+    std::fs::write(&identity_path, identity)
+        .wrap_err_with(|| format!("writing {}", identity_path.display()))?;
+
     std::fs::write(layout.latest_pointer(), id.as_str()).wrap_err("updating latest run pointer")?;
     Ok(())
+}
+
+/// Read a run's repository identity.
+///
+/// # Errors
+///
+/// Returns an error when the identity file is absent, unreadable, or malformed.
+pub fn read_repository(layout: &Layout, id: &RunId) -> Result<RepositoryId> {
+    let path = layout.identity(id);
+    let text =
+        std::fs::read_to_string(&path).wrap_err_with(|| format!("reading {}", path.display()))?;
+    let identity: RunIdentity = serde_json::from_str(&text)
+        .wrap_err_with(|| format!("{}: malformed run identity", path.display()))?;
+    Ok(identity.repository)
 }
 
 /// Read a run's full event stream.
@@ -180,12 +280,19 @@ pub fn list_runs(layout: &Layout) -> Result<Vec<RunSummary>> {
 /// run uses a distinct id (`r-<sha>-partial`) so it does not overwrite the
 /// last full run at that HEAD.
 #[must_use]
-pub fn runs_on_branch(layout: &Layout, branch: &str) -> Vec<(RunSummary, Vec<RunEvent>)> {
+pub fn runs_on_branch(
+    layout: &Layout,
+    repository: &RepositoryId,
+    branch: &str,
+) -> Vec<(RunSummary, Vec<RunEvent>)> {
     let Ok(runs) = collect_runs(layout) else {
         return Vec::new();
     };
     let mut matched = Vec::new();
     for (id, _) in runs {
+        if !read_repository(layout, &id).is_ok_and(|found| &found == repository) {
+            continue;
+        }
         let events = read_run(layout, &id).unwrap_or_default();
         let summary = summarize_events(&id, &events);
         if summary.branch.as_deref() == Some(branch) {
@@ -203,8 +310,35 @@ pub fn runs_on_branch(layout: &Layout, branch: &str) -> Vec<(RunSummary, Vec<Run
 /// the whole newest-first list; call this when only the newest run is required
 /// (prior-findings recall, tests).
 #[must_use]
-pub fn latest_run_on_branch(layout: &Layout, branch: &str) -> Option<(RunSummary, Vec<RunEvent>)> {
-    runs_on_branch(layout, branch).into_iter().next()
+pub fn latest_run_on_branch(
+    layout: &Layout,
+    repository: &RepositoryId,
+    branch: &str,
+) -> Option<(RunSummary, Vec<RunEvent>)> {
+    runs_on_branch(layout, repository, branch)
+        .into_iter()
+        .next()
+}
+
+/// Read the resumable conversation stored for `reviewer` in `run`.
+///
+/// Missing or malformed metadata returns `None`: conversation reuse is an
+/// optimization and must never prevent a fresh review.
+#[must_use]
+pub fn reviewer_conversation(
+    layout: &Layout,
+    run: &RunId,
+    reviewer: &str,
+) -> Option<ConversationRef> {
+    #[derive(Deserialize)]
+    struct ConversationMeta {
+        conversation: Option<ConversationRef>,
+    }
+
+    let text = std::fs::read_to_string(layout.meta(run, reviewer)).ok()?;
+    serde_json::from_str::<ConversationMeta>(&text)
+        .ok()?
+        .conversation
 }
 
 /// Prune persisted runs, keeping the `keep` most recent and/or removing any
@@ -343,6 +477,10 @@ mod tests {
     use crate::reviewer::Mode;
     use crate::verdict::Money;
 
+    fn repository() -> RepositoryId {
+        RepositoryId::for_test("store-tests")
+    }
+
     fn sample_events(id: &str) -> Vec<RunEvent> {
         vec![
             RunEvent::RunStarted {
@@ -411,7 +549,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let layout = Layout::with_root(tmp.path().to_path_buf());
         let id = RunId("r-unsealed".into());
-        write_run(&layout, &id, &sample_events("r-unsealed")).unwrap();
+        write_run(&layout, &id, &repository(), &sample_events("r-unsealed")).unwrap();
         assert_eq!(read_seal(&layout, &id).unwrap(), None);
     }
 
@@ -421,7 +559,7 @@ mod tests {
         let layout = Layout::with_root(tmp.path().to_path_buf());
         let id = RunId("r-0001".into());
 
-        write_run(&layout, &id, &sample_events("r-0001")).unwrap();
+        write_run(&layout, &id, &repository(), &sample_events("r-0001")).unwrap();
 
         let events = read_run(&layout, &id).unwrap();
         assert_eq!(events.len(), 2);
@@ -445,7 +583,7 @@ mod tests {
         if let RunEvent::RunStarted { partial, .. } = &mut events[0] {
             *partial = true;
         }
-        write_run(&layout, &id, &events).unwrap();
+        write_run(&layout, &id, &repository(), &events).unwrap();
         let summaries = list_runs(&layout).unwrap();
         assert!(summaries[0].partial);
     }
@@ -455,7 +593,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let layout = Layout::with_root(tmp.path().to_path_buf());
         for id in ["r-0001", "r-0002", "r-0003"] {
-            write_run(&layout, &RunId(id.into()), &sample_events(id)).unwrap();
+            write_run(
+                &layout,
+                &RunId(id.into()),
+                &repository(),
+                &sample_events(id),
+            )
+            .unwrap();
         }
         let removed = prune(&layout, Some(2), None).unwrap();
         assert_eq!(removed.len(), 1);
@@ -466,7 +610,13 @@ mod tests {
     fn prune_older_than_zero_removes_everything() {
         let tmp = tempfile::tempdir().unwrap();
         let layout = Layout::with_root(tmp.path().to_path_buf());
-        write_run(&layout, &RunId("r-0001".into()), &sample_events("r-0001")).unwrap();
+        write_run(
+            &layout,
+            &RunId("r-0001".into()),
+            &repository(),
+            &sample_events("r-0001"),
+        )
+        .unwrap();
         let removed = prune(&layout, None, Some(Duration::from_secs(0))).unwrap();
         assert_eq!(removed.len(), 1);
         assert!(list_runs(&layout).unwrap().is_empty());
@@ -535,7 +685,7 @@ mod tests {
     /// as `review` composes [`latest_run_on_branch`] and [`findings_from_events`]
     /// to fill the review context. Absent prior run recalls nothing.
     fn recalled_findings(layout: &Layout, branch: &str) -> Vec<PriorFinding> {
-        latest_run_on_branch(layout, branch)
+        latest_run_on_branch(layout, &repository(), branch)
             .map(|(_, events)| findings_from_events(&events))
             .unwrap_or_default()
     }
@@ -564,6 +714,7 @@ mod tests {
         write_run(
             &layout,
             &RunId("r-old".into()),
+            &repository(),
             &run_with_findings("r-old", "feat/x", "perf", vec![real, synthetic]),
         )
         .unwrap();
@@ -572,6 +723,7 @@ mod tests {
         write_run(
             &layout,
             &RunId("r-other".into()),
+            &repository(),
             &run_with_findings(
                 "r-other",
                 "feat/y",
@@ -617,12 +769,14 @@ mod tests {
         write_run(
             &layout,
             &RunId("r-1".into()),
+            &repository(),
             &run_with_findings("r-1", "feat/x", "perf", vec![finding("old finding")]),
         )
         .unwrap();
         write_run(
             &layout,
             &RunId("r-2".into()),
+            &repository(),
             &run_with_findings("r-2", "feat/x", "perf", vec![finding("new finding")]),
         )
         .unwrap();
@@ -645,6 +799,7 @@ mod tests {
         write_run(
             &layout,
             &RunId("r-samehead".into()),
+            &repository(),
             &run_with_findings(
                 "r-samehead",
                 "feat/x",
@@ -684,25 +839,29 @@ mod tests {
         write_run(
             &layout,
             &RunId("r-1".into()),
+            &repository(),
             &run_with_findings("r-1", "feat/x", "perf", vec![finding("old")]),
         )
         .unwrap();
         write_run(
             &layout,
             &RunId("r-2".into()),
+            &repository(),
             &run_with_findings("r-2", "feat/x", "perf", vec![finding("new")]),
         )
         .unwrap();
         write_run(
             &layout,
             &RunId("r-other".into()),
+            &repository(),
             &run_with_findings("r-other", "feat/y", "perf", vec![finding("elsewhere")]),
         )
         .unwrap();
 
         // The summary and the events are the *same* run, resolved once: the newest
         // run recorded on the branch, most-recent-first tie broken by descending id.
-        let (summary, events) = latest_run_on_branch(&layout, "feat/x").expect("a prior run");
+        let (summary, events) =
+            latest_run_on_branch(&layout, &repository(), "feat/x").expect("a prior run");
         assert_eq!(summary.run, RunId("r-2".into()));
         assert_eq!(summary.branch.as_deref(), Some("feat/x"));
         assert_eq!(
@@ -712,18 +871,31 @@ mod tests {
         assert_eq!(findings_from_events(&events)[0].detail, "new");
 
         // A branch with no run resolves to nothing.
-        assert!(latest_run_on_branch(&layout, "brand-new").is_none());
+        assert!(latest_run_on_branch(&layout, &repository(), "brand-new").is_none());
     }
 
     #[test]
     fn runs_on_branch_lists_matching_runs_newest_first() {
         let tmp = tempfile::tempdir().unwrap();
         let layout = Layout::with_root(tmp.path().to_path_buf());
-        write_run(&layout, &RunId("r-1".into()), &sample_events("r-1")).unwrap();
-        write_run(&layout, &RunId("r-2".into()), &sample_events("r-2")).unwrap();
+        write_run(
+            &layout,
+            &RunId("r-1".into()),
+            &repository(),
+            &sample_events("r-1"),
+        )
+        .unwrap();
+        write_run(
+            &layout,
+            &RunId("r-2".into()),
+            &repository(),
+            &sample_events("r-2"),
+        )
+        .unwrap();
         write_run(
             &layout,
             &RunId("r-other".into()),
+            &repository(),
             &run_with_findings(
                 "r-other",
                 "feat/y",
@@ -739,16 +911,63 @@ mod tests {
         )
         .unwrap();
 
-        let runs = runs_on_branch(&layout, "feat/x");
+        let runs = runs_on_branch(&layout, &repository(), "feat/x");
         let ids: Vec<&str> = runs.iter().map(|(s, _)| s.run.as_str()).collect();
         assert_eq!(ids, ["r-2", "r-1"], "newest first, other branches omitted");
         assert_eq!(
-            latest_run_on_branch(&layout, "feat/x")
+            latest_run_on_branch(&layout, &repository(), "feat/x")
                 .expect("a prior run")
                 .0
                 .run
                 .as_str(),
             "r-2"
         );
+    }
+
+    #[test]
+    fn branch_history_is_scoped_to_the_repository_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = Layout::with_root(tmp.path().to_path_buf());
+        let first_repo = RepositoryId::for_test("first-repository");
+        let second_repo = RepositoryId::for_test("second-repository");
+
+        write_run(
+            &layout,
+            &RunId("r-first".into()),
+            &first_repo,
+            &sample_events("r-first"),
+        )
+        .unwrap();
+        write_run(
+            &layout,
+            &RunId("r-second".into()),
+            &second_repo,
+            &sample_events("r-second"),
+        )
+        .unwrap();
+
+        let first = runs_on_branch(&layout, &first_repo, "feat/x");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].0.run.as_str(), "r-first");
+        let second = runs_on_branch(&layout, &second_repo, "feat/x");
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].0.run.as_str(), "r-second");
+    }
+
+    #[test]
+    fn legacy_runs_without_repository_identity_are_not_reused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = Layout::with_root(tmp.path().to_path_buf());
+        let id = RunId("r-legacy".into());
+        ensure_run_dir(&layout, &id).unwrap();
+        let body = sample_events("r-legacy")
+            .iter()
+            .map(|event| serde_json::to_string(event).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(layout.run_jsonl(&id), body).unwrap();
+
+        assert!(runs_on_branch(&layout, &repository(), "feat/x").is_empty());
+        assert_eq!(read_run(&layout, &id).unwrap().len(), 2);
     }
 }

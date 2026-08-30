@@ -170,10 +170,30 @@ impl<R: CommandRunner> Backend for MuseBackend<R> {
     async fn review(&self, request: &ReviewRequest<'_>) -> Result<ReviewOutcome> {
         let prompt = super::review_prompt(request, SCHEMA_INSTRUCTION);
 
-        // First pass: the full review with the schema instruction appended.
-        let session = self.run_once(&self.spec(request, None, &prompt)).await?;
+        // Continue the prior reviewer's conversation when possible. A persisted
+        // reference is only a hint: CI often restores the run store without the
+        // agent's own session files, so any resume failure starts a fresh session.
+        let (session, resumed) = if let Some(prior) = request.conversation {
+            let mut spec = self.spec(request, Some(prior.id().as_str()), &prompt);
+            spec.conversation_resume();
+            match self.run_once(&spec).await {
+                Ok(session) => (session, true),
+                Err(err) => {
+                    super::log_resume_fallback(request, reviewer::Backend::Muse, &err);
+                    (
+                        self.run_once(&self.spec(request, None, &prompt)).await?,
+                        false,
+                    )
+                }
+            }
+        } else {
+            (
+                self.run_once(&self.spec(request, None, &prompt)).await?,
+                false,
+            )
+        };
         if let Some(verdict) = session.parse_verdict() {
-            return Ok(outcome(verdict, session, None));
+            return Ok(outcome(request, verdict, session, None, None, resumed));
         }
 
         // The agent's final message was not a schema-conforming verdict. Per
@@ -182,12 +202,31 @@ impl<R: CommandRunner> Backend for MuseBackend<R> {
         // new turn is then only the reprompt suffix (the session already holds the
         // review). Without a session id, fall back to a fresh session and re-send
         // the full prompt.
-        let reprompt_text = super::reprompt_text(&prompt, session.session_id.is_some());
-        let retry = self.spec(request, session.session_id.as_deref(), &reprompt_text);
+        let prior_id = if resumed {
+            request.conversation.map(|prior| prior.id().as_str())
+        } else {
+            None
+        };
+        let active_id = session.session_id.as_deref().or(prior_id);
+        let reprompt_text = super::reprompt_text(&prompt, active_id.is_some());
+        let retry = self.spec(request, active_id, &reprompt_text);
         let retry_session = self.run_once(&retry).await?;
 
         match retry_session.parse_verdict() {
-            Some(verdict) => Ok(outcome(verdict, retry_session, Some(&session))),
+            Some(verdict) => {
+                let conversation_id = retry_session
+                    .session_id
+                    .clone()
+                    .or_else(|| active_id.map(str::to_string));
+                Ok(outcome(
+                    request,
+                    verdict,
+                    retry_session,
+                    Some(&session),
+                    conversation_id.as_deref(),
+                    active_id.is_some(),
+                ))
+            }
             None => Err(eyre!(
                 "muse did not emit a schema-conforming verdict after one reprompt; \
                  failing closed. final message was:\n{}",
@@ -202,13 +241,29 @@ impl<R: CommandRunner> Backend for MuseBackend<R> {
 /// Assemble a [`ReviewOutcome`] from a parsed verdict and the session it came from,
 /// optionally prepending an earlier session's transcript (the original review, when
 /// the verdict was recovered on a reprompt). Muse reports no usage in its stream.
-fn outcome(verdict: Verdict, session: MuseSession, prior: Option<&MuseSession>) -> ReviewOutcome {
+fn outcome(
+    request: &ReviewRequest<'_>,
+    verdict: Verdict,
+    session: MuseSession,
+    prior: Option<&MuseSession>,
+    conversation_id: Option<&str>,
+    resumed: bool,
+) -> ReviewOutcome {
+    let conversation_id = conversation_id.or(session.session_id.as_deref());
+    let conversation = super::conversation_ref(
+        request,
+        reviewer::Backend::Muse,
+        conversation_id,
+        resumed,
+        None,
+    );
     let transcript =
         super::stitch_transcript(prior.map(|p| p.transcript.as_str()), session.transcript);
     ReviewOutcome {
         verdict,
         usage: None,
         transcript: Some(transcript),
+        conversation,
     }
 }
 
@@ -419,6 +474,14 @@ mod tests {
         }
     }
 
+    fn failed_output(stderr: &str) -> CommandOutput {
+        CommandOutput {
+            code: Some(1),
+            stdout: String::new(),
+            stderr: stderr.to_string(),
+        }
+    }
+
     /// One `muse exec --json` record on `session`.
     fn record(session: &str, payload_type: &str, payload: serde_json::Value) -> String {
         let record = serde_json::json!({
@@ -477,6 +540,7 @@ mod tests {
             context: crate::context::ReviewContext::empty(),
             purpose: crate::backend::ReviewPurpose::Review,
             native_session_dir: None,
+            conversation: None,
         }
     }
 
@@ -494,6 +558,73 @@ mod tests {
     }
 
     const PASS: &str = "```yaml\nverdict: pass\nsummary: ok\nfindings: []\n```";
+
+    fn prior_conversation(reviewer: &Reviewer) -> crate::conversation::ConversationRef {
+        crate::conversation::ConversationRef::from_backend(
+            reviewer::Backend::Muse,
+            "m-prior",
+            reviewer,
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn continues_a_prior_conversation_with_the_full_review_prompt() {
+        let reviewer = reviewer();
+        let prior = prior_conversation(&reviewer);
+        let backend = MuseBackend::with_program(
+            FakeRunner::new([ok_output(stream("m-current", PASS))]),
+            DEFAULT_PROGRAM,
+        );
+        let run = RunId("r-test".into());
+        let root = PathBuf::from(".");
+        let mut req = request(&reviewer, &run, &root);
+        req.conversation = Some(&prior);
+
+        let outcome = backend.review(&req).await.unwrap();
+        let specs = backend.runner.specs();
+        assert_eq!(
+            specs[0].kind,
+            crate::backend::command::LaunchKind::ConversationResume
+        );
+        let args = args_of(&specs[0]);
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--session-id", "m-prior"])
+        );
+        assert!(prompt_of(&specs[0]).contains("You are reviewing a changeset"));
+        assert_eq!(outcome.conversation.unwrap().id().as_str(), "m-current");
+    }
+
+    #[tokio::test]
+    async fn unavailable_prior_conversation_falls_back_to_a_fresh_review() {
+        let reviewer = reviewer();
+        let prior = prior_conversation(&reviewer);
+        let backend = MuseBackend::with_program(
+            FakeRunner::new([
+                failed_output("session not found"),
+                ok_output(stream("m-fresh", PASS)),
+            ]),
+            DEFAULT_PROGRAM,
+        );
+        let run = RunId("r-test".into());
+        let root = PathBuf::from(".");
+        let mut req = request(&reviewer, &run, &root);
+        req.conversation = Some(&prior);
+
+        let outcome = backend.review(&req).await.unwrap();
+        let specs = backend.runner.specs();
+        assert_eq!(specs.len(), 2);
+        assert_eq!(
+            specs[0].kind,
+            crate::backend::command::LaunchKind::ConversationResume
+        );
+        assert_eq!(specs[1].kind, crate::backend::command::LaunchKind::Review);
+        assert!(!args_of(&specs[1]).iter().any(|arg| arg == "--session-id"));
+        assert_eq!(outcome.conversation.unwrap().id().as_str(), "m-fresh");
+    }
 
     #[tokio::test]
     async fn id_is_muse() {
