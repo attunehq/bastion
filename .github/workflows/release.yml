@@ -164,7 +164,7 @@ jobs:
       # with no C/system dependencies, so a host-side toolchain is all it needs.
       - name: Install cargo-cross
         if: matrix.cross
-        uses: taiki-e/install-action@v2.86.7
+        uses: taiki-e/install-action@v2.87.0
         with:
           tool: cargo-cross
           checksum: true
