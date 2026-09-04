@@ -42,9 +42,9 @@ compiler or a test cannot. The whole system follows from five principles:
    special; it is just another reviewer whose single concern is that property.
 2. **Reviewers run in the author's own loop, not only in CI.** The repository's
    reviewers run locally (fast, pre-PR) and in CI (authoritative), so CI usually
-   confirms a green local loop. The two can differ when CI feeds reviewers the PR's
-   description and discussion that a default local run lacks, and a purely local run
-   can also include your personal user-level reviewers with
+   confirms a green local loop. The two can differ when CI adds PR discussion that
+   a default local run lacks, and a purely local run can also include your personal
+   user-level reviewers with
    `--with-user-reviewers`, which CI never runs (see
    [Authoring reviewers](./authoring-reviewers.md#user-level-reviewers)).
 3. **Humans sit at the policy layer.** The goal is not human-out-of-the-loop. It

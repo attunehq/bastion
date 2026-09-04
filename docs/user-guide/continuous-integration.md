@@ -15,9 +15,9 @@ confirmation: it executes, skips, replays, or carries the reviewers from the rep
 `attestations: true`; carry reuses an unchanged reviewer's pass from the newest
 prior CI run on the branch that resolved that reviewer) and reports one merge gate. Because routing and aggregation are
 shared, CI rarely surprises an
-author who looped locally. It can differ in two ways: CI adds the PR's description and
-discussion that a default local run lacks, and CI runs the repository's reviewers
-only, while a local run can also include your personal user-level reviewers with
+author who looped locally. It can differ in two ways: CI adds PR discussion that a
+default local run lacks, and CI runs the repository's reviewers only, while a local
+run can also include your personal user-level reviewers with
 `--with-user-reviewers` (see
 [Authoring reviewers](./authoring-reviewers.md#user-level-reviewers)). The user-level
 layer is local-only by design, so it can never gate someone else's pull request. This

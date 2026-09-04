@@ -144,10 +144,10 @@ Locally, that aggregate is the exit code of `bastion review`. In CI it is the re
 of the Bastion review job, and `bastion github report` also posts it as a single
 always-present check named `bastion`. Either way the aggregation rule is the same, and
 CI runs the repository's reviewers. The decision matches when both runs see the same
-reviewers and context; two things can make a local run differ: CI can add the PR's
-description and discussion that a default local run does not, and a purely local run
-can include your personal user-level reviewers with `--with-user-reviewers`, which
-CI never runs (see
+reviewers and context; two things can make a local run differ: CI can add PR
+discussion that a default local run does not, and a purely local run can include
+your personal user-level reviewers with `--with-user-reviewers`, which CI never
+runs (see
 [Authoring reviewers](./authoring-reviewers.md#user-level-reviewers)).
 
 ## The backend

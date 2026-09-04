@@ -226,7 +226,7 @@ How an agent should consume it:
 
 If you are an agent driving the loop, this is the whole contract:
 
-1. Run `bastion review --base <branch> --format jsonl`.
+1. Run `bastion review --format jsonl`.
 2. Parse stdout one line at a time as JSON; each line has a `type`.
 3. Act on every `reviewer.resolved` with `verdict: "block"` using its `findings`
    (`path` + `line_start`/`line_end` + `detail`). Do not open transcripts; the
@@ -239,6 +239,10 @@ If you are an agent driving the loop, this is the whole contract:
 6. Fix what blocked and re-run. Stop when `run.completed.verdict` is `pass` (exit
    zero), or after three full invocations, whichever comes first. Then open your
    PR. If you stopped blocked, do not keep paying for another local run.
+
+Without `--base`, Bastion uses `gh` to detect the current PR and selects its direct
+base. If `gh` is unavailable or fails, Bastion warns and uses `main`. Pass `--base
+<branch>` when you need an explicit comparison point.
 
 This contract is exactly what `bastion skills install` checks into your repo as the
 `using-bastion` agent skill, so your agents follow it without being told each time.
