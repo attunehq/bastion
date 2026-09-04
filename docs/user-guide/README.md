@@ -13,8 +13,8 @@ run it, how to write reviewers, and how to wire it into CI and governance. It is
 written for two audiences at once (the human curating the review policy and the
 agent looping against it), because Bastion runs the repository's reviewers and merge
 gate for both through whatever surface is natural to each (CI can add the PR's
-description and discussion to the reviewers' context, and a purely local run can add
-an author's personal user-level reviewers, which CI never sees).
+discussion to the reviewers' context, and a purely local run can add an author's
+personal user-level reviewers, which CI never sees).
 
 This guide is self-contained: everything you need to run Bastion, write reviewers,
 and wire it into CI is here, with nothing essential living elsewhere. If you want to
@@ -83,9 +83,9 @@ A local run uses personal reviewers from a user-level `.bastion.yaml` when a rep
 has not adopted Bastion, or merges them with `--with-user-reviewers`. An
 authoring agent loops `bastion review` to a green gate (the bundled skill stops after three full reviews), then opens a PR where CI
 executes, skips, replays, or carries the repository's reviewers (the user-level ones are local-only).
-CI usually confirms the result, and can differ when it adds the PR's description and
-discussion to the reviewers' context. Humans stay in the loop by owning the reviewer
-registry, not by reading every diff.
+CI usually confirms the result, and can differ when it adds PR discussion to the
+reviewers' context. Humans stay in the loop by owning the reviewer registry, not by
+reading every diff.
 
 ## Status
 

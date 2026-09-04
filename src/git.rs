@@ -279,6 +279,46 @@ pub fn merge_base(cwd: &Path, base: &str) -> Result<String> {
     run_git(cwd, &["merge-base", base, "HEAD"])
 }
 
+/// Resolve `rev` to a commit id, or return `None` when it is absent or is not a
+/// commit.
+#[must_use]
+pub fn commit_hash(cwd: &Path, rev: &str) -> Option<String> {
+    run_git(
+        cwd,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{rev}^{{commit}}"),
+        ],
+    )
+    .ok()
+    .filter(|sha| !sha.is_empty())
+}
+
+/// Whether `ancestor` is reachable from `descendant`.
+///
+/// # Errors
+///
+/// Returns an error when git cannot resolve either revision or cannot run the
+/// ancestry query.
+pub fn is_ancestor(cwd: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
+    let args = ["merge-base", "--is-ancestor", ancestor, descendant];
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .wrap_err("failed to invoke git; is it installed and on PATH?")?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => {
+            finish(&args, output)?;
+            unreachable!("a successful ancestry query has exit status 0")
+        }
+    }
+}
+
 /// The remote-tracking ref a local branch is configured to follow (for example
 /// `origin/main` for `main`), or `None` when `branch` is not a local branch or
 /// has no upstream.
@@ -656,6 +696,26 @@ mod tests {
             "the two commits have different content, so different trees"
         );
         assert!(!head_tree.is_empty());
+    }
+
+    #[test]
+    fn commit_hash_and_is_ancestor_distinguish_the_local_history() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        git(dir, &["init"]);
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        git(dir, &["add", "a.txt"]);
+        git(dir, &["commit", "-m", "base"]);
+        git(dir, &["branch", "base"]);
+        let base = commit_hash(dir, "refs/heads/base").unwrap();
+
+        std::fs::write(dir.join("a.txt"), "two\n").unwrap();
+        git(dir, &["commit", "-am", "child"]);
+        let head = commit_hash(dir, "HEAD").unwrap();
+
+        assert!(is_ancestor(dir, &base, &head).unwrap());
+        assert!(!is_ancestor(dir, &head, &base).unwrap());
+        assert_eq!(commit_hash(dir, "missing"), None);
     }
 
     #[test]

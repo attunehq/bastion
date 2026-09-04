@@ -15,9 +15,9 @@ confirmation: it executes, skips, replays, or carries the reviewers from the rep
 `attestations: true`; carry reuses an unchanged reviewer's pass from the newest
 prior CI run on the branch that resolved that reviewer) and reports one merge gate. Because routing and aggregation are
 shared, CI rarely surprises an
-author who looped locally. It can differ in two ways: CI adds the PR's description and
-discussion that a default local run lacks, and CI runs the repository's reviewers
-only, while a local run can also include your personal user-level reviewers with
+author who looped locally. It can differ in two ways: CI adds PR discussion that a
+default local run lacks, and CI runs the repository's reviewers only, while a local
+run can also include your personal user-level reviewers with
 `--with-user-reviewers` (see
 [Authoring reviewers](./authoring-reviewers.md#user-level-reviewers)). The user-level
 layer is local-only by design, so it can never gate someone else's pull request. This
@@ -157,9 +157,9 @@ The action then, in order:
    incremental carry (an unchanged reviewer reusing its prior pass instead of
    re-executing). The restored metadata also names prior backend conversations.
    Best effort: a first push restores nothing and every reviewer runs fresh.
-4. **Runs `bastion review`**, diffing at the merge base with the PR's base
-   branch and feeding the reviewers the PR's description and discussion via
-   `--repo`/`--pr`.
+4. **Runs `bastion review`**, diffing at the merge base with that PR's direct
+   base and feeding reviewers its description and discussion via `--repo`/`--pr`.
+   Each PR in a native GitHub stack is reviewed as one independent layer.
 5. **Uploads the run as an artifact**, so the next push can restore it and so
    the full transcripts are kept.
 6. **Runs `bastion github report`**, posting the sticky comment and the
@@ -179,9 +179,9 @@ Its inputs, all optional:
 | Input           | Default              | What it does                                                                                              |
 | --------------- | -------------------- | --------------------------------------------------------------------------------------------------------- |
 | `version`       | the action's own ref | The engine release to install: an exact tag or `latest`.                                                  |
-| `github-token`  | the job token        | Restoring run history and gathering PR context (`actions: read`, `pull-requests: read`).                   |
+| `github-token`  | the job token        | Restoring history, authenticating `gh`, and reading REST context (`actions: read`, `pull-requests: read`).   |
 | `report-token`  | `github-token`       | Posting the report; set a dedicated app's minted token here (see below).                                   |
-| `base`          | the PR's base branch | Passed to `bastion review --base`.                                                                         |
+| `base`          | the PR's base branch | Passed explicitly to review. An override wins over automatic PR base detection.                            |
 | `report`        | `true`               | Whether to run `bastion github report` after the review.                                                   |
 | `run-history`   | `true`               | Whether to restore and upload the run store across pushes.                                                 |
 | `artifact-name` | `bastion-run`        | The run artifact's name.                                                                                   |
@@ -308,21 +308,18 @@ jobs:
       - name: Review
         env:
           BASTION_DATA_DIR: ${{ github.workspace }}/.bastion
-          # Lets the reviewers read the PR's description and discussion as context
-          # (read-only, best effort; gathering reads the first 100 conversation comments
-          # and first 100 review comments, no pagination). Omit the --repo/--pr flags
-          # below to review the diff and local context without PR discussion.
+          # Authenticates `gh pr view` and the optional REST discussion requests.
+          # The two comments requests are best effort and read 100 each.
           GITHUB_TOKEN: ${{ github.token }}
         # Non-zero exit on a blocked gate fails the job; that is the merge gate.
-        # --repo/--pr feed the reviewers the PR's stated intent and discussion alongside
-        # the diff. The restore step above and the upload step below persist the run
+        # --repo/--pr select the PR used for automatic base detection and feed its
+        # intent and discussion to reviewers. The restore and upload steps persist the run
         # store between runs, which buys two things a fresh runner would lose: cross-run
         # prior-findings memory, and incremental carry, where an unchanged reviewer
         # reuses its prior pass instead of re-executing. Keep the backend on PATH with no
         # BASTION_*_BIN override, so the run seals clean and stays carry-eligible.
         run: |
-          bastion review --base "origin/${{ github.base_ref }}" \
-            --repo "${{ github.repository }}" \
+          bastion review --repo "${{ github.repository }}" \
             --pr "${{ github.event.pull_request.number }}"
 
       # Optional: mint a token for a dedicated Bastion app so the check runs get

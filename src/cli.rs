@@ -53,21 +53,21 @@ pub struct Cli {
 pub enum Command {
     /// Run the triggered reviewers against the working tree and gate the result.
     Review {
-        /// Base branch the changeset is computed against.
-        #[arg(long, default_value = "main")]
-        base: String,
+        /// Base branch the changeset is computed against. Without this flag,
+        /// Bastion detects the current PR with `gh` and uses its direct base,
+        /// or warns and falls back to `main` when no PR is detected.
+        #[arg(long)]
+        base: Option<String>,
         /// Output format.
         #[arg(long, value_enum, default_value_t = Format::Human)]
         format: Format,
-        /// The `owner/name` repository, used with `--pr` to gather the pull request's
-        /// description and discussion as reviewer context. Defaults to
+        /// The `owner/name` repository containing `--pr`. Defaults to
         /// `$GITHUB_REPOSITORY`.
         #[arg(long, value_name = "OWNER/NAME", env = "GITHUB_REPOSITORY")]
         repo: Option<String>,
-        /// The pull request number. When set (with `--repo`), the reviewers are given
-        /// the PR's description, discussion, and their prior findings as context.
-        /// Absent for a purely local review, which uses only the local context. A PR
-        /// number is positive, so `--pr 0` is rejected at parse time.
+        /// The pull request number. With `--repo`, selects the PR used for
+        /// automatic base detection and reviewer context. A number is positive,
+        /// so `--pr 0` is rejected at parse time.
         #[arg(long, value_name = "N")]
         pr: Option<NonZeroU64>,
         /// Run only this triggered reviewer (repeatable). Names must belong to
@@ -416,13 +416,13 @@ mod tests {
     }
 
     #[test]
-    fn review_defaults_to_human_against_main() {
+    fn review_defaults_to_human_with_automatic_base_selection() {
         let cli = Cli::parse_from(["bastion", "review"]);
         match cli.command {
             // `repo`/`pr` are ignored here: `repo` reads `$GITHUB_REPOSITORY`, which is
             // set under Actions (including Bastion's own CI), so it is not deterministic.
             Command::Review { base, format, .. } => {
-                assert_eq!(base, "main");
+                assert_eq!(base, None);
                 assert_eq!(format, Format::Human);
             }
             other => panic!("expected review, got {other:?}"),
@@ -430,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn review_accepts_a_pull_request_for_context() {
+    fn review_accepts_an_explicit_pull_request() {
         let cli = Cli::parse_from(["bastion", "review", "--repo", "acme/app", "--pr", "42"]);
         match cli.command {
             Command::Review { repo, pr, .. } => {

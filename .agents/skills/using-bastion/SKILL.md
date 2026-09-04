@@ -99,10 +99,14 @@ run you will attest ("Sync with the base branch first", below, has the steps
 and the reason):
 
 ```sh
-bastion review --base <branch> --format jsonl
+bastion review --format jsonl
 ```
 
-- `--base` is the branch you are merging into (default `main`).
+- Without `--base`, Bastion asks `gh` for the current PR and uses its direct
+  base. For A <- B <- C, it reviews C against B, B against A, and A against
+  trunk. If `gh` cannot run, Bastion warns and uses `main` as if it found no PR.
+  Before the PR exists, pass the branch it will target with `--base`.
+- An explicit `--base` always wins when you need to override automatic detection.
 - `--format jsonl` gives you one flushed JSON object per line, including live
   progress as fresh reviewer tasks finish. Always use it: the default human format
   is for a person watching.
@@ -215,11 +219,11 @@ git fetch origin
 git rebase origin/<base>   # or merge it in; get up to date with the base tip
 ```
 
-Then run that final review against the fetched ref (`--base origin/main` rather
-than `--base main`): a local `main` that lags `origin/main` seals a merge base CI
-will not derive, even on an up-to-date branch. Sync first, then review, then
-attest; a rebase or merge moves HEAD, and the note binds to the reviewed HEAD, so
-syncing after the review invalidates the run you meant to attest.
+Then run that final review against the fetched direct-base ref (`--base
+origin/<base>` rather than a local branch name). A local ref that lags its remote
+can seal a merge base CI will not derive. Sync first, then review, then attest; a
+rebase or merge moves HEAD, and the note binds to the reviewed HEAD, so syncing
+after the review invalidates the run you meant to attest.
 
 If the base branch moves again before CI runs and the PR reports an attestation
 fallback naming the base, repeat the sequence: sync, re-run `bastion review`,

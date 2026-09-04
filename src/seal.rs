@@ -90,8 +90,8 @@ pub struct Seal {
     pub patch_id: String,
     /// The effective repo-registry hash at seal time.
     pub config_hash: String,
-    /// Whether any test seam (a `BASTION_*_BIN` backend override, or the
-    /// container-engine override) was active during the run. `bastion attest`
+    /// Whether any test seam (a backend, container-engine, or `gh` executable
+    /// override) was active during the run. `bastion attest`
     /// refuses to attest a sealed run with this set: a run against a stubbed
     /// reviewer exercised the binary, but not a real review.
     pub seams: bool,
@@ -163,6 +163,7 @@ pub fn seams_active_from(lookup: impl Fn(&str) -> bool) -> bool {
         crate::backend::grok::PROGRAM_ENV,
         crate::backend::muse::PROGRAM_ENV,
         crate::backend::container::ENGINE_ENV,
+        crate::github::context::PROGRAM_ENV,
     ]
     .into_iter()
     .any(lookup)
@@ -520,6 +521,9 @@ mod tests {
         ));
         assert!(seams_active_from(
             |name| name == crate::backend::container::ENGINE_ENV
+        ));
+        assert!(seams_active_from(
+            |name| name == crate::github::context::PROGRAM_ENV
         ));
     }
 

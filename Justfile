@@ -20,9 +20,13 @@ check: fmt test clippy nudge
 build:
     cargo build --release
 
-# Run the reviewers triggered by the working tree against a base branch.
-review base="main":
-    cargo run -- review --base {{base}}
+# Run the reviewers triggered by the working tree with automatic PR base selection.
+review:
+    cargo run -- review
+
+# Run the reviewers against an explicit base branch.
+review-base base:
+    cargo run -- review --base {{quote(base)}}
 
 version:
     cargo run -- --version

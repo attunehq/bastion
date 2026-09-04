@@ -405,6 +405,30 @@ impl TestRepo {
         git(self.path(), &["branch", name]);
     }
 
+    /// Create and check out a branch at the current commit.
+    pub(crate) fn checkout_new_branch(&self, name: &str) {
+        git(self.path(), &["checkout", "-b", name]);
+    }
+
+    /// Check out an existing branch.
+    pub(crate) fn checkout(&self, name: &str) {
+        git(self.path(), &["checkout", name]);
+    }
+
+    /// Resolve a revision to its full commit id.
+    pub(crate) fn revision(&self, rev: &str) -> String {
+        let output = Command::new("git")
+            .args(["rev-parse", rev])
+            .current_dir(self.path())
+            .output()
+            .expect("git rev-parse runs");
+        assert!(output.status.success(), "git rev-parse {rev} failed");
+        String::from_utf8(output.stdout)
+            .expect("git revision is UTF-8")
+            .trim()
+            .to_string()
+    }
+
     /// Run `bastion <args>` in this repo with the fake agent wired in for both
     /// backends, this repo's private data directory, and any `extra_env` (which
     /// Bastion inherits and propagates to the agent child).
@@ -467,6 +491,20 @@ impl TestRepo {
 
     pub(crate) fn review(&self, fake: &Path) -> ReviewRun {
         self.review_base(fake, "main", &[])
+    }
+
+    /// Run `bastion review` without an explicit base, allowing its `gh`
+    /// discovery to select the current pull request's direct base.
+    pub(crate) fn review_auto(&self, fake: &Path, extra_env: &[(&str, &str)]) -> ReviewRun {
+        let output = self.run(fake, &["review", "--format", "jsonl"], extra_env);
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        let events = parse_events(&stdout, &stderr);
+        ReviewRun {
+            code: output.status.code(),
+            events,
+            stderr,
+        }
     }
 
     /// Run `bastion review --base main --format jsonl` with extra CLI arguments
@@ -649,6 +687,16 @@ pub(crate) struct ReviewRun {
 impl ReviewRun {
     pub(crate) fn exited_zero(&self) -> bool {
         self.code == Some(0)
+    }
+
+    /// The changed-file count and base recorded by `run.started`.
+    pub(crate) fn started_changeset(&self) -> (u32, &str) {
+        for event in &self.events {
+            if let RunEvent::RunStarted { changed, base, .. } = event {
+                return (*changed, base);
+            }
+        }
+        panic!("no run.started in stream; stderr:\n{}", self.stderr);
     }
 
     /// The aggregate decision and gate tally from the closing `run.completed`.
