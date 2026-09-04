@@ -200,13 +200,20 @@ Make a change in your working tree (you do not need to commit it; Bastion review
 the working tree, including uncommitted and untracked files), then:
 
 ```sh
-bastion review --base main
+bastion review
 ```
 
-Bastion computes the files your branch changed (the diff at the merge base with
-`main`, so changes that landed on `main` itself are never counted), selects the
+Bastion asks `gh` for the current PR and uses its direct base, or `main` when the
+branch has no PR. It computes the files changed from that merge base, selects the
 reviewer candidates, resolves them in parallel, and renders progress plus each
-terminal verdict or agent-trigger skip. A re-run of the same branch may carry an already-passed reviewer's verdict
+terminal verdict or agent-trigger skip.
+
+Automatic PR base selection uses an installed and authenticated GitHub CLI. A
+branch without a PR uses `main`. If `gh` is unavailable or its lookup fails,
+Bastion warns and also uses `main`. Pass `--base <branch>` to select a base
+without `gh`.
+
+A re-run of the same branch may carry an already-passed reviewer's verdict
 forward instead of executing it again; the exact conditions are in
 [the local workflow](./local-workflow.md#re-runs-are-incremental). A reviewer
 that does execute continues its compatible prior agent conversation when the
@@ -215,7 +222,7 @@ review exits non-zero; a clean one exits zero. That exit code is what lets an ag
 (or a shell loop) know whether to keep working:
 
 ```sh
-while ! bastion review --base main; do
+while ! bastion review; do
   # ... fix what blocked, then loop ...
 done
 ```
@@ -226,7 +233,7 @@ An agent driving the loop wants structured events, not rendered text. Ask for
 JSONL: one JSON object per line, emitted as each thing happens:
 
 ```sh
-bastion review --base main --format jsonl
+bastion review --format jsonl
 ```
 
 You will get one typed event per line as the run progresses, ending in a
@@ -292,7 +299,7 @@ runs do not pile up in your real run history. A new data directory has no prior
 runs, so nothing carries and every reviewer executes:
 
 ```sh
-bastion --data-dir /tmp/bastion-scratch review --base main
+bastion --data-dir /tmp/bastion-scratch review
 ```
 
 The same override is available as the `BASTION_DATA_DIR` environment variable.
@@ -329,9 +336,9 @@ The most common first-run snags and what they mean:
 - **No reviewers ran (a trivial pass).** Nothing in your changeset matched any
   reviewer's `trigger`. Confirm you actually changed a file the globs cover, and
   that `--base` points at the right branch.
-- **Everything looks unchanged.** Bastion diffs at the merge base with `--base`
-  (default `main`); if your base branch has a different name, pass it
-  explicitly.
+- **Everything looks unchanged.** Bastion uses an explicit `--base`, the current
+  PR's direct base from `gh`, or `main` when the branch has no PR. Confirm that
+  this selected base is where the branch started.
 
 ---
 

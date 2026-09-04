@@ -12,12 +12,11 @@ order: 5
 The local CLI applies the same reviewers and decisions CI enforces: CI executes them
 fresh, records an agent-trigger skip, replays an attested local outcome, or carries
 an unchanged reviewer from the newest prior CI run on the branch that resolved
-that reviewer. So a green local loop usually means a PR that CI
-confirms. Two things can make a local run differ: CI feeds reviewers the PR's
-description and discussion that a default local run lacks, and a local run can merge
-in personal reviewers with `--with-user-reviewers`, which CI never sees (see
-[Authoring reviewers](./authoring-reviewers.md#user-level-reviewers)). This chapter
-covers the loop in depth.
+that reviewer. So a green local loop usually means a PR that CI confirms. Two
+things can make a local run differ: CI can add the PR's discussion, and a local
+run can merge in personal reviewers with `--with-user-reviewers`, which CI never
+sees (see [Authoring reviewers](./authoring-reviewers.md#user-level-reviewers)).
+This chapter covers the loop in depth.
 
 ## The loop
 
@@ -28,16 +27,19 @@ invocations if the gate is still blocked, because each invocation's launch cap
 resets and an unbounded loop can spend without a stopping point.
 
 ```sh
-bastion review --base main
+bastion review
 ```
 
-`bastion review` computes the changeset (working tree vs. the merge base with
-`--base`, including uncommitted and untracked files, and never including the
-base branch's own changes), selects reviewer candidates, and renders progress plus
-each terminal verdict or agent-trigger skip. Candidates resolve in parallel with
-per-reviewer timeouts, and a re-run is incremental (next section): a reviewer that
-already passed may carry its verdict forward instead of executing again, locally
-and in CI.
+Without an explicit `--base`, `bastion review` asks `gh pr view` for the current
+branch's PR. It uses that PR's direct base commit, or `main` when the branch has
+no PR. If the local parent branch has unpushed commits already included in the
+child, Bastion uses that local parent tip instead of GitHub's older commit. The
+changeset includes uncommitted and untracked files but excludes the base branch's
+own changes. Bastion then selects reviewer candidates and renders
+progress plus each terminal verdict or agent-trigger skip. Candidates resolve in
+parallel with per-reviewer timeouts. A re-run is incremental (next section): a
+reviewer that already passed may carry its verdict forward instead of executing
+again, locally and in CI.
 
 To send native reviewer sessions to a local [Akari](https://github.com/attunehq/akari)
 install, write `akari.yaml` with `enabled: true` in your user config directory
@@ -45,27 +47,30 @@ install, write `akari.yaml` with `enabled: true` in your user config directory
 repository configuration, so a checkout cannot turn it on. `BASTION_AKARI=1`
 enables it without a file. A failed ingest is logged and does not change the
 verdict.
-A CI review (`--repo`/`--pr`)
-against a repository with `attestations: true` first checks for a verified
-attestation covering the run: a reviewer the attestation covers replays its
-recorded terminal verdict or skip outcome, with no backend dispatch and no timeout;
-every other reviewer then resolves the ordinary way, carrying its prior pass if
-its scoped content is unchanged and otherwise executing fresh (see
+
+For a native GitHub stack, automatic base selection reviews one PR layer at a
+time: C against B, B against A, and A against trunk. The checkout may contain
+uncommitted or untracked work. If the repository sets `attestations: true`, CI
+then checks for a verified attestation covering the run. A covered reviewer
+replays its recorded terminal outcome, while every other reviewer carries an
+eligible prior pass or executes fresh (see
 [Attestation](../developer-guide/attestation.md)).
 
 - `--base <branch>`: the branch you are merging into. The changeset is diffed at
   the merge base with it, not at its tip, so the base moving on does not change
-  what is under review. Defaults to `main`. The review fails if no merge base
-  resolves (an unrelated branch, or a shallow clone). When the base is a local
-  branch whose remote-tracking ref would give HEAD a different merge base (a
-  local `main` that lags `origin/main`, say), the review warns on stderr that
+  what is under review. An explicit value always wins. Without one, Bastion asks
+  `gh` for the current PR's direct base and falls back to `main` when no PR exists.
+  Other `gh` failures print a warning before using the same fallback. The review
+  fails if no merge base resolves (an unrelated branch, or a shallow clone). When
+  the base is a local branch whose remote-tracking ref would give HEAD a different
+  merge base (a local `main` that lags `origin/main`, say), the review warns on stderr that
   the changeset may include upstream commits and suggests reviewing against
   `--base` with the tracking ref, or fetching and bringing the local branch up
   to date with it; the check reads only refs already on disk, never fetches,
   and the review proceeds unchanged.
 - `--format <human|jsonl>`: output format. Defaults to `human`.
-- `--repo <owner/name>`: the GitHub repository to gather pull request context from. Defaults to `$GITHUB_REPOSITORY`.
-- `--pr <number>`: the pull request whose description and discussion the reviewers read as context. Requires a repository, from `--repo` or `$GITHUB_REPOSITORY`; passing `--pr` with no repository is an error.
+- `--repo <owner/name>`: the GitHub repository containing the pull request. Defaults to `$GITHUB_REPOSITORY`.
+- `--pr <number>`: select the pull request used for automatic base detection and reviewer context. Requires a repository, from `--repo` or `$GITHUB_REPOSITORY`; passing `--pr` with no repository is an error.
 - `--config-dir <path>`: the user-level config directory to search for personal reviewers (env `BASTION_CONFIG_DIR`). Defaults to your platform config directory (`~/.config/bastion` on Linux, `~/Library/Application Support/bastion` on macOS, `%APPDATA%\bastion` on Windows). Personal reviewers are the fallback when the repository has no reviewer configuration.
 - `--with-user-reviewers`: merge personal reviewers into a repository's configured reviewer set. This applies only to a purely local review; it is rejected when either `--repo` or `--pr` is supplied on the command line, and with `bastion validate FILE`. An ambient `$GITHUB_REPOSITORY` without `--pr` does not conflict or turn a local review into a GitHub-source review.
 - `--include <path>` (repeatable): merge an extra reviewer registry file into the repository registry, like an `include:` entry in the root file except that a relative path resolves against the current directory (see [Splitting the registry across files](./authoring-reviewers.md#splitting-the-registry-across-files)). The extra reviewers become part of the effective repository configuration for the run, so `bastion attest` needs the same `--include` flags to re-derive the same configuration hash.
@@ -152,7 +157,7 @@ passes still carry on the finishing full run. The named reviewer itself
 executes fresh there: a partial run is never sealed, so a repository reviewer's
 pass from the partial cannot carry.
 
-The CI workflow passes `--repo`/`--pr` so reviewers see the PR's stated intent and discussion. Locally you rarely need them: with no PR, intent comes from your branch's commit messages (`base..HEAD`), and each reviewer's prior findings come from the run store. When you do pass them, Bastion builds its GitHub REST client from `GITHUB_TOKEN` and `GITHUB_API_URL` (the latter defaults to the public API and points at a GitHub Enterprise host when set). Discussion gathering reads the first 100 conversation comments and the first 100 review comments and does not paginate, so later comments on a very long thread are not included. Gathering PR context is read-only and best effort, so an API or token failure never fails the review; it just drops back to the local context.
+The CI workflow passes `--repo`/`--pr` to select the PR and give reviewers its stated intent and discussion. Locally, `gh pr view` detects the current branch's PR without those flags and uses your existing `gh` authentication. If you pass `--repo`/`--pr`, Bastion also accepts the Actions REST client as a compatibility fallback. If neither source is available, it warns and continues without PR context. With `GITHUB_TOKEN` available, it reads the first 100 conversation comments and the first 100 review comments. Those discussion requests are best effort and do not paginate. With no detected PR, intent comes from your branch's commit messages (`base..HEAD`). Each reviewer's prior findings come from the run store.
 
 ### Exit codes
 
@@ -165,7 +170,7 @@ The exit code *is* the gate, so a loop can branch on it:
 
 ```sh
 # Keep working until every gate is green.
-until bastion review --base main; do
+until bastion review; do
   echo "still blocked; fixing..."
   # ... make changes ...
 done
@@ -400,8 +405,9 @@ every reviewer:
 ```sh
 git commit -am "final change"        # attest needs a review over committed content
 git fetch origin
-git rebase origin/main               # or merge; get up to date with the base tip
-bastion review --base origin/main    # ends green
+base="$(gh pr view --json baseRefName --jq .baseRefName)"
+git rebase "origin/$base"            # or merge; get up to date with the direct base
+bastion review --base "origin/$base" # ends green
 bastion attest                       # signs the run that just finished
 git push origin refs/notes/bastion
 ```
@@ -412,8 +418,8 @@ the PR's base branch, the diff's patch id, and HEAD's tree from its own checkout
 and replays only when all of them match what the run sealed. A review against a
 stale view of the base seals a merge base CI will not derive, so CI refuses the
 note and runs every reviewer fresh, the duplicate spend attestation exists to
-avoid. Diff against `origin/main` after fetching rather than a local `main` ref,
-which can lag it. And sync before the review, not after: a rebase or merge moves
+avoid. Diff against the fetched direct-base ref rather than a local branch, which
+can lag its remote. And sync before the review, not after: a rebase or merge moves
 HEAD, and the note binds to the reviewed HEAD. If the base moves again before CI
 runs and the PR reports an attestation fallback, repeat the sequence, and expect
 it to be cheap: a rebase moves the merge base but not your changeset, so every

@@ -63,6 +63,24 @@ fn fail(reason: &str) -> ! {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("pr")
+        && args.get(2).map(String::as_str) == Some("view")
+    {
+        if std::env::var_os("FAKE_GH_FAILURE").is_some() {
+            eprintln!("authentication required");
+            std::process::exit(1);
+        }
+        if std::env::var_os("FAKE_GH_NO_PR").is_some() {
+            eprintln!("no pull requests found for branch \"feature\"");
+            std::process::exit(1);
+        }
+        println!(
+            "{}",
+            std::env::var("FAKE_GH_PR_JSON")
+                .expect("fake gh: FAKE_GH_PR_JSON must contain the PR response")
+        );
+        return;
+    }
     let is_codex = has(&args, "exec");
     // Pi is driven in print mode with `--mode json`; neither Codex nor Claude uses
     // `--mode`, so it is the unambiguous discriminator.

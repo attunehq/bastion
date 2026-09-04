@@ -69,9 +69,10 @@ Common commands while developing:
 
 ```sh
 cargo run -- --version
-cargo run -- review --base main
-cargo run -- review --base main --format jsonl
-just review main            # the same review, via the Justfile
+cargo run -- review
+cargo run -- review --format jsonl
+just review                 # the same review, via the Justfile
+just review-base main       # override automatic base selection
 just version
 ```
 

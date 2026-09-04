@@ -1,11 +1,13 @@
-//! The GitHub adapter (the CI surface).
+//! The GitHub adapter.
 //!
 //! The core review surface (`src/runner.rs`, `src/verdict.rs`, ...) is
-//! forge-agnostic; this module is the concrete GitHub binding described in
-//! `docs/developer-guide/github-adapter.md`. It does two things:
+//! forge-agnostic; this module is the concrete GitHub binding used by local PR
+//! detection and the CI surface. It does three things:
 //!
 //! - [`codeowners`] generates the governance block that protects the reviewer
 //!   policy paths (pure text generation, no network).
+//! - [`context`] detects a pull request with `gh`, supplies its direct base for
+//!   automatic changeset selection, and gathers reviewer context;
 //! - [`report`] posts a finished run back to a pull request as a sticky comment
 //!   and per-reviewer check runs, over the REST seam in [`client`].
 //!

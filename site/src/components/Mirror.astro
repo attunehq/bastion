@@ -22,7 +22,7 @@ import SectionHeading from "./SectionHeading.astro";
           the working tree, exactly as CI would, and loops until green.
         </p>
         <pre class="term"><code><span class="term-com"># fix what blocked, then run again</span>
-<span class="term-prompt">$</span> <span class="term-cmd">while ! bastion review --base main; do</span>
+<span class="term-prompt">$</span> <span class="term-cmd">while ! bastion review; do</span>
 <span class="term-prompt"> </span>   <span class="term-cmd">agent fixes the blocking findings</span>
 <span class="term-prompt">$</span> <span class="term-cmd">done</span>
 <span class="term-out term-out--pass">all gates pass &middot; ready to open a PR</span></code></pre>

@@ -2,10 +2,13 @@
 //!
 //! This is the GitHub *producer* for the transport-neutral
 //! [`ReviewContext`](crate::context::ReviewContext): it reads
-//! a PR's description and its discussion over the same REST seam the reporting half
-//! uses, and maps them onto the generic shape the runner and backends consume. It
-//! converts each GitHub-specific field here so none reaches the core:
+//! a PR's identity and description through `gh`, with the Actions REST client as
+//! a compatibility fallback for explicitly selected PRs. It also reads discussion
+//! through the REST seam. The module maps GitHub fields onto the generic shape the
+//! runner and backends consume:
 //!
+//! - the PR's direct base supplies the automatic changeset base when the user did
+//!   not pass `--base`;
 //! - a non-empty PR `body` becomes the [`ReviewContext::intent`](crate::context::ReviewContext::intent)
 //!   (an empty body supplies none, so the local commit-message intent stands);
 //! - each human comment becomes a [`ContextComment`], with GitHub's `author_association`
@@ -26,8 +29,9 @@
 //! [`crate::context`].
 
 use std::num::NonZeroU64;
+use std::path::Path;
 
-use color_eyre::eyre::{Context, Result};
+use color_eyre::eyre::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::context::{ContextComment, FindingId, Standing};
@@ -45,64 +49,220 @@ const FINDING_MARKER_PREFIX: &str = "<!-- bastion-finding:";
 /// own past output as if it were human discussion.
 const BASTION_MARKER_PREFIX: &str = "<!-- bastion";
 
-/// The intent and discussion gathered for a pull request, ready to merge into a
-/// [`ReviewContext`](crate::context::ReviewContext).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct GatheredContext {
+/// Test seam for the GitHub CLI executable. Production resolves `gh` from
+/// `PATH`; integration tests point this at their compiled fake.
+pub(crate) const PROGRAM_ENV: &str = "BASTION_GH_BIN";
+
+/// The fields one `gh pr view` call needs for target selection, intent, and
+/// attestation identity.
+const GH_PR_FIELDS: &str = "body,author,headRefOid,baseRefName,baseRefOid";
+
+/// The identity and author intent of the pull request under review.
+///
+/// The head and base revisions are required and non-empty. The direct base
+/// defines the automatic comparison point when the user did not pass `--base`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PullRequest {
     /// The PR description, as the author's stated intent. `None` for an empty body.
-    pub intent: Option<String>,
-    /// The human discussion: top-level PR comments and inline review comments, with
-    /// Bastion's own comments removed.
-    pub comments: Vec<ContextComment>,
+    intent: Option<String>,
     /// The PR author's GitHub login, when the response carried one. This is the
     /// attestation signature's principal (`docs/developer-guide/attestation.md`,
     /// "Signing") and the key for the signing-key lookup
     /// ([`super::signing::ssh_signing_keys`]); a login the API omits (a deleted account) leaves
     /// attestation with nothing to verify against, so the caller falls back.
-    pub author_login: Option<String>,
-    /// The PR's head commit SHA, when the response carried one. CI's checkout can
-    /// be a merge commit while the attestation note hangs off this commit, so a
-    /// caller retries the note lookup here when `HEAD` carries none.
-    pub head_sha: Option<String>,
+    author_login: Option<String>,
+    /// The exact head commit GitHub records for the PR.
+    head_sha: String,
+    /// The PR's direct target branch, such as `main` or the preceding branch in a
+    /// stack.
+    base_ref: String,
+    /// The exact target-branch commit GitHub records for the PR.
+    base_sha: String,
 }
 
-/// Gather a pull request's intent and discussion over `api`.
+impl PullRequest {
+    /// The PR description, if non-empty.
+    #[must_use]
+    pub(crate) fn intent(&self) -> Option<&str> {
+        self.intent.as_deref()
+    }
+
+    /// The PR author's GitHub login, when GitHub supplied one.
+    #[must_use]
+    pub(crate) fn author_login(&self) -> Option<&str> {
+        self.author_login.as_deref()
+    }
+
+    /// The exact head commit GitHub records for the PR.
+    #[must_use]
+    pub(crate) fn head_sha(&self) -> &str {
+        &self.head_sha
+    }
+
+    /// The PR's direct target branch.
+    #[must_use]
+    pub(crate) fn base_ref(&self) -> &str {
+        &self.base_ref
+    }
+
+    /// The exact target-branch commit GitHub records for the PR.
+    #[must_use]
+    pub(crate) fn base_sha(&self) -> &str {
+        &self.base_sha
+    }
+}
+
+/// Ask `gh` for the pull request associated with the current branch.
 ///
-/// Reads the PR body, its issue (conversation) comments, and its review (inline)
-/// comments, filters out Bastion's own, and normalizes the rest. Best effort by
-/// contract: the caller treats any error as "no GitHub context" and proceeds with the
-/// local context alone, so a flaky API never fails a review.
+/// A branch with no pull request returns `Ok(None)`. Other failures, including a
+/// missing or unauthenticated `gh`, remain distinguishable so the caller can warn
+/// before using the ordinary local fallback.
+///
+/// # Errors
+///
+/// Returns an error if `gh` cannot run, its request fails for a reason other than
+/// a missing current-branch pull request, or its JSON output is malformed.
+pub(crate) async fn detect_pull_request(cwd: &Path) -> Result<Option<PullRequest>> {
+    gh_pull_request(cwd, None, true).await
+}
+
+/// Ask `gh` for one explicitly selected pull request.
+///
+/// # Errors
+///
+/// Returns an error if `gh` cannot run, rejects the request, or emits malformed
+/// JSON.
+pub(crate) async fn get_pull_request_with_gh(
+    cwd: &Path,
+    repository: &str,
+    pr: u64,
+) -> Result<PullRequest> {
+    gh_pull_request(cwd, Some((repository, pr)), false)
+        .await?
+        .ok_or_else(|| color_eyre::eyre::eyre!("gh returned no pull request"))
+}
+
+async fn gh_pull_request(
+    cwd: &Path,
+    selected: Option<(&str, u64)>,
+    no_pr_is_none: bool,
+) -> Result<Option<PullRequest>> {
+    let program = std::env::var_os(PROGRAM_ENV).unwrap_or_else(|| "gh".into());
+    let mut command = tokio::process::Command::new(&program);
+    command.args(["pr", "view"]);
+    if let Some((repository, pr)) = selected {
+        command.arg(pr.to_string()).args(["--repo", repository]);
+    }
+    let output = command
+        .args(["--json", GH_PR_FIELDS])
+        .current_dir(cwd)
+        .kill_on_drop(true)
+        .output()
+        .await
+        .wrap_err_with(|| {
+            format!(
+                "running '{}' to detect the pull request",
+                program.to_string_lossy()
+            )
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if no_pr_is_none && stderr.contains("no pull requests found for branch") {
+            return Ok(None);
+        }
+        bail!("`gh pr view` failed: {}", stderr.trim());
+    }
+
+    let raw: GhPullRequest =
+        serde_json::from_slice(&output.stdout).wrap_err("parsing the output of `gh pr view`")?;
+    Ok(Some(raw.parse()?))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhPullRequest {
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    author: Option<User>,
+    head_ref_oid: String,
+    base_ref_name: String,
+    base_ref_oid: String,
+}
+
+impl GhPullRequest {
+    fn parse(self) -> Result<PullRequest> {
+        let intent = self
+            .body
+            .map(|body| body.trim().to_string())
+            .filter(|body| !body.is_empty());
+        Ok(PullRequest {
+            intent,
+            author_login: self.author.and_then(|author| author.login),
+            head_sha: non_empty_field(self.head_ref_oid, "headRefOid")?,
+            base_ref: non_empty_field(self.base_ref_name, "baseRefName")?,
+            base_sha: non_empty_field(self.base_ref_oid, "baseRefOid")?,
+        })
+    }
+}
+
+/// Gather the identity and author intent of one pull request over `api`.
+///
+/// This is the Actions REST compatibility path when `gh` is unavailable. The
+/// returned [`PullRequest`] carries non-empty head and base revisions.
 ///
 /// # Errors
 ///
 /// Returns an error if a request cannot be sent, returns a non-2xx status, or returns a
-/// body that does not parse as the expected shape.
-pub async fn gather<A: GitHubApi + ?Sized>(
+/// body without the required pull-request identity fields.
+pub(crate) async fn get_pull_request<A: GitHubApi + ?Sized>(
     api: &A,
     owner: &str,
     repo: &str,
     pr: u64,
-) -> Result<GatheredContext> {
-    // The three reads are independent, so drive them concurrently: one round-trip's
-    // latency instead of three in series. try_join! short-circuits on the first error,
-    // preserving the fail-on-any-error contract. The requests are bound first so they
-    // outlive the borrows the join holds across its awaits.
+) -> Result<PullRequest> {
     let pull_req = pull_request_request(owner, repo, pr);
-    let issue_req = issue_comments_request(owner, repo, pr);
-    let review_req = review_comments_request(owner, repo, pr);
-    let (pull, issue_comments, review_comments): (PullRequest, Vec<RawComment>, Vec<RawComment>) =
-        tokio::try_join!(
-            get_json(api, &pull_req),
-            get_json(api, &issue_req),
-            get_json(api, &review_req),
-        )?;
-
+    let pull: RawPullRequest = get_json(api, &pull_req).await?;
     let intent = pull
         .body
         .map(|body| body.trim().to_string())
         .filter(|body| !body.is_empty());
     let author_login = pull.user.and_then(|u| u.login);
-    let head_sha = pull.head.map(|h| h.sha);
+    let head_sha = non_empty_field(pull.head.sha, "head.sha")?;
+    let base_ref = non_empty_field(pull.base.name, "base.ref")?;
+    let base_sha = non_empty_field(pull.base.sha, "base.sha")?;
+
+    Ok(PullRequest {
+        intent,
+        author_login,
+        head_sha,
+        base_ref,
+        base_sha,
+    })
+}
+
+/// Gather a pull request's human discussion over `api`.
+///
+/// Reads top-level conversation comments and inline review comments, filters out
+/// Bastion's own comments, and normalizes the rest. This context is advisory: the
+/// review command logs a failure and continues after the required pull-request
+/// identity has resolved.
+///
+/// # Errors
+///
+/// Returns an error if either request cannot be sent, returns a non-2xx status,
+/// or returns a body that does not parse as a comment list.
+pub(crate) async fn gather_discussion<A: GitHubApi + ?Sized>(
+    api: &A,
+    owner: &str,
+    repo: &str,
+    pr: u64,
+) -> Result<Vec<ContextComment>> {
+    let issue_req = issue_comments_request(owner, repo, pr);
+    let review_req = review_comments_request(owner, repo, pr);
+    let (issue_comments, review_comments): (Vec<RawComment>, Vec<RawComment>) =
+        tokio::try_join!(get_json(api, &issue_req), get_json(api, &review_req))?;
 
     let mut comments = Vec::new();
 
@@ -131,12 +291,14 @@ pub async fn gather<A: GitHubApi + ?Sized>(
         }
     }
 
-    Ok(GatheredContext {
-        intent,
-        comments,
-        author_login,
-        head_sha,
-    })
+    Ok(comments)
+}
+
+fn non_empty_field(value: String, field: &str) -> Result<String> {
+    if value.is_empty() {
+        bail!("GitHub's pull-request response has an empty `{field}` field");
+    }
+    Ok(value)
 }
 
 /// Map GitHub's `author_association` onto the generic [`Standing`].
@@ -214,18 +376,21 @@ where
 /// author login and head SHA ride the same response rather than a duplicate
 /// request.
 #[derive(Debug, Deserialize)]
-struct PullRequest {
+struct RawPullRequest {
     #[serde(default)]
     body: Option<String>,
     #[serde(default)]
     user: Option<User>,
-    #[serde(default)]
-    head: Option<PullRequestHead>,
+    head: RawPullRequestRef,
+    base: RawPullRequestRef,
 }
 
-/// The slice of a pull request's `head` Bastion reads: just the commit SHA.
+/// The slice of a pull request's `head` or `base` that identifies a branch and
+/// its current commit.
 #[derive(Debug, Deserialize)]
-struct PullRequestHead {
+struct RawPullRequestRef {
+    #[serde(rename = "ref")]
+    name: String,
     sha: String,
 }
 
@@ -305,10 +470,37 @@ mod tests {
         })
     }
 
+    fn pull(body: &str) -> serde_json::Value {
+        serde_json::json!({
+            "body": body,
+            "head": { "ref": "feature", "sha": "head123" },
+            "base": { "ref": "main", "sha": "base123" },
+        })
+    }
+
+    #[test]
+    fn gh_pull_request_fields_parse_into_the_review_target() {
+        let raw: GhPullRequest = serde_json::from_value(serde_json::json!({
+            "body": "  stack layer  ",
+            "author": { "login": "ada" },
+            "headRefOid": "head123",
+            "baseRefName": "feature-a",
+            "baseRefOid": "base123"
+        }))
+        .unwrap();
+        let pull = raw.parse().unwrap();
+
+        assert_eq!(pull.intent(), Some("stack layer"));
+        assert_eq!(pull.author_login(), Some("ada"));
+        assert_eq!(pull.head_sha(), "head123");
+        assert_eq!(pull.base_ref(), "feature-a");
+        assert_eq!(pull.base_sha(), "base123");
+    }
+
     #[tokio::test]
     async fn gathers_intent_and_filters_bastions_own_comment() {
         let client = responder(
-            serde_json::json!({ "body": "## Why\nDeliberate schema nuke." }),
+            pull("## Why\nDeliberate schema nuke."),
             serde_json::json!([
                 { "id": 1, "body": "Looks good to me.", "user": { "login": "grace" }, "author_association": "OWNER" },
                 { "id": 2, "body": "<!-- bastion-report -->\n## Bastion review\nBlocked.", "user": { "login": "github-actions[bot]" }, "author_association": "NONE" },
@@ -317,23 +509,25 @@ mod tests {
             serde_json::json!([]),
         );
 
-        let gathered = gather(&client, "acme", "app", 7).await.expect("gathers");
-        assert_eq!(
-            gathered.intent.as_deref(),
-            Some("## Why\nDeliberate schema nuke.")
-        );
+        let pull = get_pull_request(&client, "acme", "app", 7)
+            .await
+            .expect("gathers pull request");
+        let comments = gather_discussion(&client, "acme", "app", 7)
+            .await
+            .expect("gathers discussion");
+        assert_eq!(pull.intent(), Some("## Why\nDeliberate schema nuke."));
         // Bastion's own sticky comment and the whitespace-only comment are dropped;
         // only the human owner comment survives.
-        assert_eq!(gathered.comments.len(), 1);
-        assert_eq!(gathered.comments[0].author.as_deref(), Some("grace"));
-        assert_eq!(gathered.comments[0].standing, Standing::Owner);
-        assert_eq!(gathered.comments[0].in_reply_to, None);
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].author.as_deref(), Some("grace"));
+        assert_eq!(comments[0].standing, Standing::Owner);
+        assert_eq!(comments[0].in_reply_to, None);
     }
 
     #[tokio::test]
     async fn maps_author_association_to_standing() {
         let client = responder(
-            serde_json::json!({ "body": "" }),
+            pull(""),
             serde_json::json!([
                 { "id": 1, "body": "owner", "user": { "login": "a" }, "author_association": "OWNER" },
                 { "id": 2, "body": "member", "user": { "login": "b" }, "author_association": "MEMBER" },
@@ -344,23 +538,16 @@ mod tests {
             ]),
             serde_json::json!([]),
         );
-        let gathered = gather(&client, "o", "r", 1).await.expect("gathers");
-        let standing = |body: &str| {
-            gathered
-                .comments
-                .iter()
-                .find(|c| c.body == body)
-                .unwrap()
-                .standing
-        };
+        let comments = gather_discussion(&client, "o", "r", 1)
+            .await
+            .expect("gathers discussion");
+        let standing = |body: &str| comments.iter().find(|c| c.body == body).unwrap().standing;
         assert_eq!(standing("owner"), Standing::Owner);
         assert_eq!(standing("member"), Standing::Member);
         assert_eq!(standing("collab"), Standing::Member);
         assert_eq!(standing("contrib"), Standing::Contributor);
         assert_eq!(standing("none"), Standing::Outsider);
         assert_eq!(standing("weird"), Standing::Outsider);
-        // An empty PR body yields no intent.
-        assert_eq!(gathered.intent, None);
     }
 
     #[tokio::test]
@@ -369,7 +556,7 @@ mod tests {
         // reply onto it (in_reply_to_id 100). The reply must route to that FindingId; the
         // Bastion root itself is filtered out of the discussion.
         let client = responder(
-            serde_json::json!({ "body": "intent" }),
+            pull("intent"),
             serde_json::json!([]),
             serde_json::json!([
                 {
@@ -387,10 +574,12 @@ mod tests {
                 }
             ]),
         );
-        let gathered = gather(&client, "o", "r", 1).await.expect("gathers");
+        let comments = gather_discussion(&client, "o", "r", 1)
+            .await
+            .expect("gathers discussion");
         // Only the human reply survives; it is routed to the finding id from the marker.
-        assert_eq!(gathered.comments.len(), 1);
-        let reply = &gathered.comments[0];
+        assert_eq!(comments.len(), 1);
+        let reply = &comments[0];
         assert_eq!(reply.author.as_deref(), Some("ada"));
         assert_eq!(
             reply.in_reply_to.as_ref().map(FindingId::as_str),
@@ -403,16 +592,18 @@ mod tests {
         // A human review-comment thread (no Bastion marker on the root) carries no
         // routing: both comments are general discussion.
         let client = responder(
-            serde_json::json!({ "body": "intent" }),
+            pull("intent"),
             serde_json::json!([]),
             serde_json::json!([
                 { "id": 1, "body": "what about this?", "user": { "login": "ada" }, "author_association": "CONTRIBUTOR" },
                 { "id": 2, "in_reply_to_id": 1, "body": "good point", "user": { "login": "grace" }, "author_association": "OWNER" }
             ]),
         );
-        let gathered = gather(&client, "o", "r", 1).await.expect("gathers");
-        assert_eq!(gathered.comments.len(), 2);
-        assert!(gathered.comments.iter().all(|c| c.in_reply_to.is_none()));
+        let comments = gather_discussion(&client, "o", "r", 1)
+            .await
+            .expect("gathers discussion");
+        assert_eq!(comments.len(), 2);
+        assert!(comments.iter().all(|c| c.in_reply_to.is_none()));
     }
 
     #[tokio::test]
@@ -421,7 +612,7 @@ mod tests {
             status: 404,
             body: serde_json::json!({ "message": "Not Found" }),
         });
-        let err = gather(&client, "o", "r", 1).await.unwrap_err();
+        let err = get_pull_request(&client, "o", "r", 1).await.unwrap_err();
         assert!(err.to_string().contains("404"));
     }
 
@@ -455,14 +646,19 @@ mod tests {
             serde_json::json!({
                 "body": "intent",
                 "user": { "login": "ada" },
-                "head": { "sha": "abc123deadbeef" },
+                "head": { "ref": "feature", "sha": "abc123deadbeef" },
+                "base": { "ref": "parent", "sha": "def456deadbeef" },
             }),
             serde_json::json!([]),
             serde_json::json!([]),
         );
-        let gathered = gather(&client, "acme", "app", 1).await.expect("gathers");
-        assert_eq!(gathered.author_login.as_deref(), Some("ada"));
-        assert_eq!(gathered.head_sha.as_deref(), Some("abc123deadbeef"));
+        let pull = get_pull_request(&client, "acme", "app", 1)
+            .await
+            .expect("gathers pull request");
+        assert_eq!(pull.author_login(), Some("ada"));
+        assert_eq!(pull.head_sha(), "abc123deadbeef");
+        assert_eq!(pull.base_ref(), "parent");
+        assert_eq!(pull.base_sha(), "def456deadbeef");
 
         // Exactly one request reached the pull-request endpoint: no duplicate GET
         // for the author or head SHA.
@@ -475,14 +671,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_author_and_head_fields_degrade_to_none() {
-        let client = responder(
-            serde_json::json!({ "body": "" }),
+    async fn a_missing_author_is_allowed_but_missing_revisions_are_rejected() {
+        let client = responder(pull(""), serde_json::json!([]), serde_json::json!([]));
+        let pull = get_pull_request(&client, "o", "r", 1)
+            .await
+            .expect("required revisions are present");
+        assert_eq!(pull.author_login(), None);
+        assert_eq!(pull.intent(), None);
+
+        let missing = responder(
+            serde_json::json!({ "body": "", "head": { "ref": "feature", "sha": "head" } }),
             serde_json::json!([]),
             serde_json::json!([]),
         );
-        let gathered = gather(&client, "o", "r", 1).await.expect("gathers");
-        assert_eq!(gathered.author_login, None);
-        assert_eq!(gathered.head_sha, None);
+        let err = get_pull_request(&missing, "o", "r", 1).await.unwrap_err();
+        assert!(format!("{err:#}").contains("base"), "got: {err:#}");
+
+        let empty = responder(
+            serde_json::json!({
+                "body": "",
+                "head": { "ref": "feature", "sha": "" },
+                "base": { "ref": "main", "sha": "base" }
+            }),
+            serde_json::json!([]),
+            serde_json::json!([]),
+        );
+        let err = get_pull_request(&empty, "o", "r", 1).await.unwrap_err();
+        assert!(format!("{err:#}").contains("head.sha"), "got: {err:#}");
     }
 }

@@ -45,8 +45,8 @@ inputs:
   github-token:
     description: >-
       Token for everything except posting the report: resolving and restoring
-      the branch's prior run artifact (`actions: read`) and gathering the PR's
-      description and discussion as reviewer context (`pull-requests: read`).
+      the branch's prior run artifact (`actions: read`), authenticating `gh`,
+      and reading PR discussion through REST (`pull-requests: read`).
       The default job token works.
     required: false
     default: ${{ github.token }}
@@ -62,7 +62,8 @@ inputs:
   base:
     description: >-
       The base to diff against, passed to `bastion review --base`. Defaults to
-      `origin/<the PR's base branch>`.
+      `origin/<the PR's base branch>`. An override takes precedence over
+      automatic PR base detection.
     required: false
     default: ""
   report:
@@ -248,9 +249,8 @@ runs:
         # Keep run history inside the workspace so it can be uploaded as an
         # artifact instead of landing in the runner's per-user data directory.
         BASTION_DATA_DIR: ${{ github.workspace }}/.bastion
-        # Lets the review gather the PR's description and discussion as
-        # reviewer context (read-only; best effort, so a failure here never
-        # fails the review).
+        # Authenticates `gh pr view` and the optional REST discussion requests.
+        # The packaged action passes the PR's direct base explicitly below.
         GITHUB_TOKEN: ${{ inputs.github-token }}
         INPUT_BASE: ${{ inputs.base }}
         BASE_REF: ${{ github.base_ref }}

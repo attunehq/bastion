@@ -24,9 +24,12 @@ The guiding rule is the same as the core: Bastion does not own CI, it plugs into
 
 Bastion runs as a GitHub Actions workflow triggered on pull request events: `opened`, `synchronize` (a new push to the PR), and `reopened`. On each event the adapter:
 
-1. Computes the changed file set for the PR.
+1. Computes the changed file set from the merge base with the PR's direct base.
+   The packaged action passes that base explicitly from the workflow event. A
+   local run without `--base` discovers the same value through `gh pr view`.
+   For a native stack A <- B <- C, each review covers one layer.
 2. Routes candidates: applies path triggers and agent-trigger path prefilters to the changed files.
-3. Gathers the PR's [review context](./design.md#review-context): `bastion review --repo OWNER/NAME --pr N` reads the PR description and discussion over the REST seam ([`src/github/context.rs`](../../src/github/context.rs)) and hands the reviewers that context alongside their prior findings. Best effort: if the API call fails, the review proceeds on the local context (commit messages and prior findings) alone.
+3. Gathers the PR's [review context](./design.md#review-context): `bastion review --repo OWNER/NAME --pr N` reads the PR identity and description through `gh`, with the Actions REST client as a compatibility fallback, then hands the reviewers that context alongside their prior findings. Discussion comes from the REST seam ([`src/github/context.rs`](../../src/github/context.rs)) when a token is available and remains best effort.
 4. Resolves each selected candidate in parallel (see the core design's _Aggregation & the merge gate_). An agent trigger may record a skip before the full reviewer runs. A candidate covered by a verified attestation is reconstructed from the attested bundle without dispatching its backend; a reviewer whose trigger-scoped content is unchanged since the newest prior run on the branch that resolved that reviewer carries that prior pass, also without a backend; every other selected reviewer executes through its backend fresh. See [Verification and replay](#verification-and-replay).
 5. Reports each verdict back to the PR.
 
@@ -84,6 +87,8 @@ The comment also folds in a **skills-freshness advisory** when the checked-out r
 ## Verification and replay
 
 A repository can opt in (`attestations: true` in its registry) to let CI reuse a signed local run instead of re-executing every reviewer; see [Attestation](./attestation.md) for the full design. On the GitHub adapter this happens inside `bastion review` itself, before the runner fans reviewers out, so it is invisible as a separate step, only as which reviewers end up replayed, carried, or executed.
+
+**Base selection.** An explicit `--base` always wins. Without one, Bastion uses the direct base commit returned by `gh pr view`. If the command finds no PR or the lookup fails, Bastion uses `main`; a failed lookup also prints a warning. This automatic selection applies to native GitHub stacks, whose PRs target the branch immediately below them.
 
 **Dirty-checkout fallback.** Before any note lookup, `bastion review` checks whether the CI working tree is dirty (uncommitted tracked changes or untracked files). A dirty checkout skips note lookup entirely: it records a `run.attestation-fallback` event with the reason, and its reviewers then resolve through the ordinary carry-or-execute path, since a dirty tree's reviewers see content no attestation's committed bindings name.
 

@@ -9,6 +9,129 @@ use crate::fixtures::*;
 use bastion::store;
 use bastion::verdict::Decision;
 
+/// Without an explicit base, each branch in a native GitHub PR stack discovers
+/// its own direct base through `gh`. Reviewing C sees only C, reviewing B sees
+/// only B, and reviewing A sees only A.
+#[test]
+fn stacked_pull_requests_are_reviewed_as_independent_changesets() {
+    let Some(fake) = tooling() else { return };
+
+    let repo = TestRepo::new(&registry(&[Reviewer::new("stack", "codex", "gate")
+        .behavior("pass")
+        .trigger("stack/**")]));
+    repo.commit_all("fixture base");
+
+    repo.checkout_new_branch("stack-a");
+    std::fs::create_dir(repo.path().join("stack")).unwrap();
+    std::fs::write(repo.path().join("stack/a.txt"), "A\n").unwrap();
+    repo.commit_all("A");
+
+    repo.checkout_new_branch("stack-b");
+    std::fs::write(repo.path().join("stack/b.txt"), "B\n").unwrap();
+    repo.commit_all("B");
+
+    repo.checkout_new_branch("stack-c");
+    std::fs::write(repo.path().join("stack/c.txt"), "C\n").unwrap();
+    repo.commit_all("C");
+
+    for (branch, base) in [
+        ("stack-c", "stack-b"),
+        ("stack-b", "stack-a"),
+        ("stack-a", "main"),
+    ] {
+        repo.checkout(branch);
+        if branch == "stack-c" {
+            // Local review keeps uncommitted work in the selected layer.
+            std::fs::write(repo.path().join("stack/c.txt"), "C\nlocal edit\n").unwrap();
+        }
+        let pull = serde_json::json!({
+            "body": null,
+            "author": { "login": "ada" },
+            // The remote PR head may lag local, unpushed work. It supplies
+            // attestation identity but does not constrain local review.
+            "headRefOid": "remote-head",
+            "baseRefName": base,
+            // The published parent may lag its local branch. Automatic
+            // selection still excludes local parent commits already in this child.
+            "baseRefOid": repo.revision("main"),
+        })
+        .to_string();
+        let run = repo.review_auto(
+            fake,
+            &[
+                ("BASTION_GH_BIN", fake.to_str().unwrap()),
+                ("FAKE_GH_PR_JSON", &pull),
+            ],
+        );
+
+        assert!(run.exited_zero(), "{branch} stderr:\n{}", run.stderr);
+        assert_eq!(run.resolved("stack").0, Decision::Pass);
+        assert_eq!(
+            run.started_changeset(),
+            (1, repo.revision(base).as_str()),
+            "{branch} must contain only its own layer"
+        );
+        if branch == "stack-c" {
+            std::fs::write(repo.path().join("stack/c.txt"), "C\n").unwrap();
+        }
+    }
+
+    // An explicit base wins over automatic PR discovery.
+    repo.checkout("stack-b");
+    let widened = repo.review_base(fake, "main", &[]);
+    assert!(widened.exited_zero(), "stderr:\n{}", widened.stderr);
+    assert_eq!(widened.started_changeset(), (2, "main"));
+
+    // A branch without a PR keeps the longstanding `main` default.
+    let no_pr = repo.review_auto(
+        fake,
+        &[
+            ("BASTION_GH_BIN", fake.to_str().unwrap()),
+            ("FAKE_GH_NO_PR", "1"),
+        ],
+    );
+    assert!(no_pr.exited_zero(), "stderr:\n{}", no_pr.stderr);
+    assert_eq!(no_pr.started_changeset(), (2, "main"));
+
+    // An unexpected detection error warns, then behaves like no detected PR.
+    let failed_detection = repo.review_auto(
+        fake,
+        &[
+            ("BASTION_GH_BIN", fake.to_str().unwrap()),
+            ("FAKE_GH_FAILURE", "1"),
+        ],
+    );
+    assert!(
+        failed_detection.exited_zero(),
+        "stderr:\n{}",
+        failed_detection.stderr
+    );
+    assert_eq!(failed_detection.started_changeset(), (2, "main"));
+    assert!(failed_detection.stderr.contains("using `main`"));
+
+    // Explicit PR selection has the same fallback when neither GitHub source works.
+    let output = repo.run(
+        fake,
+        &[
+            "review", "--repo", "acme/app", "--pr", "7", "--format", "jsonl",
+        ],
+        &[
+            ("BASTION_GH_BIN", fake.to_str().unwrap()),
+            ("FAKE_GH_FAILURE", "1"),
+            ("GITHUB_TOKEN", ""),
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let explicit_failed = ReviewRun {
+        code: output.status.code(),
+        events: parse_events(&String::from_utf8_lossy(&output.stdout), &stderr),
+        stderr,
+    };
+    assert!(explicit_failed.exited_zero());
+    assert_eq!(explicit_failed.started_changeset(), (2, "main"));
+    assert!(explicit_failed.stderr.contains("without GitHub context"));
+}
+
 /// The default (human) output format renders a readable report and still maps a
 /// block to a non-zero exit. Human output is the default a person sees, yet every
 /// other scenario uses `--format jsonl`, so this pins the render path directly.

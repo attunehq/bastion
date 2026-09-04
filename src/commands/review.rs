@@ -33,8 +33,10 @@ use std::path::Path;
 /// signature does not grow a parameter per flag.
 #[derive(Debug, Default)]
 pub struct ReviewOptions {
-    /// Base branch the changeset is computed against.
-    pub base: String,
+    /// Explicit base branch the changeset is computed against. When absent,
+    /// review detects the current PR with `gh` and uses its direct base, or
+    /// warns and falls back to `main` when no PR is detected.
+    pub base: Option<String>,
     /// Output format.
     pub format: Format,
     /// The pull request the review runs against, when any (`--repo`/`--pr`).
@@ -62,9 +64,13 @@ pub struct ReviewOptions {
 
 /// `bastion review`: route and run the triggered reviewers, gating the result.
 ///
-/// Computes the changed files against `options.base`, selects matching
-/// reviewers, emits a `run.started` plan, and hands off to the runner to execute
-/// them concurrently. With zero matches the run is a trivial pass (mirroring the
+/// Resolves the review target, selects matching reviewers, emits a `run.started`
+/// plan, and hands off to the runner to execute them concurrently. An explicit
+/// base wins. Otherwise, review asks `gh` for the current PR and uses its direct
+/// base. No detected PR, including a failed lookup, falls back to `main`; a
+/// lookup failure also prints a warning. The working tree remains live, so
+/// uncommitted and untracked files stay in scope. With zero matches the
+/// run is a trivial pass (mirroring the
 /// always-present `bastion` check in CI). Returns the aggregate [`Decision`] so
 /// the caller can map `block` to a non-zero exit status.
 ///
@@ -95,10 +101,9 @@ pub struct ReviewOptions {
 /// in both files is deduplicated and a same-name collision keeps both with the repo
 /// side scoped (see [`Config::discover_merged`]).
 ///
-/// `options.github` carries the `owner/name` slug and PR number when the review runs
-/// against a pull request, so the reviewers get its description and discussion as
-/// context. It is best effort: a failure to reach GitHub is logged and the review
-/// proceeds on the local context (commit messages and prior findings) alone.
+/// `options.github` explicitly selects the `owner/name` slug and PR number used
+/// for automatic base detection and reviewer context. Without it, `gh pr view`
+/// detects the PR for the current branch. Discussion remains advisory.
 ///
 /// # Errors
 ///
@@ -120,7 +125,7 @@ pub async fn review(
         includes,
         should_merge_user_reviewers,
     } = options;
-    let base = base.as_str();
+    let base_was_explicit = base.is_some();
     let repo_root = git::repo_root(cwd)?;
     let repository = store::RepositoryId::resolve(&repo_root)?;
     warn_on_stale_skills(&repo_root);
@@ -131,14 +136,43 @@ pub async fn review(
         &includes,
         should_merge_user_reviewers,
     )?;
-    // The changeset is defined against the merge base with `base`, never the
-    // base branch's tip: a tip that has moved on since this branch forked
-    // would put the base's own changes under review and route reviewers at
-    // them. A base with no common ancestor cannot define a changeset at all,
-    // so that fails the review rather than guessing.
-    let merge_base = git::merge_base(&repo_root, base)
-        .wrap_err_with(|| format!("resolving the merge base of HEAD and '{base}'"))?;
-    if let Some(warning) = stale_base_warning(&repo_root, base, &merge_base) {
+    let github_review = match github.as_ref() {
+        Some(source) => match gather_github_review(&repo_root, source).await {
+            Ok(review) => Some(review),
+            Err(err) => {
+                let fallback = base.as_deref().unwrap_or("main");
+                eprintln!(
+                    "bastion review: could not read pull request #{}; using `{fallback}` without \
+                     GitHub context ({err:#})",
+                    source.pr,
+                );
+                None
+            }
+        },
+        None if base.is_none() => {
+            match crate::github::context::detect_pull_request(&repo_root).await {
+                Ok(Some(pull)) => Some(GithubReview {
+                    pull,
+                    comments: Vec::new(),
+                }),
+                Ok(None) => None,
+                Err(err) => {
+                    eprintln!(
+                        "bastion review: could not detect a pull request with `gh`; using `main` \
+                         ({err:#})"
+                    );
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    let target = resolve_review_target(&repo_root, base.as_deref(), github_review.as_ref())?;
+    let base = target.base.as_str();
+    let merge_base = target.merge_base;
+    if (base_was_explicit || github_review.is_none())
+        && let Some(warning) = stale_base_warning(&repo_root, base, &merge_base)
+    {
         // Fallible on purpose: a closed stderr must not panic the gate out of
         // an otherwise valid review.
         let _ = writeln!(io::stderr(), "{warning}");
@@ -214,10 +248,14 @@ pub async fn review(
         plan_conversations(layout, &prior_runs, &matched)
     };
 
-    let (context, gathered_github) =
-        assemble_context(&repo_root, base, github.as_ref(), prior_findings).await;
+    let context = assemble_context(
+        &repo_root,
+        &merge_base,
+        github_review.as_ref(),
+        prior_findings,
+    );
 
-    let seal = derive_seal_bindings(&repo_root, base, &repo_attestation);
+    let seal = derive_seal_bindings(&repo_root, &merge_base, &repo_attestation);
     // A dirty working tree is a first-class seal input, not merely a caveat: a
     // green review over uncommitted content must not be attestable as a verdict
     // on the committed tree the rest of the seal binds. Sealing still proceeds
@@ -246,7 +284,10 @@ pub async fn review(
                 &repo_root,
                 base,
                 &repo_attestation,
-                gathered_github.as_ref(),
+                github_review.as_ref().map(|review| review.pull.head_sha()),
+                github_review
+                    .as_ref()
+                    .and_then(|review| review.pull.author_login()),
                 &matched,
             )
             .await
@@ -458,48 +499,92 @@ fn select_reviewers<'a>(
         .collect())
 }
 
-/// Assemble the review context every reviewer sees beyond the diff: the author's
-/// stated intent (the PR body when reviewing one, otherwise this branch's commit
-/// messages), this branch's `prior_findings` (already recalled from the run store
-/// by the caller), and the surrounding discussion (GitHub only).
+/// The resolved comparison point for one review.
+struct ReviewTarget {
+    /// The base revision recorded in run events and shown to reviewers.
+    base: String,
+    /// The common ancestor whose tree starts the changeset.
+    merge_base: String,
+}
+
+/// Resolve the checkout and comparison point before routing any reviewers.
 ///
-/// GitHub gathering is best effort: a failure to reach it is logged and the
-/// review proceeds on the local context alone. The returned
-/// [`GatheredContext`](crate::github::context::GatheredContext), when present, is
-/// also what attestation replay reads the PR author and head SHA from. Empty
-/// context leaves every reviewer's prompt exactly as it was.
-async fn assemble_context(
+/// An explicit `--base` always wins. Without one, a detected pull request uses
+/// its direct base commit; a checkout with no detected pull request uses `main`.
+fn resolve_review_target(
     repo_root: &Path,
-    base: &str,
-    github: Option<&GithubSource>,
+    requested_base: Option<&str>,
+    github: Option<&GithubReview>,
+) -> Result<ReviewTarget> {
+    let base = requested_base
+        .map(str::to_string)
+        .or_else(|| github.map(|review| automatic_pr_base(repo_root, &review.pull)))
+        .unwrap_or_else(|| "main".to_string());
+    let merge_base = git::merge_base(repo_root, &base).wrap_err_with(|| match github {
+        Some(review) if requested_base.is_none() => format!(
+            "resolving the merge base with the detected PR's direct base '{}' at {}; fetch the \
+             base branch's history or pass `--base` explicitly",
+            review.pull.base_ref(),
+            base,
+        ),
+        _ => format!("resolving the merge base of HEAD and '{base}'"),
+    })?;
+    Ok(ReviewTarget { base, merge_base })
+}
+
+/// Select the newest direct-base commit already included in the local child.
+///
+/// GitHub's base OID is authoritative for the published PR. A local stack can
+/// have additional parent commits before they are pushed, though. Prefer the
+/// local parent tip only when GitHub's OID is its ancestor and the checked-out
+/// child already contains it. This keeps the local layer narrow without using a
+/// stale or divergent local branch.
+fn automatic_pr_base(repo_root: &Path, pull: &crate::github::context::PullRequest) -> String {
+    let local_ref = format!("refs/heads/{}", pull.base_ref());
+    let Some(local_sha) = git::commit_hash(repo_root, &local_ref) else {
+        return pull.base_sha().to_string();
+    };
+    let local_is_in_child = git::is_ancestor(repo_root, &local_sha, "HEAD").unwrap_or(false);
+    let published_is_behind_local = git::commit_hash(repo_root, pull.base_sha()).is_none()
+        || git::is_ancestor(repo_root, pull.base_sha(), &local_sha).unwrap_or(false);
+
+    if local_is_in_child && published_is_behind_local {
+        local_sha
+    } else {
+        pull.base_sha().to_string()
+    }
+}
+
+/// The required PR identity and optional human discussion gathered from GitHub.
+struct GithubReview {
+    pull: crate::github::context::PullRequest,
+    comments: Vec<crate::context::ContextComment>,
+}
+
+/// Assemble the review context every reviewer sees beyond the diff: the author's
+/// stated intent (the PR body when reviewing one, otherwise this changeset's
+/// commit messages), this branch's prior findings, and GitHub discussion when
+/// available.
+fn assemble_context(
+    repo_root: &Path,
+    merge_base: &str,
+    github: Option<&GithubReview>,
     prior_findings: Vec<PriorFinding>,
-) -> (
-    ReviewContext,
-    Option<crate::github::context::GatheredContext>,
-) {
+) -> ReviewContext {
     let mut context = ReviewContext {
-        intent: git::commit_messages(repo_root, base),
+        intent: git::commit_messages(repo_root, merge_base),
         comments: Vec::new(),
         prior_findings,
     };
-    let Some(source) = github else {
-        return (context, None);
+    let Some(review) = github else {
+        return context;
     };
-    match gather_github_context(source).await {
-        Ok(gathered) => {
-            // A PR body is a better statement of intent than the commit messages,
-            // so it wins when present; the discussion is GitHub-only.
-            if gathered.intent.is_some() {
-                context.intent = gathered.intent.clone();
-            }
-            context.comments = gathered.comments.clone();
-            (context, Some(gathered))
-        }
-        Err(err) => {
-            eprintln!("bastion review: continuing without GitHub context ({err:#})");
-            (context, None)
-        }
+    // A PR body is a better statement of intent than commit messages.
+    if let Some(intent) = review.pull.intent() {
+        context.intent = Some(intent.to_string());
     }
+    context.comments.clone_from(&review.comments);
+    context
 }
 
 /// What resolving a run's attestation plan settled: which reviewers replay, the
@@ -712,14 +797,10 @@ fn plan_carry(
 
 /// Attempt to verify and plan an attestation replay for a CI run.
 ///
-/// Best effort in the same sense [`gather_github_context`] is: any failure to
-/// gather the inputs a verification needs (the author's login, their
-/// registered signing keys, or a note to verify) degrades to `None`, which the
-/// caller treats as "no attestation available" and falls through to the
-/// planner's own fallback reporting only when a note *was* found but failed to
-/// verify. A genuinely absent note (the ordinary case for most commits) is
-/// reported as a fallback too, since attestations are enabled for this repo
-/// and the author is simply expected to know why none applied.
+/// Best effort: a missing author, unavailable signing keys, or a note that
+/// cannot be verified becomes an attestation fallback, so the affected
+/// reviewers execute normally. A genuinely absent note becomes `NotAttested`
+/// and produces no warning.
 ///
 /// `routed` is the reviewers CI's own diff matched, the same set `review`
 /// already computed.
@@ -727,14 +808,16 @@ async fn plan_attestation_replay(
     repo_root: &Path,
     base: &str,
     repo_attestation: &crate::config::RepoAttestation,
-    gathered: Option<&crate::github::context::GatheredContext>,
+    head_sha: Option<&str>,
+    author: Option<&str>,
     routed: &[&crate::reviewer::Reviewer],
 ) -> Option<crate::attest::AttestationOutcome> {
     plan_attestation_replay_with(
         repo_root,
         base,
         repo_attestation,
-        gathered,
+        head_sha,
+        author,
         routed,
         crate::github::client::RestClient::from_env,
     )
@@ -751,7 +834,8 @@ async fn plan_attestation_replay_with<C, B>(
     repo_root: &Path,
     base: &str,
     repo_attestation: &crate::config::RepoAttestation,
-    gathered: Option<&crate::github::context::GatheredContext>,
+    head_sha: Option<&str>,
+    author: Option<&str>,
     routed: &[&crate::reviewer::Reviewer],
     build_client: B,
 ) -> Option<crate::attest::AttestationOutcome>
@@ -768,7 +852,6 @@ where
     // `NotAttested` (silent: the reviewers go through ordinary carry-or-execute,
     // just without a replay); only a note that was offered and refused becomes a
     // surfaced `Fallback`.
-    let head_sha = gathered.and_then(|g| g.head_sha.as_deref());
     let note = match crate::attest::note_for_review(repo_root, "HEAD", head_sha) {
         Ok(Some(note)) => note,
         Ok(None) => return Some(crate::attest::AttestationOutcome::NotAttested),
@@ -789,7 +872,7 @@ where
         }
     };
 
-    let Some(author) = gathered.and_then(|g| g.author_login.as_deref()) else {
+    let Some(author) = author else {
         return Some(fallback_outcome(
             "could not determine the pull request author to verify the attestation signature against"
                 .to_string(),
@@ -833,8 +916,8 @@ fn fallback_outcome(reason: String) -> crate::attest::AttestationOutcome {
     crate::attest::AttestationOutcome::Fallback { reason }
 }
 
-/// The pull request a review is running against, so its description and discussion can
-/// be gathered as reviewer context. Present only when `bastion review` is given a PR.
+/// An explicitly selected pull request used for base detection, reviewer
+/// context, and CI attestation replay.
 ///
 /// The `owner/name` slug is parsed into its parts when the source is built, so a
 /// malformed repository is rejected at the boundary rather than re-checked later.
@@ -868,16 +951,48 @@ impl GithubSource {
     }
 }
 
-/// Gather a pull request's intent and discussion over a real GitHub client.
-///
-/// Builds the REST client from the environment (the same token the report step uses) and
-/// delegates to the GitHub context producer. Surfaced as an error the caller logs and
-/// recovers from, never one that fails the review.
-async fn gather_github_context(
-    source: &GithubSource,
-) -> Result<crate::github::context::GatheredContext> {
-    let client = crate::github::client::RestClient::from_env()?;
-    crate::github::context::gather(&client, &source.owner, &source.name, source.pr.get()).await
+/// Gather an explicitly selected PR. The GitHub CLI is the primary source, so
+/// local review can use the user's existing `gh` authentication. The REST client
+/// remains a compatibility fallback for CI and supplies discussion when its
+/// token is available.
+async fn gather_github_review(repo_root: &Path, source: &GithubSource) -> Result<GithubReview> {
+    let pull = match crate::github::context::get_pull_request_with_gh(
+        repo_root,
+        &format!("{}/{}", source.owner, source.name),
+        source.pr.get(),
+    )
+    .await
+    {
+        Ok(pull) => pull,
+        Err(gh_err) => {
+            let client = crate::github::client::RestClient::from_env().wrap_err_with(|| {
+                format!("`gh pr view` failed ({gh_err:#}) and no REST fallback is available")
+            })?;
+            crate::github::context::get_pull_request(
+                &client,
+                &source.owner,
+                &source.name,
+                source.pr.get(),
+            )
+            .await?
+        }
+    };
+
+    let comments = match crate::github::client::RestClient::from_env() {
+        Ok(client) => crate::github::context::gather_discussion(
+            &client,
+            &source.owner,
+            &source.name,
+            source.pr.get(),
+        )
+        .await
+        .unwrap_or_else(|err| {
+            eprintln!("bastion review: continuing without GitHub discussion ({err:#})");
+            Vec::new()
+        }),
+        Err(_) => Vec::new(),
+    };
+    Ok(GithubReview { pull, comments })
 }
 
 /// Build a run id from the short HEAD sha, falling back to a fixed local
@@ -903,30 +1018,25 @@ fn local_run_id(repo_root: &Path, partial: bool) -> RunId {
 /// Derive the [`crate::seal::SealBindings`] a local review should seal its run
 /// with, or `None` when any git derivation fails.
 ///
-/// Sealing is opportunistic: a detached-HEAD edge case, a base that shares no
-/// history with HEAD, or any other git failure here must never fail the review
-/// itself, only leave the run unattestable. Each failure is logged at `warn`
-/// with enough context to diagnose, then this returns `None` and the runner
-/// proceeds unsealed.
+/// Sealing is opportunistic: a tree or patch-id query failure must never fail
+/// the review itself, only leave the run unattestable. Each failure is logged at
+/// `warn` with enough context to diagnose, then this returns `None` and the
+/// runner proceeds unsealed.
 fn derive_seal_bindings(
     repo_root: &Path,
-    base: &str,
+    merge_base_commit: &str,
     repo_attestation: &crate::config::RepoAttestation,
 ) -> Option<SealBindings> {
-    let merge_base_commit = ok_or_warn(
-        git::merge_base(repo_root, base),
-        "could not derive a merge base; run will be unsealed",
-    )?;
     let head_tree = ok_or_warn(
         git::tree_hash(repo_root, "HEAD"),
         "could not resolve HEAD's tree; run will be unsealed",
     )?;
     let base_tree = ok_or_warn(
-        git::tree_hash(repo_root, &merge_base_commit),
+        git::tree_hash(repo_root, merge_base_commit),
         "could not resolve the merge base's tree; run will be unsealed",
     )?;
     let patch_id = ok_or_warn(
-        git::patch_id(repo_root, &merge_base_commit),
+        git::patch_id(repo_root, merge_base_commit),
         "could not compute a patch id; run will be unsealed",
     )?;
 
@@ -1047,7 +1157,7 @@ mod tests {
 
         let layout = Layout::with_root(data.path().to_path_buf());
         let options = ReviewOptions {
-            base: "main".into(),
+            base: Some("main".into()),
             format: Format::Jsonl,
             ..Default::default()
         };
@@ -1335,9 +1445,15 @@ mod tests {
         git(dir, &["add", "a.txt"]);
         git(dir, &["commit", "-m", "base"]);
 
-        let outcome =
-            plan_attestation_replay(dir, "nonexistent-base", &attestation_enabled(), None, &[])
-                .await;
+        let outcome = plan_attestation_replay(
+            dir,
+            "nonexistent-base",
+            &attestation_enabled(),
+            None,
+            None,
+            &[],
+        )
+        .await;
         assert!(
             matches!(
                 outcome,
@@ -1362,6 +1478,7 @@ mod tests {
             "this-base-does-not-exist",
             &attestation_enabled(),
             None,
+            None,
             &[],
         )
         .await;
@@ -1378,21 +1495,13 @@ mod tests {
 
     #[tokio::test]
     async fn plan_attestation_replay_falls_back_when_the_pr_author_is_missing() {
-        // A note is present and the bindings re-derive cleanly, but `gathered`
-        // carries no author login (a deleted account, or GitHub simply omitting
-        // it). `plan_attestation_replay` takes `gathered` directly, so this
-        // branch is testable with no network at all: an author-less
-        // `GatheredContext` reaches the check directly.
+        // A note is present and the bindings re-derive cleanly, but GitHub
+        // supplied no author login (a deleted account, for example).
         let tmp = repo_with_a_note_and_resolvable_base();
         let dir = tmp.path();
-        let gathered = crate::github::context::GatheredContext {
-            author_login: None,
-            ..Default::default()
-        };
 
         let outcome =
-            plan_attestation_replay(dir, "base", &attestation_enabled(), Some(&gathered), &[])
-                .await;
+            plan_attestation_replay(dir, "base", &attestation_enabled(), None, None, &[]).await;
         match outcome {
             Some(crate::attest::AttestationOutcome::Fallback { reason }) => {
                 assert!(reason.contains("pull request author"), "got: {reason}");
@@ -1412,16 +1521,13 @@ mod tests {
         // and racy across this suite's parallel tests.
         let tmp = repo_with_a_note_and_resolvable_base();
         let dir = tmp.path();
-        let gathered = crate::github::context::GatheredContext {
-            author_login: Some("grace".to_string()),
-            ..Default::default()
-        };
 
         let outcome = plan_attestation_replay_with(
             dir,
             "base",
             &attestation_enabled(),
-            Some(&gathered),
+            None,
+            Some("grace"),
             &[],
             || -> Result<crate::github::client::test_support::RecordingClient> {
                 Err(eyre!("simulated client construction failure"))
@@ -1448,16 +1554,13 @@ mod tests {
         // `ssh_signing_keys`'s failure path with no real GitHub involved.
         let tmp = repo_with_a_note_and_resolvable_base();
         let dir = tmp.path();
-        let gathered = crate::github::context::GatheredContext {
-            author_login: Some("grace".to_string()),
-            ..Default::default()
-        };
 
         let outcome = plan_attestation_replay_with(
             dir,
             "base",
             &attestation_enabled(),
-            Some(&gathered),
+            None,
+            Some("grace"),
             &[],
             || {
                 Ok(

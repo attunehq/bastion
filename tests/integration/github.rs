@@ -153,20 +153,16 @@ fn serve_one(mut stream: std::net::TcpStream) -> Option<CapturedRequest> {
 /// something to parse; every other GET (the comment listings) still gets `[]`,
 /// which `gather` and the reporter both tolerate as "nothing there".
 ///
-/// The PR response deliberately omits `head.sha`: the note lookup tries `HEAD`
-/// first and only falls back to the PR's head SHA when `HEAD` carries no note at
-/// all, so a fake, unresolvable SHA there would turn "no note" into a git error
-/// instead. Omitting it exercises the same "no note found" path without needing a
-/// real second commit for the fallback ref to resolve to.
+/// The PR response uses local git refs in its SHA fields. They remain resolvable
+/// in every throwaway repository while exercising the same lookup paths as full
+/// commit ids.
 fn get_response(path: &str) -> String {
     if path.contains("/ssh_signing_keys") {
         // No keys registered: the CI attestation path treats this the same as any
         // other verification failure and falls back to a full run.
         "[]".to_string()
     } else if path.contains("/pulls/") && !path.contains("/comments") {
-        // A minimal pull request: a login (the attestation signature's principal),
-        // no body (so the local commit-message intent stands), no head SHA.
-        r#"{"body":null,"user":{"login":"ada"}}"#.to_string()
+        r#"{"body":null,"user":{"login":"ada"},"head":{"ref":"feature","sha":"HEAD"},"base":{"ref":"main","sha":"main"}}"#.to_string()
     } else {
         "[]".to_string()
     }

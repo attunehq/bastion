@@ -1,8 +1,9 @@
 //! The GitHub REST boundary, behind an injectable seam.
 //!
-//! The adapter talks to GitHub over a tiny slice of the REST API: list, create,
-//! and update issue comments, and create check runs. To keep the reporting logic
-//! testable without a live GitHub, the actual HTTP lives behind [`GitHubApi`].
+//! The adapter talks to GitHub over a small slice of the REST API: read pull
+//! requests, comments, and signing keys, then create or update reports. To keep
+//! this logic testable without a live GitHub, the actual HTTP lives behind
+//! [`GitHubApi`].
 //! Production wires it to [`RestClient`] (a real `reqwest` client); tests drive a
 //! recording double or a local fake server through the same interface, exactly as
 //! the backend boundary drives a fake agent through [`crate::backend::command`].
@@ -169,7 +170,7 @@ pub(super) async fn send_checked<A: GitHubApi + ?Sized>(
 /// point it at a local fake server.
 pub const API_URL_ENV: &str = "GITHUB_API_URL";
 
-/// The token Actions exposes to the workflow, read by the report command.
+/// The token Actions exposes to REST-based context, attestation, and reporting.
 pub const TOKEN_ENV: &str = "GITHUB_TOKEN";
 
 /// The default API base used when [`API_URL_ENV`] is unset.
@@ -206,7 +207,8 @@ impl RestClient {
     /// # Errors
     ///
     /// Returns an error if `GITHUB_TOKEN` is unset or empty, or if the HTTP client
-    /// cannot be built. A missing token fails closed rather than posting anonymously.
+    /// cannot be built. Callers decide whether that REST operation is required
+    /// or advisory.
     pub fn from_env() -> Result<Self> {
         let base_url = std::env::var(API_URL_ENV)
             .ok()
@@ -216,7 +218,7 @@ impl RestClient {
             .ok()
             .filter(|v| !v.is_empty())
             .ok_or_else(|| {
-                eyre!("{TOKEN_ENV} is unset or empty; the report needs a token with pull-requests and checks write access")
+                eyre!("{TOKEN_ENV} is unset or empty; this GitHub REST operation requires an authenticated token")
             })?;
         Self::new(base_url, token)
     }
