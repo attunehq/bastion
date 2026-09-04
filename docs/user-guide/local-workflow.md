@@ -483,8 +483,8 @@ laid out side by side in the
 chapter. The local `run.started`, `reviewer.started`, and `reviewer.finished` progress
 events have no separate GitHub surface. A green local loop predicts a green PR when
 both runs see the same reviewers and context. The two surfaces run the repository's
-reviewers and aggregation, and CI adds the PR's description and discussion that a
-default local run does not, so a reviewer that weighs that context can decide
+reviewers and aggregation, and CI adds PR discussion that a default local run does
+not, so a reviewer that weighs that context can decide
 differently. A purely local run can also include your personal user-level reviewers
 with `--with-user-reviewers`;
 their `run.started` and terminal `reviewer.resolved` or `reviewer.skipped` events are
