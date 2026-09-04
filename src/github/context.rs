@@ -4,7 +4,8 @@
 //! [`ReviewContext`](crate::context::ReviewContext): it reads
 //! a PR's identity and description through `gh`, with the Actions REST client as
 //! a compatibility fallback for explicitly selected PRs. It also reads discussion
-//! through the REST seam. The module maps GitHub fields onto the generic shape the
+//! through `gh api`, with the same REST seam as the fallback when a token is
+//! available. The module maps GitHub fields onto the generic shape the
 //! runner and backends consume:
 //!
 //! - the PR's direct base supplies the automatic changeset base when the user did
@@ -19,6 +20,10 @@
 //! - a review-comment reply whose thread root is a Bastion finding (carrying a finding
 //!   marker) is routed back to that [`FindingId`], so the reply reaches the reviewer that
 //!   raised it.
+//!
+//! A missing `gh`, a branch with no pull request, and a failed `gh` invocation are
+//! distinct outcomes so a local review can stay silent in the first two cases and
+//! warn only when `gh` actually ran and failed.
 //!
 //! The prior-findings half of a [`ReviewContext`](crate::context::ReviewContext) is recalled from the local run store
 //! (`crate::store::findings_from_events`, over the branch's latest run), the same way regardless of transport, and merged in
@@ -53,9 +58,13 @@ const BASTION_MARKER_PREFIX: &str = "<!-- bastion";
 /// `PATH`; integration tests point this at their compiled fake.
 pub(crate) const PROGRAM_ENV: &str = "BASTION_GH_BIN";
 
-/// The fields one `gh pr view` call needs for target selection, intent, and
-/// attestation identity.
-const GH_PR_FIELDS: &str = "body,author,headRefOid,baseRefName,baseRefOid";
+/// The fields one `gh pr view` call needs for target selection, intent,
+/// discussion follow-up, and attestation identity.
+const GH_PR_FIELDS: &str = "number,title,body,author,headRefOid,baseRefName,baseRefOid";
+
+/// `gh api` substitutes these from the repository of the current directory.
+const GH_OWNER_PLACEHOLDER: &str = "{owner}";
+const GH_REPO_PLACEHOLDER: &str = "{repo}";
 
 /// The identity and author intent of the pull request under review.
 ///
@@ -63,7 +72,8 @@ const GH_PR_FIELDS: &str = "body,author,headRefOid,baseRefName,baseRefOid";
 /// defines the automatic comparison point when the user did not pass `--base`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PullRequest {
-    /// The PR description, as the author's stated intent. `None` for an empty body.
+    /// The PR description, as the author's stated intent. `None` when both the
+    /// body and the title are empty.
     intent: Option<String>,
     /// The PR author's GitHub login, when the response carried one. This is the
     /// attestation signature's principal (`docs/developer-guide/attestation.md`,
@@ -71,6 +81,10 @@ pub(crate) struct PullRequest {
     /// ([`super::signing::ssh_signing_keys`]); a login the API omits (a deleted account) leaves
     /// attestation with nothing to verify against, so the caller falls back.
     author_login: Option<String>,
+    /// The pull request number, when GitHub supplied a positive one. Discussion
+    /// gathering needs it; a missing number leaves the rest of the identity usable
+    /// and skips comments.
+    number: Option<NonZeroU64>,
     /// The exact head commit GitHub records for the PR.
     head_sha: String,
     /// The PR's direct target branch, such as `main` or the preceding branch in a
@@ -81,7 +95,7 @@ pub(crate) struct PullRequest {
 }
 
 impl PullRequest {
-    /// The PR description, if non-empty.
+    /// The author's stated intent: a non-empty PR body, otherwise a non-empty title.
     #[must_use]
     pub(crate) fn intent(&self) -> Option<&str> {
         self.intent.as_deref()
@@ -91,6 +105,12 @@ impl PullRequest {
     #[must_use]
     pub(crate) fn author_login(&self) -> Option<&str> {
         self.author_login.as_deref()
+    }
+
+    /// The pull request number, when GitHub supplied a positive one.
+    #[must_use]
+    pub(crate) fn number(&self) -> Option<NonZeroU64> {
+        self.number
     }
 
     /// The exact head commit GitHub records for the PR.
@@ -112,17 +132,26 @@ impl PullRequest {
     }
 }
 
+/// Outcome of asking `gh` for the current branch's pull request.
+///
+/// The three non-found cases are distinct so a local review can stay silent when
+/// there is no PR or `gh` cannot run, and warn only when `gh` ran and failed.
+#[derive(Debug)]
+#[must_use]
+pub(crate) enum PullRequestLookup {
+    /// The current branch has an open pull request.
+    Found(PullRequest),
+    /// `gh` ran and reported no pull request for this branch.
+    None,
+    /// `gh` could not be started (missing binary, not executable, or any other
+    /// spawn failure).
+    Unavailable,
+    /// `gh` started but failed or returned unusable output.
+    Failed(color_eyre::eyre::Error),
+}
+
 /// Ask `gh` for the pull request associated with the current branch.
-///
-/// A branch with no pull request returns `Ok(None)`. Other failures, including a
-/// missing or unauthenticated `gh`, remain distinguishable so the caller can warn
-/// before using the ordinary local fallback.
-///
-/// # Errors
-///
-/// Returns an error if `gh` cannot run, its request fails for a reason other than
-/// a missing current-branch pull request, or its JSON output is malformed.
-pub(crate) async fn detect_pull_request(cwd: &Path) -> Result<Option<PullRequest>> {
+pub(crate) async fn detect_pull_request(cwd: &Path) -> PullRequestLookup {
     gh_pull_request(cwd, None, true).await
 }
 
@@ -137,51 +166,82 @@ pub(crate) async fn get_pull_request_with_gh(
     repository: &str,
     pr: u64,
 ) -> Result<PullRequest> {
-    gh_pull_request(cwd, Some((repository, pr)), false)
-        .await?
-        .ok_or_else(|| color_eyre::eyre::eyre!("gh returned no pull request"))
+    match gh_pull_request(cwd, Some((repository, pr)), false).await {
+        PullRequestLookup::Found(pull) => Ok(pull),
+        PullRequestLookup::None => Err(color_eyre::eyre::eyre!("gh returned no pull request")),
+        PullRequestLookup::Unavailable => Err(color_eyre::eyre::eyre!(
+            "could not run `gh` to read the pull request"
+        )),
+        PullRequestLookup::Failed(err) => Err(err),
+    }
 }
 
 async fn gh_pull_request(
     cwd: &Path,
     selected: Option<(&str, u64)>,
     no_pr_is_none: bool,
-) -> Result<Option<PullRequest>> {
-    let program = std::env::var_os(PROGRAM_ENV).unwrap_or_else(|| "gh".into());
+) -> PullRequestLookup {
+    let program = gh_program();
     let mut command = tokio::process::Command::new(&program);
     command.args(["pr", "view"]);
     if let Some((repository, pr)) = selected {
         command.arg(pr.to_string()).args(["--repo", repository]);
     }
-    let output = command
+    let output = match command
         .args(["--json", GH_PR_FIELDS])
         .current_dir(cwd)
         .kill_on_drop(true)
         .output()
         .await
-        .wrap_err_with(|| {
-            format!(
-                "running '{}' to detect the pull request",
-                program.to_string_lossy()
-            )
-        })?;
+    {
+        Ok(output) => output,
+        Err(_) => return PullRequestLookup::Unavailable,
+    };
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    lookup_from_process(
+        output.status.success(),
+        &output.stdout,
+        &String::from_utf8_lossy(&output.stderr),
+        no_pr_is_none,
+    )
+}
+
+fn lookup_from_process(
+    success: bool,
+    stdout: &[u8],
+    stderr: &str,
+    no_pr_is_none: bool,
+) -> PullRequestLookup {
+    if !success {
         if no_pr_is_none && stderr.contains("no pull requests found for branch") {
-            return Ok(None);
+            return PullRequestLookup::None;
         }
-        bail!("`gh pr view` failed: {}", stderr.trim());
+        return PullRequestLookup::Failed(color_eyre::eyre::eyre!(
+            "`gh pr view` failed: {}",
+            stderr.trim()
+        ));
     }
 
-    let raw: GhPullRequest =
-        serde_json::from_slice(&output.stdout).wrap_err("parsing the output of `gh pr view`")?;
-    Ok(Some(raw.parse()?))
+    match serde_json::from_slice::<GhPullRequest>(stdout)
+        .wrap_err("parsing the output of `gh pr view`")
+        .and_then(GhPullRequest::parse)
+    {
+        Ok(pull) => PullRequestLookup::Found(pull),
+        Err(err) => PullRequestLookup::Failed(err),
+    }
+}
+
+fn gh_program() -> std::ffi::OsString {
+    std::env::var_os(PROGRAM_ENV).unwrap_or_else(|| "gh".into())
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GhPullRequest {
+    #[serde(default)]
+    number: Option<u64>,
+    #[serde(default)]
+    title: Option<String>,
     #[serde(default)]
     body: Option<String>,
     #[serde(default)]
@@ -193,18 +253,25 @@ struct GhPullRequest {
 
 impl GhPullRequest {
     fn parse(self) -> Result<PullRequest> {
-        let intent = self
-            .body
-            .map(|body| body.trim().to_string())
-            .filter(|body| !body.is_empty());
         Ok(PullRequest {
-            intent,
+            intent: intent_from(self.title, self.body),
             author_login: self.author.and_then(|author| author.login),
+            number: self.number.and_then(NonZeroU64::new),
             head_sha: non_empty_field(self.head_ref_oid, "headRefOid")?,
             base_ref: non_empty_field(self.base_ref_name, "baseRefName")?,
             base_sha: non_empty_field(self.base_ref_oid, "baseRefOid")?,
         })
     }
+}
+
+fn intent_from(title: Option<String>, body: Option<String>) -> Option<String> {
+    nonempty_text(body).or_else(|| nonempty_text(title))
+}
+
+fn nonempty_text(value: Option<String>) -> Option<String> {
+    value
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
 }
 
 /// Gather the identity and author intent of one pull request over `api`.
@@ -224,18 +291,15 @@ pub(crate) async fn get_pull_request<A: GitHubApi + ?Sized>(
 ) -> Result<PullRequest> {
     let pull_req = pull_request_request(owner, repo, pr);
     let pull: RawPullRequest = get_json(api, &pull_req).await?;
-    let intent = pull
-        .body
-        .map(|body| body.trim().to_string())
-        .filter(|body| !body.is_empty());
     let author_login = pull.user.and_then(|u| u.login);
     let head_sha = non_empty_field(pull.head.sha, "head.sha")?;
     let base_ref = non_empty_field(pull.base.name, "base.ref")?;
     let base_sha = non_empty_field(pull.base.sha, "base.sha")?;
 
     Ok(PullRequest {
-        intent,
+        intent: intent_from(pull.title, pull.body),
         author_login,
+        number: NonZeroU64::new(pr),
         head_sha,
         base_ref,
         base_sha,
@@ -264,10 +328,63 @@ pub(crate) async fn gather_discussion<A: GitHubApi + ?Sized>(
     let (issue_comments, review_comments): (Vec<RawComment>, Vec<RawComment>) =
         tokio::try_join!(get_json(api, &issue_req), get_json(api, &review_req))?;
 
+    Ok(discussion_from_raw(&issue_comments, &review_comments))
+}
+
+/// Outcome of asking `gh api` for a pull request's discussion.
+///
+/// Unavailable (cannot spawn `gh`) stays silent at the caller; a failed
+/// invocation is the case that warns.
+#[derive(Debug)]
+#[must_use]
+pub(crate) enum DiscussionLookup {
+    /// Normalized, filtered comments from the conversation and review threads.
+    Comments(Vec<ContextComment>),
+    /// `gh` could not be started.
+    Unavailable,
+    /// `gh` started but failed or returned unusable output.
+    Failed(color_eyre::eyre::Error),
+}
+
+/// Gather a pull request's human discussion through `gh api`.
+///
+/// Uses the same REST JSON shapes as [`gather_discussion`], so filtering and
+/// reply routing stay in one place. `{owner}` / `{repo}` in `owner` and `repo`
+/// are left for `gh api` to substitute from the current directory's repository.
+pub(crate) async fn gather_discussion_with_gh(
+    cwd: &Path,
+    owner: &str,
+    repo: &str,
+    pr: u64,
+) -> DiscussionLookup {
+    let issue_path = format!("/repos/{owner}/{repo}/issues/{pr}/comments?per_page=100");
+    let review_path = format!("/repos/{owner}/{repo}/pulls/{pr}/comments?per_page=100");
+    match tokio::try_join!(
+        gh_api_json::<Vec<RawComment>>(cwd, &issue_path),
+        gh_api_json::<Vec<RawComment>>(cwd, &review_path),
+    ) {
+        Ok((issue_comments, review_comments)) => {
+            DiscussionLookup::Comments(discussion_from_raw(&issue_comments, &review_comments))
+        }
+        Err(GhCall::Unavailable) => DiscussionLookup::Unavailable,
+        Err(GhCall::Failed(err)) => DiscussionLookup::Failed(err),
+    }
+}
+
+/// Gather discussion for the pull request on the current repository, letting
+/// `gh api` fill `{owner}` and `{repo}` from the checkout.
+pub(crate) async fn gather_current_repo_discussion(cwd: &Path, pr: NonZeroU64) -> DiscussionLookup {
+    gather_discussion_with_gh(cwd, GH_OWNER_PLACEHOLDER, GH_REPO_PLACEHOLDER, pr.get()).await
+}
+
+fn discussion_from_raw(
+    issue_comments: &[RawComment],
+    review_comments: &[RawComment],
+) -> Vec<ContextComment> {
     let mut comments = Vec::new();
 
     // Top-level conversation comments never thread to a specific finding.
-    for raw in &issue_comments {
+    for raw in issue_comments {
         if let Some(comment) = raw.to_context(None) {
             comments.push(comment);
         }
@@ -281,7 +398,7 @@ pub(crate) async fn gather_discussion<A: GitHubApi + ?Sized>(
         .iter()
         .map(|raw| (raw.id, raw.body.as_str()))
         .collect();
-    for raw in &review_comments {
+    for raw in review_comments {
         let routed = raw
             .in_reply_to_id
             .and_then(|root_id| roots.get(&root_id))
@@ -291,7 +408,40 @@ pub(crate) async fn gather_discussion<A: GitHubApi + ?Sized>(
         }
     }
 
-    Ok(comments)
+    comments
+}
+
+enum GhCall {
+    Unavailable,
+    Failed(color_eyre::eyre::Error),
+}
+
+async fn gh_api_json<T>(cwd: &Path, path: &str) -> Result<T, GhCall>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let program = gh_program();
+    let output = match tokio::process::Command::new(&program)
+        .args(["api", "--method", "GET", path])
+        .current_dir(cwd)
+        .kill_on_drop(true)
+        .output()
+        .await
+    {
+        Ok(output) => output,
+        Err(_) => return Err(GhCall::Unavailable),
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(GhCall::Failed(color_eyre::eyre::eyre!(
+            "`gh api {}` failed: {}",
+            path,
+            stderr.trim()
+        )));
+    }
+    serde_json::from_slice(&output.stdout)
+        .wrap_err_with(|| format!("parsing the output of `gh api {path}`"))
+        .map_err(GhCall::Failed)
 }
 
 fn non_empty_field(value: String, field: &str) -> Result<String> {
@@ -377,6 +527,8 @@ where
 /// request.
 #[derive(Debug, Deserialize)]
 struct RawPullRequest {
+    #[serde(default)]
+    title: Option<String>,
     #[serde(default)]
     body: Option<String>,
     #[serde(default)]
@@ -481,6 +633,8 @@ mod tests {
     #[test]
     fn gh_pull_request_fields_parse_into_the_review_target() {
         let raw: GhPullRequest = serde_json::from_value(serde_json::json!({
+            "number": 7,
+            "title": "stack layer",
             "body": "  stack layer  ",
             "author": { "login": "ada" },
             "headRefOid": "head123",
@@ -492,9 +646,69 @@ mod tests {
 
         assert_eq!(pull.intent(), Some("stack layer"));
         assert_eq!(pull.author_login(), Some("ada"));
+        assert_eq!(pull.number().map(NonZeroU64::get), Some(7));
         assert_eq!(pull.head_sha(), "head123");
         assert_eq!(pull.base_ref(), "feature-a");
         assert_eq!(pull.base_sha(), "base123");
+    }
+
+    #[test]
+    fn empty_body_falls_back_to_the_title_for_intent() {
+        let raw: GhPullRequest = serde_json::from_value(serde_json::json!({
+            "number": 3,
+            "title": "  title only  ",
+            "body": "   ",
+            "headRefOid": "head123",
+            "baseRefName": "main",
+            "baseRefOid": "base123"
+        }))
+        .unwrap();
+        let pull = raw.parse().unwrap();
+        assert_eq!(pull.intent(), Some("title only"));
+    }
+
+    #[test]
+    fn lookup_treats_a_missing_current_branch_pr_as_none() {
+        let lookup = lookup_from_process(
+            false,
+            b"",
+            "no pull requests found for branch \"feature\"",
+            true,
+        );
+        assert!(matches!(lookup, PullRequestLookup::None));
+    }
+
+    #[test]
+    fn lookup_treats_other_gh_failures_as_failed() {
+        let lookup = lookup_from_process(false, b"", "authentication required", true);
+        match lookup {
+            PullRequestLookup::Failed(err) => {
+                assert!(format!("{err:#}").contains("authentication required"));
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lookup_parses_a_successful_gh_payload() {
+        let stdout = serde_json::json!({
+            "number": 9,
+            "title": "feat",
+            "body": "why",
+            "author": { "login": "ada" },
+            "headRefOid": "head123",
+            "baseRefName": "main",
+            "baseRefOid": "base123"
+        })
+        .to_string();
+        let lookup = lookup_from_process(true, stdout.as_bytes(), "", true);
+        match lookup {
+            PullRequestLookup::Found(pull) => {
+                assert_eq!(pull.intent(), Some("why"));
+                assert_eq!(pull.number().map(NonZeroU64::get), Some(9));
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -516,6 +730,7 @@ mod tests {
             .await
             .expect("gathers discussion");
         assert_eq!(pull.intent(), Some("## Why\nDeliberate schema nuke."));
+        assert_eq!(pull.number().map(NonZeroU64::get), Some(7));
         // Bastion's own sticky comment and the whitespace-only comment are dropped;
         // only the human owner comment survives.
         assert_eq!(comments.len(), 1);

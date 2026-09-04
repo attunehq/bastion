@@ -28,8 +28,9 @@ use crate::verdict::{Finding, FindingKind};
 ///
 /// This is the generic, transport-neutral form of "who is talking". GitHub's
 /// `author_association` (OWNER / MEMBER / COLLABORATOR / CONTRIBUTOR / NONE) maps onto
-/// it at the adapter boundary; the local loop has only the author, so it does not
-/// populate comments at all.
+/// it at the adapter boundary. Local detection and the GitHub adapter both
+/// populate comments when a pull request is in scope; a run with no PR leaves
+/// them empty.
 ///
 /// It is **advisory only**: a reviewer may weight an owner's comment above an
 /// outsider's, but no [`Standing`] grants authority over the gate. The hard

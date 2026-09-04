@@ -41,7 +41,7 @@ through it.
 | [`src/skills.rs`](../../src/skills.rs) | The agent skills bundled into the binary (from `skills/<slug>/SKILL.md`) and installed into a consuming repo by `bastion skills install`/`check`/`list`. The rendered file is deterministic so `check` is a version-independent drift guard. Distinct from these bundled skills are the repo-local skills that guide agents working *on* Bastion (the Rust skills and `stop-slop`), which are **not** bundled and sit outside `skills install`/`check`; every skill lives under both `.agents/skills/` (agent-neutral) and `.claude/skills/` (Claude Code's path) as exact copies, and `tests/skills_mirror.rs` fails the build if the two trees drift. |
 | [`src/update.rs`](../../src/update.rs) | The native self-updater behind `bastion update`: resolves the latest release from the `releases/latest` redirect, downloads and checksum-verifies the `bastion-<target>.tar.gz` for `BASTION_TARGET` over `reqwest`, extracts it (`flate2` + `tar`), and swaps it over the running binary (`self-replace`). Also drives the passive out-of-date nag (`warn_if_outdated`, called from `cli::run` for every command but `update`), which prints to stderr for interactive release builds and refreshes a day-TTL cache in a detached `bastion __update-check` process. `BASTION_REPO` and `BASTION_BASE_URL` override the release source (tests point them at a local server). |
 | [`src/backend/`](../../src/backend/) | The agent execution boundary. See [Backends](./backends.md). |
-| [`src/github/`](../../src/github/) | The GitHub adapter: `codeowners.rs` generates the governance block, `client.rs` is the `reqwest`-backed REST seam (a proof-carrying `ApiRequest` plus a `GitHubApi` trait and a recording test double, modeled on the backend's `CommandRunner`), `report/` posts a finished run as a sticky PR comment and check runs (split into `comment`, `callouts`, `checks`, `requests`, and `post`), `context.rs` detects a local PR through `gh`, parses the direct base used for automatic changeset selection, and gathers its description and discussion, and `signing.rs` fetches a user's registered SSH signing keys (`GET /users/{username}/ssh_signing_keys`) for attestation verification. See the [GitHub adapter](./github-adapter.md). |
+| [`src/github/`](../../src/github/) | The GitHub adapter: `codeowners.rs` generates the governance block, `client.rs` is the `reqwest`-backed REST seam (a proof-carrying `ApiRequest` plus a `GitHubApi` trait and a recording test double, modeled on the backend's `CommandRunner`), `report/` posts a finished run as a sticky PR comment and check runs (split into `comment`, `callouts`, `checks`, `requests`, and `post`), `context.rs` detects a local PR through `gh`, parses the direct base used for automatic changeset selection, and gathers its description and discussion (`gh pr view` plus `gh api`, REST as a compatibility fallback), and `signing.rs` fetches a user's registered SSH signing keys (`GET /users/{username}/ssh_signing_keys`) for attestation verification. See the [GitHub adapter](./github-adapter.md). |
 | [`tests/integration/`](../../tests/integration/) | The end-to-end suite: it drives the *real compiled binary* against a `rustc`-compiled fake agent, each scenario in its own throwaway `git` repo and private `BASTION_DATA_DIR`, with the fake wired in via the five `BASTION_<BACKEND>_BIN` variables (and a fake engine via `BASTION_CONTAINER_ENGINE`). Scenarios are grouped into per-theme files (`aggregation`, `carry`, `container`, `accounting`, `persistence`, `cli_surface`, `github_report`, `attestation`) over shared `fakes`/`fixtures`/`github` support. Sibling structural targets guard the repo's shape: `tests/skills_mirror.rs`, `tests/script_safety.rs`, and `tests/user_guide_integrity.rs`. |
 | [`scripts/install.sh`](../../scripts/install.sh) / [`install.ps1`](../../scripts/install.ps1) | The public install scripts: detect the platform, download the matching archive plus `checksums.txt`, verify the SHA-256, and fail closed on any checksum problem. `tests/script_safety.rs` pins that behavior. |
 
@@ -93,7 +93,8 @@ Following one review top to bottom touches most of the crate:
    explicit `--base` wins. Without one, Bastion asks `gh pr view` for the PR on
    the current branch and uses its direct base commit. A newer local parent tip
    wins when the checked-out child already contains it. A branch without a PR
-   falls back to `main`; another `gh` failure warns before using the same fallback.
+   falls back to `main`. A missing `gh` is the same silent fallback; a `gh` that
+   ran and failed warns before using it.
    Git then returns tracked and untracked changes from the selected
    merge base, including uncommitted work. A native GitHub stack therefore
    selects C against B, B against A, and A against trunk.
@@ -114,11 +115,14 @@ Following one review top to bottom touches most of the crate:
     later, so a planned conversation is used only if the reviewer executes.
 5. **Gather context** (`context.rs`, `git.rs`, `store.rs`, `github/context.rs`).
    Bastion assembles a `ReviewContext` for the run: the author's stated intent (a
-   non-empty PR body when reviewing a pull request, otherwise this branch's commit
-   messages as the fallback), the prior findings recalled from the last run of this
-   branch, and (for an explicitly selected GitHub PR) its discussion. Discussion
-   is best effort: a failure logs a warning and continues without comments. The
-   PR identity and body come from `gh` or the Actions REST compatibility fallback.
+   non-empty PR body when reviewing a pull request, otherwise a non-empty title,
+   otherwise this branch's commit messages as the fallback), the prior findings
+   recalled from the last run of this branch, and the PR's discussion when a pull
+   request is detected or explicitly selected. Discussion is best effort: a
+   failure logs a warning and continues without comments. A missing `gh` or a
+   branch with no PR is silent and continues without GitHub context. The PR
+   identity and body come from `gh`; the Actions REST client is the compatibility
+   fallback for an explicitly selected PR.
    Empty context leaves every reviewer's prompt unchanged. Run history is
    scoped by an opaque repository identity and the current branch before this step,
    so repositories that share a data directory do not recall each other's findings,

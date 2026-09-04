@@ -104,7 +104,9 @@ bastion review --format jsonl
 
 - Without `--base`, Bastion asks `gh` for the current PR and uses its direct
   base. For A <- B <- C, it reviews C against B, B against A, and A against
-  trunk. If `gh` cannot run, Bastion warns and uses `main` as if it found no PR.
+  trunk. If there is no PR, or `gh` cannot run, Bastion uses `main` without
+  warning. If `gh` runs but fails, Bastion warns and uses the same fallback.
+  A detected PR also supplies its description and discussion to reviewers.
   Before the PR exists, pass the branch it will target with `--base`.
 - An explicit `--base` always wins when you need to override automatic detection.
 - `--format jsonl` gives you one flushed JSON object per line, including live
@@ -296,9 +298,10 @@ it, then re-run:
 - **Put the "why" in the code.** A comment on the flagged lines saying why the code
   is written this way travels with the diff the reviewer reads, lands on the exact
   spot it flagged, and helps the next human too. Reach for this first.
-- **State the decision in your intent.** Locally a reviewer's intent is your
-  `base..HEAD` commit messages; on a PR it is the description, and the discussion is
-  read as well. Spell out the deliberate call there: the tradeoff you accepted, or
+- **State the decision in your intent.** On a detected PR, a reviewer's intent is
+  the description (or the title when the body is empty) and the discussion is
+  read as well, locally and in CI. Without a PR, intent is your `base..HEAD`
+  commit messages. Spell out the deliberate call there: the tradeoff you accepted, or
   why the obvious fix is wrong in this case.
 
 Then re-run. If the finding still stands after a rationale the code backs up, treat

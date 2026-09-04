@@ -35,7 +35,8 @@ use std::path::Path;
 pub struct ReviewOptions {
     /// Explicit base branch the changeset is computed against. When absent,
     /// review detects the current PR with `gh` and uses its direct base, or
-    /// warns and falls back to `main` when no PR is detected.
+    /// falls back to `main` when no PR is detected. A missing `gh` is silent; a
+    /// `gh` that ran and failed also warns.
     pub base: Option<String>,
     /// Output format.
     pub format: Format,
@@ -67,9 +68,10 @@ pub struct ReviewOptions {
 /// Resolves the review target, selects matching reviewers, emits a `run.started`
 /// plan, and hands off to the runner to execute them concurrently. An explicit
 /// base wins. Otherwise, review asks `gh` for the current PR and uses its direct
-/// base. No detected PR, including a failed lookup, falls back to `main`; a
-/// lookup failure also prints a warning. The working tree remains live, so
-/// uncommitted and untracked files stay in scope. With zero matches the
+/// base. No detected PR, a missing `gh`, or a failed lookup falls back to
+/// `main`; a lookup where `gh` ran and failed also prints a warning. The working
+/// tree remains live, so uncommitted and untracked files stay in scope. With
+/// zero matches the
 /// run is a trivial pass (mirroring the
 /// always-present `bastion` check in CI). Returns the aggregate [`Decision`] so
 /// the caller can map `block` to a non-zero exit status.
@@ -103,7 +105,8 @@ pub struct ReviewOptions {
 ///
 /// `options.github` explicitly selects the `owner/name` slug and PR number used
 /// for automatic base detection and reviewer context. Without it, `gh pr view`
-/// detects the PR for the current branch. Discussion remains advisory.
+/// detects the PR for the current branch and `gh api` reads its discussion.
+/// Discussion remains advisory.
 ///
 /// # Errors
 ///
@@ -151,12 +154,13 @@ pub async fn review(
         },
         None if base.is_none() => {
             match crate::github::context::detect_pull_request(&repo_root).await {
-                Ok(Some(pull)) => Some(GithubReview {
-                    pull,
-                    comments: Vec::new(),
-                }),
-                Ok(None) => None,
-                Err(err) => {
+                crate::github::context::PullRequestLookup::Found(pull) => {
+                    let comments = advisory_comments_for_detected(&repo_root, &pull).await;
+                    Some(GithubReview { pull, comments })
+                }
+                crate::github::context::PullRequestLookup::None
+                | crate::github::context::PullRequestLookup::Unavailable => None,
+                crate::github::context::PullRequestLookup::Failed(err) => {
                     eprintln!(
                         "bastion review: could not detect a pull request with `gh`; using `main` \
                          ({err:#})"
@@ -562,9 +566,9 @@ struct GithubReview {
 }
 
 /// Assemble the review context every reviewer sees beyond the diff: the author's
-/// stated intent (the PR body when reviewing one, otherwise this changeset's
-/// commit messages), this branch's prior findings, and GitHub discussion when
-/// available.
+/// stated intent (the PR body, or title when the body is empty, when reviewing
+/// a pull request; otherwise this changeset's commit messages), this branch's
+/// prior findings, and GitHub discussion when a pull request is in scope.
 fn assemble_context(
     repo_root: &Path,
     merge_base: &str,
@@ -953,8 +957,8 @@ impl GithubSource {
 
 /// Gather an explicitly selected PR. The GitHub CLI is the primary source, so
 /// local review can use the user's existing `gh` authentication. The REST client
-/// remains a compatibility fallback for CI and supplies discussion when its
-/// token is available.
+/// remains a compatibility fallback for CI, including discussion when its token
+/// is available.
 async fn gather_github_review(repo_root: &Path, source: &GithubSource) -> Result<GithubReview> {
     let pull = match crate::github::context::get_pull_request_with_gh(
         repo_root,
@@ -978,21 +982,62 @@ async fn gather_github_review(repo_root: &Path, source: &GithubSource) -> Result
         }
     };
 
-    let comments = match crate::github::client::RestClient::from_env() {
-        Ok(client) => crate::github::context::gather_discussion(
-            &client,
-            &source.owner,
-            &source.name,
-            source.pr.get(),
-        )
-        .await
-        .unwrap_or_else(|err| {
-            eprintln!("bastion review: continuing without GitHub discussion ({err:#})");
-            Vec::new()
-        }),
-        Err(_) => Vec::new(),
-    };
+    let comments = advisory_comments(repo_root, &source.owner, &source.name, source.pr.get()).await;
     Ok(GithubReview { pull, comments })
+}
+
+/// Best-effort discussion for a detected current-branch PR. A missing number
+/// skips the follow-up; `gh api` fills `{owner}` / `{repo}` from the checkout.
+async fn advisory_comments_for_detected(
+    repo_root: &Path,
+    pull: &crate::github::context::PullRequest,
+) -> Vec<crate::context::ContextComment> {
+    let Some(number) = pull.number() else {
+        return Vec::new();
+    };
+    match crate::github::context::gather_current_repo_discussion(repo_root, number).await {
+        crate::github::context::DiscussionLookup::Comments(comments) => comments,
+        crate::github::context::DiscussionLookup::Unavailable => Vec::new(),
+        crate::github::context::DiscussionLookup::Failed(err) => {
+            warn_without_discussion(&err);
+            Vec::new()
+        }
+    }
+}
+
+/// Best-effort discussion for an explicitly selected PR: `gh api` first, then
+/// the Actions REST client when a token is available.
+async fn advisory_comments(
+    repo_root: &Path,
+    owner: &str,
+    repo: &str,
+    pr: u64,
+) -> Vec<crate::context::ContextComment> {
+    match crate::github::context::gather_discussion_with_gh(repo_root, owner, repo, pr).await {
+        crate::github::context::DiscussionLookup::Comments(comments) => comments,
+        gh_result => match crate::github::client::RestClient::from_env() {
+            Ok(client) => {
+                match crate::github::context::gather_discussion(&client, owner, repo, pr).await {
+                    Ok(comments) => comments,
+                    Err(err) => {
+                        warn_without_discussion(&err);
+                        Vec::new()
+                    }
+                }
+            }
+            Err(_) => match gh_result {
+                crate::github::context::DiscussionLookup::Failed(err) => {
+                    warn_without_discussion(&err);
+                    Vec::new()
+                }
+                _ => Vec::new(),
+            },
+        },
+    }
+}
+
+fn warn_without_discussion(err: &impl std::fmt::Display) {
+    eprintln!("bastion review: continuing without GitHub discussion ({err:#})");
 }
 
 /// Build a run id from the short HEAD sha, falling back to a fixed local
