@@ -204,14 +204,14 @@ bastion review
 ```
 
 Bastion asks `gh` for the current PR and uses its direct base, or `main` when the
-branch has no PR. It computes the files changed from that merge base, selects the
-reviewer candidates, resolves them in parallel, and renders progress plus each
-terminal verdict or agent-trigger skip.
+branch has no PR or `gh` cannot run. It computes the files changed from that merge
+base, selects the reviewer candidates, resolves them in parallel, and renders
+progress plus each terminal verdict or agent-trigger skip.
 
 Automatic PR base selection uses an installed and authenticated GitHub CLI. A
-branch without a PR uses `main`. If `gh` is unavailable or its lookup fails,
-Bastion warns and also uses `main`. Pass `--base <branch>` to select a base
-without `gh`.
+branch without a PR, or a missing `gh`, uses `main` without a warning. If `gh`
+runs and fails, Bastion warns and uses the same fallback. Pass `--base <branch>`
+to select a base without `gh`.
 
 A re-run of the same branch may carry an already-passed reviewer's verdict
 forward instead of executing it again; the exact conditions are in
@@ -337,8 +337,8 @@ The most common first-run snags and what they mean:
   reviewer's `trigger`. Confirm you actually changed a file the globs cover, and
   that `--base` points at the right branch.
 - **Everything looks unchanged.** Bastion uses an explicit `--base`, the current
-  PR's direct base from `gh`, or `main` when the branch has no PR. Confirm that
-  this selected base is where the branch started.
+  PR's direct base from `gh`, or `main` when the branch has no PR or `gh` cannot
+  run. Confirm that this selected base is where the branch started.
 
 ---
 

@@ -160,7 +160,7 @@ passes still carry on the finishing full run. The named reviewer itself
 executes fresh there: a partial run is never sealed, so a repository reviewer's
 pass from the partial cannot carry.
 
-The CI workflow passes `--repo`/`--pr` to select the PR and give reviewers its stated intent and discussion. Locally, `gh pr view` detects the current branch's PR without those flags and uses your existing `gh` authentication; `gh api` then reads the same first 100 conversation comments and first 100 review comments. If you pass `--repo`/`--pr`, Bastion also accepts the Actions REST client as a compatibility fallback. If `gh` cannot run and no REST token is available, the review continues without PR context. If `gh` runs and fails, Bastion warns and continues the same way. Those discussion requests are best effort and do not paginate. With no detected PR, intent comes from your branch's commit messages (`base..HEAD`). Each reviewer's prior findings come from the run store.
+The CI workflow passes `--repo`/`--pr` to select the PR and give reviewers its stated intent and discussion. Locally, `gh pr view` detects the current branch's PR without those flags and uses your existing `gh` authentication; `gh api` then reads the same first 100 conversation comments and first 100 review comments. If you pass `--repo`/`--pr`, Bastion also accepts the Actions REST client as a compatibility fallback. If `gh` cannot run and no REST token is available, the review continues without PR context. If `gh` runs and fails, Bastion warns and continues the same way. Those discussion requests are best effort and do not paginate. Intent is the PR body when it is non-empty, otherwise the title, otherwise your branch's commit messages (`base..HEAD`). Each reviewer's prior findings come from the run store.
 
 ### Exit codes
 
@@ -244,7 +244,8 @@ If you are an agent driving the loop, this is the whole contract:
    PR. If you stopped blocked, do not keep paying for another local run.
 
 Without `--base`, Bastion uses `gh` to detect the current PR and selects its direct
-base. If `gh` is unavailable or fails, Bastion warns and uses `main`. Pass `--base
+base. If there is no PR, or `gh` cannot run, it uses `main` without a warning. If
+`gh` runs and fails, Bastion warns and uses the same fallback. Pass `--base
 <branch>` when you need an explicit comparison point.
 
 This contract is exactly what `bastion skills install` checks into your repo as the
