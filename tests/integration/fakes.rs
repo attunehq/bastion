@@ -81,6 +81,35 @@ fn main() {
         );
         return;
     }
+    if args.get(1).map(String::as_str) == Some("api") {
+        if std::env::var_os("FAKE_GH_API_FAILURE").is_some() {
+            eprintln!("API rate limit exceeded");
+            std::process::exit(1);
+        }
+        let mut iter = args.iter().skip(2);
+        let mut path = String::new();
+        while let Some(arg) = iter.next() {
+            if arg == "--method" {
+                let _ = iter.next();
+                continue;
+            }
+            if arg.starts_with('-') {
+                continue;
+            }
+            path = arg.clone();
+            break;
+        }
+        let json = if path.contains("/issues/") && path.contains("/comments") {
+            std::env::var("FAKE_GH_ISSUE_COMMENTS_JSON").unwrap_or_else(|_| "[]".to_string())
+        } else if path.contains("/pulls/") && path.contains("/comments") {
+            std::env::var("FAKE_GH_REVIEW_COMMENTS_JSON").unwrap_or_else(|_| "[]".to_string())
+        } else {
+            eprintln!("fake gh: unexpected api path {path}");
+            std::process::exit(2);
+        };
+        println!("{json}");
+        return;
+    }
     let is_codex = has(&args, "exec");
     // Pi is driven in print mode with `--mode json`; neither Codex nor Claude uses
     // `--mode`, so it is the unambiguous discriminator.

@@ -224,9 +224,9 @@ Same setup for every reviewer. The prompt, not the runner, scopes attention.
 
 Without review context, a reviewer re-litigates settled questions. It re-raises a finding the author already addressed or pushed back on, and it flags a deliberate decision (a breaking migration, a knowingly-accepted tradeoff) as a defect because the *why* lives in the pull request, not the code. Bastion assembles a transport-neutral `ReviewContext` ([`src/context.rs`](../../src/context.rs)) for each run with three parts:
 
-- **Intent**: the author's stated reason for the change. On a pull request this is the PR description when it is non-empty, falling back to the branch's commit messages; locally it is always those commit messages (`base..HEAD`). Shown to every reviewer.
+- **Intent**: the author's stated reason for the change. On a pull request this is the PR description when it is non-empty, otherwise the title, otherwise the branch's commit messages (`base..HEAD`). Shown to every reviewer.
 - **Prior findings**: what each reviewer raised on the last run of this same branch, recalled from the run store. A reviewer is shown only *its own* prior findings and told to decide, per finding, whether the current changeset still warrants it, so "already raised" never silently becomes "already resolved".
-- **Discussion**: the surrounding comments (pull request only). Bastion's own past comments are filtered out so a reviewer never reacts to a paraphrase of itself.
+- **Discussion**: the surrounding comments (pull request only). Local detection and CI both gather it when a PR is in scope. Bastion's own past comments are filtered out so a reviewer never reacts to a paraphrase of itself.
 
 This is the same data type regardless of transport. The local loop and the GitHub adapter are each a *producer* that fills a `ReviewContext`; the backends consume one identically. An empty context (a first review, no discussion) renders to nothing, so the reviewer receives the base prompt unchanged.
 

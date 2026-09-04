@@ -12,9 +12,10 @@ order: 5
 The local CLI applies the same reviewers and decisions CI enforces: CI executes them
 fresh, records an agent-trigger skip, replays an attested local outcome, or carries
 an unchanged reviewer from the newest prior CI run on the branch that resolved
-that reviewer. So a green local loop usually means a PR that CI confirms. Two
-things can make a local run differ: CI can add the PR's discussion, and a local
-run can merge in personal reviewers with `--with-user-reviewers`, which CI never
+that reviewer. So a green local loop usually means a PR that CI confirms. They
+still differ when a local run cannot see the pull request (no PR, or `gh` is
+missing or failed), so reviewers miss that discussion, and when a local run
+merges in personal reviewers with `--with-user-reviewers`, which CI never
 sees (see [Authoring reviewers](./authoring-reviewers.md#user-level-reviewers)).
 This chapter covers the loop in depth.
 
@@ -32,7 +33,8 @@ bastion review
 
 Without an explicit `--base`, `bastion review` asks `gh pr view` for the current
 branch's PR. It uses that PR's direct base commit, or `main` when the branch has
-no PR. If the local parent branch has unpushed commits already included in the
+no PR or `gh` cannot run. If `gh` runs and fails, it warns and uses the same
+fallback. If the local parent branch has unpushed commits already included in the
 child, Bastion uses that local parent tip instead of GitHub's older commit. The
 changeset includes uncommitted and untracked files but excludes the base branch's
 own changes. Bastion then selects reviewer candidates and renders
@@ -60,8 +62,9 @@ eligible prior pass or executes fresh (see
   the merge base with it, not at its tip, so the base moving on does not change
   what is under review. An explicit value always wins. Without one, Bastion asks
   `gh` for the current PR's direct base and falls back to `main` when no PR exists.
-  Other `gh` failures print a warning before using the same fallback. The review
-  fails if no merge base resolves (an unrelated branch, or a shallow clone). When
+  A missing `gh` is the same silent fallback; a `gh` that ran and failed prints a
+  warning before using it. The review fails if no merge base resolves (an unrelated
+  branch, or a shallow clone). When
   the base is a local branch whose remote-tracking ref would give HEAD a different
   merge base (a local `main` that lags `origin/main`, say), the review warns on stderr that
   the changeset may include upstream commits and suggests reviewing against
@@ -157,7 +160,7 @@ passes still carry on the finishing full run. The named reviewer itself
 executes fresh there: a partial run is never sealed, so a repository reviewer's
 pass from the partial cannot carry.
 
-The CI workflow passes `--repo`/`--pr` to select the PR and give reviewers its stated intent and discussion. Locally, `gh pr view` detects the current branch's PR without those flags and uses your existing `gh` authentication. If you pass `--repo`/`--pr`, Bastion also accepts the Actions REST client as a compatibility fallback. If neither source is available, it warns and continues without PR context. With `GITHUB_TOKEN` available, it reads the first 100 conversation comments and the first 100 review comments. Those discussion requests are best effort and do not paginate. With no detected PR, intent comes from your branch's commit messages (`base..HEAD`). Each reviewer's prior findings come from the run store.
+The CI workflow passes `--repo`/`--pr` to select the PR and give reviewers its stated intent and discussion. Locally, `gh pr view` detects the current branch's PR without those flags and uses your existing `gh` authentication; `gh api` then reads the same first 100 conversation comments and first 100 review comments. If you pass `--repo`/`--pr`, Bastion also accepts the Actions REST client as a compatibility fallback. If `gh` cannot run and no REST token is available, the review continues without PR context. If `gh` runs and fails, Bastion warns and continues the same way. Those discussion requests are best effort and do not paginate. With no detected PR, intent comes from your branch's commit messages (`base..HEAD`). Each reviewer's prior findings come from the run store.
 
 ### Exit codes
 
@@ -483,9 +486,9 @@ laid out side by side in the
 chapter. The local `run.started`, `reviewer.started`, and `reviewer.finished` progress
 events have no separate GitHub surface. A green local loop predicts a green PR when
 both runs see the same reviewers and context. The two surfaces run the repository's
-reviewers and aggregation, and CI adds PR discussion that a default local run does
-not, so a reviewer that weighs that context can decide
-differently. A purely local run can also include your personal user-level reviewers
+reviewers and aggregation. A local run that cannot see the pull request (no PR, or
+`gh` missing or failed) omits that discussion, so a reviewer that weighs it can
+decide differently. A purely local run can also include your personal user-level reviewers
 with `--with-user-reviewers`;
 their `run.started` and terminal `reviewer.resolved` or `reviewer.skipped` events are
 local-only and never become checks or comments (see

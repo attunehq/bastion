@@ -7,7 +7,9 @@
 //! - [`codeowners`] generates the governance block that protects the reviewer
 //!   policy paths (pure text generation, no network).
 //! - [`context`] detects a pull request with `gh`, supplies its direct base for
-//!   automatic changeset selection, and gathers reviewer context;
+//!   automatic changeset selection, and gathers reviewer context (identity
+//!   through `gh pr view`, discussion through `gh api`, with the REST seam as
+//!   a compatibility fallback);
 //! - [`report`] posts a finished run back to a pull request as a sticky comment
 //!   and per-reviewer check runs, over the REST seam in [`client`].
 //!

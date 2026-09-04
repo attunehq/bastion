@@ -42,8 +42,9 @@ compiler or a test cannot. The whole system follows from five principles:
    special; it is just another reviewer whose single concern is that property.
 2. **Reviewers run in the author's own loop, not only in CI.** The repository's
    reviewers run locally (fast, pre-PR) and in CI (authoritative), so CI usually
-   confirms a green local loop. The two can differ when CI adds PR discussion that
-   a default local run lacks, and a purely local run can also include your personal
+   confirms a green local loop. The two can differ when a local run cannot see the
+   pull request (no PR, or `gh` is missing or failed), so reviewers miss that
+   discussion, and when a purely local run includes your personal
    user-level reviewers with
    `--with-user-reviewers`, which CI never runs (see
    [Authoring reviewers](./authoring-reviewers.md#user-level-reviewers)).

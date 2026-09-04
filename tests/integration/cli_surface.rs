@@ -45,6 +45,8 @@ fn stacked_pull_requests_are_reviewed_as_independent_changesets() {
             std::fs::write(repo.path().join("stack/c.txt"), "C\nlocal edit\n").unwrap();
         }
         let pull = serde_json::json!({
+            "number": 1,
+            "title": "stack layer",
             "body": null,
             "author": { "login": "ada" },
             // The remote PR head may lag local, unpushed work. It supplies
@@ -109,6 +111,19 @@ fn stacked_pull_requests_are_reviewed_as_independent_changesets() {
     assert_eq!(failed_detection.started_changeset(), (2, "main"));
     assert!(failed_detection.stderr.contains("using `main`"));
 
+    // A missing `gh` is silent: same fallback as no detected PR, no warning.
+    let missing_bin = fake.with_file_name("no-such-gh-binary");
+    let missing_gh = repo.review_auto(fake, &[("BASTION_GH_BIN", missing_bin.to_str().unwrap())]);
+    assert!(missing_gh.exited_zero(), "stderr:\n{}", missing_gh.stderr);
+    assert_eq!(missing_gh.started_changeset(), (2, "main"));
+    assert!(
+        !missing_gh
+            .stderr
+            .contains("could not detect a pull request"),
+        "a missing gh must not warn, stderr:\n{}",
+        missing_gh.stderr
+    );
+
     // Explicit PR selection has the same fallback when neither GitHub source works.
     let output = repo.run(
         fake,
@@ -130,6 +145,90 @@ fn stacked_pull_requests_are_reviewed_as_independent_changesets() {
     assert!(explicit_failed.exited_zero());
     assert_eq!(explicit_failed.started_changeset(), (2, "main"));
     assert!(explicit_failed.stderr.contains("without GitHub context"));
+}
+
+/// A locally detected PR feeds its discussion into the reviewer prompt, matching
+/// the CI `--repo`/`--pr` path.
+#[test]
+fn local_detection_gathers_pull_request_discussion() {
+    let Some(fake) = tooling() else { return };
+
+    let repo = TestRepo::new(&registry(&[Reviewer::new("ctx", "codex", "gate")
+        .behavior("pass")
+        .env("FAKE_EXPECT_PROMPT_CONTAINS", "grace already approved this")]));
+    repo.checkout_new_branch("feature");
+
+    let pull = serde_json::json!({
+        "number": 7,
+        "title": "stack layer",
+        "body": "Deliberate schema change.",
+        "author": { "login": "ada" },
+        "headRefOid": "remote-head",
+        "baseRefName": "main",
+        "baseRefOid": repo.revision("main"),
+    })
+    .to_string();
+    let comments = serde_json::json!([
+        {
+            "id": 1,
+            "body": "grace already approved this",
+            "user": { "login": "grace" },
+            "author_association": "OWNER"
+        }
+    ])
+    .to_string();
+
+    let run = repo.review_auto(
+        fake,
+        &[
+            ("BASTION_GH_BIN", fake.to_str().unwrap()),
+            ("FAKE_GH_PR_JSON", &pull),
+            ("FAKE_GH_ISSUE_COMMENTS_JSON", &comments),
+        ],
+    );
+    assert!(run.exited_zero(), "stderr:\n{}", run.stderr);
+    assert_eq!(run.resolved("ctx").0, Decision::Pass);
+}
+
+/// A discussion fetch that fails after a successful PR lookup keeps the detected
+/// base and intent, warns, and continues without comments.
+#[test]
+fn local_discussion_failure_warns_and_keeps_the_detected_pr() {
+    let Some(fake) = tooling() else { return };
+
+    let repo = TestRepo::new(&registry(&[Reviewer::new("ctx", "codex", "gate")
+        .behavior("pass")
+        .env("FAKE_EXPECT_PROMPT_CONTAINS", "Deliberate schema change.")]));
+    repo.checkout_new_branch("feature");
+
+    let pull = serde_json::json!({
+        "number": 7,
+        "title": "stack layer",
+        "body": "Deliberate schema change.",
+        "author": { "login": "ada" },
+        "headRefOid": "remote-head",
+        "baseRefName": "main",
+        "baseRefOid": repo.revision("main"),
+    })
+    .to_string();
+
+    let run = repo.review_auto(
+        fake,
+        &[
+            ("BASTION_GH_BIN", fake.to_str().unwrap()),
+            ("FAKE_GH_PR_JSON", &pull),
+            ("FAKE_GH_API_FAILURE", "1"),
+        ],
+    );
+    assert!(run.exited_zero(), "stderr:\n{}", run.stderr);
+    assert_eq!(run.resolved("ctx").0, Decision::Pass);
+    let base = repo.revision("main");
+    assert_eq!(run.started_changeset().1, base.as_str());
+    assert!(
+        run.stderr.contains("without GitHub discussion"),
+        "stderr:\n{}",
+        run.stderr
+    );
 }
 
 /// The default (human) output format renders a readable report and still maps a
