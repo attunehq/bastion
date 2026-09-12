@@ -1,5 +1,6 @@
-import { defineCollection, z } from "astro:content";
+import { defineCollection } from "astro:content";
 import { glob } from "astro/loaders";
+import { z } from "astro/zod";
 
 // The user guide is single-sourced from the repo-root `docs/user-guide`
 // markdown (the same files people read on GitHub and that AGENTS.md treats as a
