@@ -22,7 +22,7 @@ work on Bastion itself rather than use it, the contributor and design docs live 
 [Bastion repository](https://github.com/attunehq/bastion).
 
 > **Reading this as an agent?** The whole guide is also served as a single plain-text
-> file at [`bastion.attune.inc/llms-full.txt`](https://bastion.attune.inc/llms-full.txt),
+> file at [`bastion.tunas.dev/llms-full.txt`](https://bastion.tunas.dev/llms-full.txt),
 > so you can ingest every chapter in one fetch instead of crawling pages.
 
 ## Read in order
