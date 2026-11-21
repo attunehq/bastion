@@ -110,9 +110,10 @@ Every PR the run opens follows the local Bastion loop in `AGENTS.md`: review
 against `origin/main`, attest the green run, push `refs/notes/bastion`. A
 changeset that triggers no reviewers produces an empty, unsealed run, so there is
 nothing to attest; skip the attest and push for it, since CI's gate costs nothing
-on the same changeset. Merge
-through the merge queue (squash) once the required checks are green on the final
-head. Dependabot PRs that are not superseded merge the same way when green.
+on the same changeset. Squash-merge once the required checks are green on the
+final head; there is no merge queue, so a break between two PRs that were each
+green alone shows up as a red `main`, which step 2 of the next run catches.
+Dependabot PRs that are not superseded merge the same way when green.
 
 If a PR cannot be made green after three honest attempts, stop, leave it open as a
 draft, and escalate with what was tried.
