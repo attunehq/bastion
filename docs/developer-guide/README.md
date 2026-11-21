@@ -31,6 +31,9 @@ rather than fabricate a pass, and gates must fail closed on it.
    parse-don't-validate at boundaries, newtypes over stringly-typed data, the
    clippy lint groups, fail-closed discipline, and the testing approach (real
    fixtures, not mocks).
+5. **[Maintenance](./maintenance.md)**: the daily upkeep runbook: dependency and
+   toolchain upgrades, issue triage, and which changes go to the maintainer
+   instead of merging.
 
 ### Design references
 
