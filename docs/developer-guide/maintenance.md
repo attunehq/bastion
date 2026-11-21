@@ -1,7 +1,7 @@
 # Maintenance
 
-> The runbook for routine upkeep: dependencies, the Rust toolchain, and incoming
-> issues. An agent runs it daily; a human can run it by hand the same way.
+> The runbook for routine upkeep: dependencies, the Rust toolchain, incoming
+> issues, and maintenance releases. An agent runs it daily; a human can run it by hand the same way.
 
 Routine maintenance is delegated to a scheduled coding agent. It runs once a day on
 the maintainer's machine, works from this file, and merges what it can verify. It
@@ -86,8 +86,8 @@ targets were reasoned about.
 ### 4. Issues
 
 Triage open issues that have no linked PR, no `maintainer-decision` label, and no
-comment from the maintainer's account since the author's last comment. GitHub's state is the record of what has been handled, so no
-separate ledger is kept.
+comment from the maintainer's account since the author's last comment. GitHub's
+state is the record of what has been handled, so no separate ledger is kept.
 
 - **Bugs.** Reproduce with a failing test first, fix the root cause, and open a PR
   that says `Fixes #N`.
@@ -110,7 +110,11 @@ Every PR the run opens follows the local Bastion loop in `AGENTS.md`: review
 against `origin/main`, attest the green run, push `refs/notes/bastion`. A
 changeset that triggers no reviewers produces an empty, unsealed run, so there is
 nothing to attest; skip the attest and push for it, since CI's gate costs nothing
-on the same changeset. Squash-merge once the required checks are green on the
+on the same changeset. Every reviewer in `.bastion.yaml` pins `backend: muse`,
+billed to the repository's key in CI; where the `muse` CLI is not installed, a
+triggered reviewer blocks locally with "failed to spawn 'muse'". That is a missing
+backend, not a verdict: skip the local loop and let CI's gate run the review, which
+still spends the tokens once. Squash-merge once the required checks are green on the
 final head; there is no merge queue, so a break between two PRs that were each
 green alone shows up as a red `main`, which step 2 of the next run catches.
 Dependabot PRs that are not superseded merge the same way when green.
@@ -118,11 +122,57 @@ Dependabot PRs that are not superseded merge the same way when green.
 If a PR cannot be made green after three honest attempts, stop, leave it open as a
 draft, and escalate with what was tried.
 
-### 6. Report
+### 6. Release
+
+Merged work reaches users only through a release, so the run cuts maintenance
+releases itself. A release has a cost every consumer pays: each one generates a
+new seal secret, so every carried or attested run sealed by the previous release
+stops verifying and re-executes its reviewers once, and consumers' CI adopts the
+new engine immediately (`action.yml` installs the newest stable release in the
+pinned major). Hence the batching below, and the release candidate before every
+stable tag.
+
+**When.** Only for binary-affecting changes since the last stable tag: `src/`,
+`Cargo.toml`, `Cargo.lock`, `build.rs`, `action.yml`, `scripts/`, or `skills/`.
+Docs, site, and CI-only changes never trigger a release.
+
+- **Security, same day.** A RUSTSEC advisory fixed on `main` since the last stable
+  tag, in a crate compiled into the release binary (`cargo tree -e normal
+  --target all -i <crate>` finds it). Check with `cargo audit` against the last
+  tag's lockfile, as in step 2.
+- **Everything else, weekly.** Monday's run releases whatever binary-affecting
+  change has accumulated.
+
+**Version.** A minor bump when any PR merged since the last stable tag adds a
+user-visible capability (a command, flag, config key, or action input); otherwise
+a patch. A major bump means a breaking change, which was escalated before it
+merged, so the run never cuts a major.
+
+**Procedure.** `main` must be green (step 2) first. Then:
+
+1. Tag the release candidate `vX.Y.Z-rc.N` on `origin/main` and push the tag. Wait
+   for the `Release` workflow to succeed. A prerelease does not move the floating
+   major tag or `releases/latest`, so no consumer adopts it.
+2. Verify the candidate: the release is marked prerelease and carries the seven
+   platform archives plus `checksums.txt`; the archive for this machine matches its
+   checksum; the extracted binary's `--version` prints the candidate tag; and in a
+   checkout of the tagged commit, `bastion validate`, `bastion skills check`, and a
+   `bastion review --base origin/main` over an empty changeset all succeed.
+3. Tag `vX.Y.Z` on the same commit as the candidate (the verified artifacts and
+   the shipped ones come from one source) and push it. Wait for the workflow, then
+   confirm `releases/latest` redirects to the new tag, the floating major tag
+   (`v1`) points at the release commit, the release notes list the PRs since the
+   previous stable tag, and `bastion update` installs it locally.
+
+Any failure stops the release and goes to the maintainer. Never delete, move, or
+re-push a published tag or edit a published release's assets: a bad candidate is
+superseded by `-rc.N+1`, and a bad stable release by a fix-forward patch release.
+
+### 7. Report
 
 End the run with a short report in the scheduled task's thread: what merged (PR and
-SHA), what is open and why, what was escalated, and any advisory left unresolved.
-A day with nothing to do is one line.
+SHA), what is open and why, what was escalated, any advisory left unresolved, and
+any release cut (with its link). A day with nothing to do is one line.
 
 ## Escalate instead of merging
 
@@ -151,9 +201,8 @@ Escalate when the change:
   `SECURITY.md` routes reports privately.
 - **Is an outside contributor's PR.** Review it, but merging someone else's
   work is the maintainer's call.
-- **Would cut a release.** A tag publishes binaries publicly and rotates the seal
-  secret. Recommend a release in the report when merged work warrants one (a
-  security fix in a dependency of the binary, a user-facing bug fix).
+- **Would cut a major release**, or a release outside the triggers in
+  [step 6](#6-release).
 
 ## Running it on a schedule
 
