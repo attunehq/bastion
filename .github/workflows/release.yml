@@ -105,14 +105,23 @@ jobs:
     runs-on: ${{ matrix.runner }}
     env:
       # Pin the binary's reported `--version` to the release tag so it is correct
-      # regardless of clone depth. build.rs honors this override. cargo-cross runs
-      # the build directly on the runner (no container), so this env is inherited
-      # by every target without extra plumbing.
+      # regardless of clone depth. build.rs honors this override. Every target
+      # builds directly on the runner (no container), so this env is inherited by
+      # every target without extra plumbing.
       BASTION_VERSION: ${{ needs.prepare.outputs.tag }}
       # Share one sealing secret across the whole matrix so every platform binary of
       # this release seals and verifies run attestations identically. build.rs
       # honors this override; see docs/developer-guide/attestation.md.
       BASTION_SEAL_SECRET: ${{ needs.prepare.outputs.seal_secret }}
+    # Every target builds with plain `cargo build` and toolchains from the runner
+    # image or Ubuntu's archive. No third-party toolchain download: the release
+    # once cross-compiled through cargo-cross, whose prebuilt toolchains lived on
+    # a personal GitHub account that later disappeared, failing every cross build
+    # and leaving the download URL open to whoever claims the name next.
+    #
+    # The only C in the build is aws-lc (rustls' crypto provider), so a target
+    # needs a C compiler for it and nothing else: `apt` installs one when the
+    # runner lacks it, and `cc` names it through the target's CC_<target> env.
     strategy:
       fail-fast: false
       matrix:
@@ -120,13 +129,11 @@ jobs:
           # macOS (both architectures cross-compile natively on an Apple runner).
           - target: x86_64-apple-darwin
             runner: macos-latest
-            cross: false
           - target: aarch64-apple-darwin
             runner: macos-latest
-            cross: false
 
-          # Linux glibc. Built on the oldest supported hosted runner (Ubuntu
-          # 22.04, glibc 2.35) rather than ubuntu-latest (24.04, glibc 2.39) so
+          # Linux glibc. Built on the oldest supported hosted runners (Ubuntu
+          # 22.04, glibc 2.35) rather than the latest (24.04, glibc 2.39) so
           # the binary's glibc floor is low enough to run on current LTS distros
           # and CI images. A binary links against the build host's glibc, so
           # building on 24.04 would demand GLIBC_2.39 and fail on anything older.
@@ -134,40 +141,40 @@ jobs:
           # build, which has no glibc dependency at all.
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-22.04
-            cross: false
           - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-22.04
-            cross: true
+            runner: ubuntu-22.04-arm
 
-          # Linux musl (static).
+          # Linux musl (static), each on a runner of its own architecture with
+          # Ubuntu's musl-gcc wrapper.
           - target: x86_64-unknown-linux-musl
             runner: ubuntu-latest
-            cross: true
+            apt: musl-tools
+            cc: musl-gcc
           - target: aarch64-unknown-linux-musl
-            runner: ubuntu-latest
-            cross: true
+            runner: ubuntu-24.04-arm
+            apt: musl-tools
+            cc: musl-gcc
 
-          # Windows via cargo-cross (simpler than a native MinGW setup).
+          # Windows, cross-compiled from Linux with Ubuntu's MinGW-w64 (the
+          # windows-gnu target's default C compiler and linker). NASM assembles
+          # aws-lc's x86_64 Windows assembly.
           - target: x86_64-pc-windows-gnu
             runner: ubuntu-latest
-            cross: true
+            apt: gcc-mingw-w64-x86-64 nasm
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install Rust toolchain
-        run: |
-          rustup toolchain install stable
-          rustup target add ${{ matrix.target }}
-
-      # cargo-cross cross-compiles by downloading the target toolchain and linker
-      # onto the runner -- no Docker, unlike cross-rs/cross. Bastion is pure Rust
-      # with no C/system dependencies, so a host-side toolchain is all it needs.
-      - name: Install cargo-cross
-        if: matrix.cross
-        uses: taiki-e/install-action@v2.90.6
+      # The action installs rustup when the image lacks it (the Arm runner images
+      # are not guaranteed to ship it), then the stable toolchain and the target.
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          tool: cargo-cross
-          checksum: true
+          targets: ${{ matrix.target }}
+
+      - name: Install the target's C toolchain
+        if: matrix.apt
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ matrix.apt }}
 
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
@@ -180,13 +187,16 @@ jobs:
           # against glibc 2.39 cannot exec on a 2.35 host, which fails the build.
           shared-key: release-${{ matrix.target }}-${{ matrix.runner }}
 
-      - name: Build (cargo-cross)
-        if: matrix.cross
-        run: cargo cross build --target ${{ matrix.target }} --package bastion --release --locked
-
-      - name: Build (native)
-        if: ${{ !matrix.cross }}
-        run: cargo build --target ${{ matrix.target }} --package bastion --release --locked
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ matrix.cc }}" ]; then
+            export "CC_${TARGET//-/_}=${{ matrix.cc }}"
+          fi
+          cargo build --target "$TARGET" --package bastion --release --locked
+        env:
+          TARGET: ${{ matrix.target }}
 
       - name: Package binary
         id: package
