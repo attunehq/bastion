@@ -64,8 +64,8 @@ To cut a release:
    the tag is the source of truth for the released version.
 
    ```sh
-   git tag v0.2.0
-   git push origin v0.2.0
+   git tag v1.2.0
+   git push origin v1.2.0
    ```
 
 3. The [release workflow](.github/workflows/release.yml) generates one run-seal
@@ -81,8 +81,8 @@ To cut a release:
    draft (so its notes and assets are complete before it is visible), then flipped
    to published in a final step.
 4. After publishing a stable release, the workflow force-advances the floating
-   major tag (`v0` for a `v0.x.y` release) to the tagged commit. That tag is what
-   GitHub Action consumers pin (`uses: attunehq/bastion@v0`), and the action
+   major tag (`v1` for a `v1.x.y` release) to the tagged commit. That tag is what
+   GitHub Action consumers pin (`uses: attunehq/bastion@v1`), and the action
    resolves it to the newest stable release in that major, so both the action
    code and the engine track the release with no consumer-side bump. Prerelease
    tags do not move it. Never push a bare major tag by hand; the workflow's
@@ -97,5 +97,5 @@ To cut a release:
 
 Run the workflow via `workflow_dispatch` with `dry_run: true` to build and package
 the whole matrix without creating a release. A tag with a pre-release suffix
-(`v0.2.0-rc.1`) is published as a prerelease and does not move the floating major
+(`v1.2.0-rc.1`) is published as a prerelease and does not move the floating major
 tag. macOS binaries are unsigned.

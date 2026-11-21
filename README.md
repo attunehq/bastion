@@ -105,7 +105,7 @@ merge gate. You check out the PR head and authenticate your backend CLI, and
 the action does the rest:
 
 ```yaml
-- uses: attunehq/bastion@v0
+- uses: attunehq/bastion@v1
 ```
 
 The [continuous integration chapter](docs/user-guide/continuous-integration.md)
