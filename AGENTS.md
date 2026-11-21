@@ -77,7 +77,7 @@ Guidance that follows, so we stop re-deriving it:
     triage) and the list of changes it escalates instead of merging.
 - `.bastion.yaml`: the example reviewer registry at the repository root (the
   `.bastion.yml` spelling is also honored); update it when the schema changes.
-- `action.yml`: the composite GitHub Action consumers pin (`attunehq/bastion@v0`).
+- `action.yml`: the composite GitHub Action consumers pin (`attunehq/bastion@v1`).
   Its inputs and outputs are a downstream surface like the CLI; the consumer-facing
   reference is `docs/user-guide/continuous-integration.md`. Sequencing lesson for
   any future pinnable artifact: snapshot discipline (docs describe only the
@@ -228,7 +228,7 @@ Bastion ships as a binary on GitHub Releases (never a crates.io publish). To cut
 one, push a `vX.Y.Z` tag; a `-rc.N` suffix ships as a prerelease. Do not bump the
 `Cargo.toml` version: `0.0.0` is a deliberate placeholder, and the released binary's
 `--version` comes from the tag. A stable release also auto-advances the floating
-major tag (`v0`) that GitHub Action consumers pin; never push a bare major tag by
+major tag (`v1`) that GitHub Action consumers pin; never push a bare major tag by
 hand. There is no self-review pin to bump; the `.github/workflows/bastion.yml`
 gate always runs the latest published release. The full runbook (the
 seal-secret-per-release flow, the build matrix, version derivation) is in

@@ -36,9 +36,9 @@ inputs:
     description: >-
       The bastion release to install. Defaults to the release named by this
       action's own ref: `@vX.Y.Z` installs that exact engine, a floating major
-      like `@v0` installs the newest stable release in that major, and any
+      like `@v1` installs the newest stable release in that major, and any
       other ref (a branch, a commit SHA, `uses: ./`) installs the latest
-      stable release. Pass an exact tag (for example `v0.3.0`) or `latest` to
+      stable release. Pass an exact tag (for example `v1.1.5`) or `latest` to
       override.
     required: false
     default: ""
@@ -87,7 +87,7 @@ inputs:
 
 outputs:
   version:
-    description: The engine release the action installed (for example v0.3.0).
+    description: The engine release the action installed (for example v1.1.5).
     value: ${{ steps.install.outputs.version }}
   exit-code:
     description: >-
@@ -136,7 +136,7 @@ runs:
             want="$ACTION_REF"
           elif [[ "$ACTION_REF" =~ ^v[0-9]+$ ]]; then
             # A floating major tag: the newest stable release in that major, so
-            # `@v0` never silently adopts a release from the next major.
+            # `@v1` never silently adopts a release from the next major.
             want="$(gh release list --repo "$repo" --exclude-drafts --exclude-pre-releases \
               --limit 100 --json tagName \
               --jq "[.[] | select(.tagName | startswith(\"$ACTION_REF.\"))][0].tagName // empty")"

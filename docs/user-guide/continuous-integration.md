@@ -99,7 +99,7 @@ The per-reviewer checks stay informational; `bastion` is the gate.
 ## The workflow
 
 The packaged adapter is the **Bastion GitHub Action**: the `action.yml` at the
-root of the Bastion repository, pinned as `attunehq/bastion@v0`. Its contract
+root of the Bastion repository, pinned as `attunehq/bastion@v1`. Its contract
 mirrors the local loop. You own the checkout and the backend credential, exactly
 as a contributor owns their clone and their `codex login`; the action owns the
 engine and the review. A complete workflow:
@@ -138,14 +138,14 @@ jobs:
       # billing" below; drop it in here. Then stand up anything your reviewers
       # consume (a preview env, a database).
 
-      - uses: attunehq/bastion@v0
+      - uses: attunehq/bastion@v1
 ```
 
 The action then, in order:
 
 1. **Installs a published `bastion` release** (checksum-verified, via the same
-   installer as a local install). The action ref picks the engine: `@v0.3.0`
-   installs exactly that release, a floating `@v0` installs the newest stable
+   installer as a local install). The action ref picks the engine: `@v1.1.5`
+   installs exactly that release, a floating `@v1` installs the newest stable
    release in that major, and any other ref installs the latest stable release.
    The `version` input overrides both, which is also how a SHA-pinned action
    pins its engine.
