@@ -71,7 +71,7 @@ jobs:
         if: steps.inputs.outputs.changed == 'true'
         with:
           # Match Deploy site: the current LTS line Astro supports.
-          node-version: 22
+          node-version: 26
           cache: npm
           cache-dependency-path: site/package-lock.json
 

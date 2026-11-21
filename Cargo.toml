@@ -10,24 +10,24 @@ keywords = ["code-review", "agents", "ci", "llm", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
-clap = { version = "4.6.1", features = ["derive", "env"] }
+clap = { version = "4.6.9", features = ["derive", "env"] }
 color-eyre = "0.6.5"
 directories = "6.0.0"
 # `bastion update` unpacks the release `.tar.gz`. flate2's default `miniz_oxide`
 # backend is pure Rust (no zlib/C), so the updater adds no system dependency and
 # keeps every cross target building as cleanly as the rest of Bastion does.
 flate2 = "1"
-globset = "0.4.18"
+globset = "0.4.21"
 hex = "0.4.3"
 hmac = "0.13.0"
-humantime = "2.3.0"
+humantime = "2.4.0"
 # The GitHub adapter posts the PR comment and per-reviewer check runs over the
 # REST API. reqwest's default TLS is rustls (its `rustls-platform-verifier`
 # checks certs against the OS trust store), which needs no OpenSSL and keeps the
 # musl static targets building cleanly. `http2` is dropped: the adapter makes a
 # handful of REST calls and GitHub serves them fine over HTTP/1.1, so the `h2`
 # stack is dead weight in the binary.
-reqwest = { version = "0.13.4", default-features = false, features = [
+reqwest = { version = "0.13.5", default-features = false, features = [
     "json",
     "system-proxy",
     "default-tls",
@@ -42,14 +42,14 @@ self-replace = "1"
 # a clean release, so the updater parses with semver and treats anything else as a
 # development build to reinstall.
 semver = "1"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.150"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 serde_yaml_ng = "0.10.0"
-sha2 = "0.11.0"
+sha2 = "0.11.1"
 # `bastion update` unpacks the `bastion` binary out of the release tarball's
 # `bastion-<target>/` directory. Pure Rust, so it adds no system dependency.
 tar = "0.4"
-tokio = { version = "1.52.3", features = [
+tokio = { version = "1.54.1", features = [
     "macros",
     "process",
     "rt",
@@ -63,7 +63,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 [dev-dependencies]
 # `start_paused` in `#[tokio::test]` (virtual time for the timeout tests) needs
 # tokio's test-util feature, which is only required by the test build.
-tokio = { version = "1.52.3", features = ["test-util"] }
+tokio = { version = "1.54.1", features = ["test-util"] }
 
 [build-dependencies]
 # Generates the per-build sealing secret in build.rs when BASTION_SEAL_SECRET is
