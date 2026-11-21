@@ -249,12 +249,21 @@ jobs:
 
       # Create the release as a draft first so GitHub generates its notes and
       # attaches every asset to a fully-formed release before it is visible.
+      #
+      # Notes start from the newest stable release, not whatever release came
+      # last: a stable tag is cut after its -rc candidates (see
+      # docs/developer-guide/maintenance.md), and notes generated from the
+      # candidate would list nothing. A candidate's notes cover the same range.
       - name: Create draft GitHub release
         if: ${{ !inputs.dry_run }}
         run: |
+          set -euo pipefail
+          start="$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts \
+            --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName // empty')"
           gh release create "${{ needs.prepare.outputs.tag }}" \
             --draft \
             --generate-notes \
+            ${start:+--notes-start-tag "$start"} \
             ${{ needs.prepare.outputs.prerelease == 'true' && '--prerelease' || '--latest' }} \
             --title "${{ needs.prepare.outputs.tag }}" \
             artifacts/*.tar.gz \
