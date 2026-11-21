@@ -38,9 +38,19 @@ secret is per release; see `AGENTS.md`).
 
 ### 2. Main is green
 
-Check the latest CI run on `main` and the checks on open PRs. A red `main` (a new
-stable Rust lint, a fresh RUSTSEC advisory failing `Cargo audit`, an expired
-action) blocks every PR, so fixing it comes first, as its own PR.
+Check the latest CI run on `main`, the latest scheduled `Security` run, and the
+checks on open PRs. Push runs fire only when something merges, so a quiet `main`
+can turn red without a push run showing it; a RUSTSEC advisory published since the
+last merge shows up only in the weekly scheduled run, or locally with
+`git show origin/main:Cargo.lock > <tmp>/Cargo.lock && cargo audit -f <tmp>/Cargo.lock`.
+
+A red `main` (a new stable Rust lint, a fresh RUSTSEC advisory failing
+`Cargo audit`, an expired action) blocks every PR, so fixing it comes first, as its
+own PR. The exception is a fix that is only the dependency bump step 3 makes
+anyway (most advisories): let the consolidated PR carry it, say so at the top of
+its description, and land it before anything else. Once the fix merges, update
+the branch of each open PR whose checks failed on it, so they re-run against the
+fixed `main`.
 
 ### 3. Dependencies
 
@@ -97,7 +107,10 @@ or what information would unblock it. Declining a request is a maintainer decisi
 ### 5. Review and merge
 
 Every PR the run opens follows the local Bastion loop in `AGENTS.md`: review
-against `origin/main`, attest the green run, push `refs/notes/bastion`. Merge
+against `origin/main`, attest the green run, push `refs/notes/bastion`. A
+changeset that triggers no reviewers produces an empty, unsealed run, so there is
+nothing to attest; skip the attest and push for it, since CI's gate costs nothing
+on the same changeset. Merge
 through the merge queue (squash) once the required checks are green on the final
 head. Dependabot PRs that are not superseded merge the same way when green.
 
