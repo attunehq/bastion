@@ -72,6 +72,9 @@ Guidance that follows, so we stop re-deriving it:
   - `docs/developer-guide/attestation.md`: the design for signed local runs that
     CI verifies and replays instead of re-executing reviewers. Implemented: the
     seal in `src/seal.rs`, `bastion attest` and the CI planner in `src/attest/`.
+  - `docs/developer-guide/maintenance.md`: the daily maintenance runbook a
+    scheduled agent follows (aggressive dependency and Rust upgrades, issue
+    triage) and the list of changes it escalates instead of merging.
 - `.bastion.yaml`: the example reviewer registry at the repository root (the
   `.bastion.yml` spelling is also honored); update it when the schema changes.
 - `action.yml`: the composite GitHub Action consumers pin (`attunehq/bastion@v0`).
