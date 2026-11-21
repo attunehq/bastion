@@ -110,7 +110,11 @@ Every PR the run opens follows the local Bastion loop in `AGENTS.md`: review
 against `origin/main`, attest the green run, push `refs/notes/bastion`. A
 changeset that triggers no reviewers produces an empty, unsealed run, so there is
 nothing to attest; skip the attest and push for it, since CI's gate costs nothing
-on the same changeset. Squash-merge once the required checks are green on the
+on the same changeset. Every reviewer in `.bastion.yaml` pins `backend: muse`,
+billed to the repository's key in CI; where the `muse` CLI is not installed, a
+triggered reviewer blocks locally with "failed to spawn 'muse'". That is a missing
+backend, not a verdict: skip the local loop and let CI's gate run the review, which
+still spends the tokens once. Squash-merge once the required checks are green on the
 final head; there is no merge queue, so a break between two PRs that were each
 green alone shows up as a red `main`, which step 2 of the next run catches.
 Dependabot PRs that are not superseded merge the same way when green.
