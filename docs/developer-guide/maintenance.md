@@ -67,7 +67,9 @@ alone.
   API changes. Keep the comments in `Cargo.toml` true: several record why a crate
   or feature set was chosen (pure Rust, no system libraries, musl-friendly).
 - **Site (`site/`).** Upgrade to the latest majors (`npx npm-check-updates -u`),
-  `npm install`, `npm audit fix`. The site gate runs `npm ci`, which fails on peer
+  `npm install`, then `npm update` for the lockfile (the counterpart of
+  `cargo update`: without it, transitive packages stay pinned until Dependabot
+  touches them), then `npm audit fix`. The site gate runs `npm ci`, which fails on peer
   conflicts, so hold back a package whose latest release conflicts with a peer and
   say so in the PR.
 - **GitHub Actions.** Bump pinned versions and move floating tags to the newest
