@@ -17,7 +17,7 @@ directories = "6.0.0"
 # backend is pure Rust (no zlib/C), so the updater adds no system dependency and
 # keeps every cross target building as cleanly as the rest of Bastion does.
 flate2 = "1"
-globset = "0.4.21"
+globset = "0.4.22"
 hex = "0.4.3"
 hmac = "0.13.0"
 humantime = "2.4.0"
