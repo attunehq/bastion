@@ -45,7 +45,7 @@ semver = "1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 serde_yaml_ng = "0.10.0"
-sha2 = "0.11.1"
+sha2 = "0.11.2"
 # `bastion update` unpacks the `bastion` binary out of the release tarball's
 # `bastion-<target>/` directory. Pure Rust, so it adds no system dependency.
 tar = "0.4"
